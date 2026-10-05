@@ -49,6 +49,8 @@ jobs:
             _build/baseline/cargo.log
             _build/smoke/smoke.json
             _build/smoke/editor.log
+            _build/smoke/data/logs/Zed.log
+            _build/smoke/data/logs/Zed.log.old
             _build/smoke/editor.png
             _build/smoke/mzed-baseline-fixture.txt
           retention-days: 14
