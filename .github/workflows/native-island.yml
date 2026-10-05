@@ -1,0 +1,74 @@
+name: Same-window native island
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native-island:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 110
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: gpui-mbt/gpui.mbt
+          ref: bf965aebbeb1dfdfed26373d4a7a58bb51a5ad01
+          path: _build/gpui
+      - uses: hustcer/setup-moonbit@1522f9aef02a8ca0187dfc00a41f5dd6b16750f7
+        with:
+          version: 0.10.14+7d59c7ec9
+          core-version: 0.10.14+7d59c7ec9
+      - name: Acquire immutable upstream source in a separate derived checkout
+        run: |
+          python3 scripts/baseline.py source --source _build/zed-island
+          python3 scripts/prepare_island.py --source _build/zed-island
+      - name: Install reviewed Linux build and software-rendering dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc g++ libasound2-dev libfontconfig-dev libgit2-dev libglib2.0-dev libssl-dev libva-dev libvulkan1 libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev libzstd-dev make cmake clang lld llvm jq gettext-base elfutils libsqlite3-dev musl-tools musl-dev libstdc++-14-dev pipewire xdg-desktop-portal xvfb xauth xdotool x11-xserver-utils x11-utils imagemagick mesa-vulkan-drivers vulkan-tools openbox xcompmgr tesseract-ocr
+          rustup toolchain install 1.98.1 --profile minimal
+      - name: Native copied-scene ABI and bounded lifecycle regressions
+        env:
+          RUSTUP_TOOLCHAIN: 1.98.1
+        run: |
+          set -o pipefail
+          for mode in normal ubsan asan_ubsan; do
+            python3 scripts/build_native.py --source _build/gpui --output "_build/native-$mode" --mode "$mode" 2>&1 | tee "_build/native-$mode-build.log"
+            bash scripts/test_native.sh "_build/native-$mode" "$mode" 2>&1 | tee "_build/native-$mode-test.log"
+          done
+      - name: Build intentional derived editor with pinned MoonBit scene image
+        env:
+          RUSTUP_TOOLCHAIN: 1.98.1
+        run: python3 scripts/build_island.py --source _build/zed-island --native _build/native-normal --output _build/island-build
+      - name: Same-window scene, real pointer lifecycle, fallback edit/save at 1x and 2x
+        env:
+          LIBGL_ALWAYS_SOFTWARE: '1'
+        run: |
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          chmod 700 "$XDG_RUNTIME_DIR"
+          GPUI_X11_SCALE_FACTOR=1 xvfb-run -a -s '-screen 0 1280x800x24' dbus-run-session -- bash scripts/managed_island_smoke.sh
+          GPUI_X11_SCALE_FACTOR=2 xvfb-run -a -s '-screen 0 2560x1600x24' dbus-run-session -- bash scripts/managed_island_smoke.sh
+      - name: Preserve source provenance and evidence, never publish an editor binary
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: native-island-${{ github.sha }}
+          path: |
+            upstream.lock.json
+            _build/zed-island/mzed-derived.json
+            _build/native-*/build.json
+            _build/native-*-build.log
+            _build/native-*-test.log
+            _build/island-build/build.json
+            _build/island-build/cargo.log
+            _build/island-smoke-*/smoke.json
+            _build/island-smoke-*/*.png
+            _build/island-smoke-*/editor.log
+            _build/island-smoke-*/data/logs/Zed.log*
+            _build/island-smoke-*/mzed-baseline-fixture.txt
+            _build/island-openbox-*.log
+            _build/island-xcompmgr-*.log
+          retention-days: 14

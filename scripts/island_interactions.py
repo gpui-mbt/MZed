@@ -1,0 +1,125 @@
+"""Real X11 input plus pixels and process-owned toplevel evidence; no simulated UI."""
+import subprocess
+import time
+from smoke_x11 import run
+
+COLORS = [(40, 96, 160), (200, 96, 160)]
+
+
+def rectangle(window, screenshot, color):
+    run(['import', '-window', window, str(screenshot)])
+    width, height = map(int, run(['identify', '-format', '%w %h', str(screenshot)]).split())
+    pixels = subprocess.check_output(['convert', str(screenshot), '-depth', '8', 'rgb:-'], timeout=15)
+    locations = [(index % width, index // width) for index in range(width * height)
+                 if pixels[index * 3:index * 3 + 3] == bytes(color)]
+    if len(locations) < 40:
+        return None
+    left, right = min(x for x, _ in locations), max(x for x, _ in locations)
+    top, bottom = min(y for _, y in locations), max(y for _, y in locations)
+    # Refuse a color scattered elsewhere instead of accepting an invented control location.
+    if len(locations) != (right - left + 1) * (bottom - top + 1):
+        raise RuntimeError('native scene color is not one solid bounded rectangle')
+    return (left, top, right, bottom)
+
+
+def wait_rectangle(window, output, stage, color, expected=True):
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        found = rectangle(window, output / (stage + '.png'), color)
+        if bool(found) == expected:
+            return found
+        time.sleep(0.15)
+    raise RuntimeError(f'{stage}: expected scene pixels were not observed')
+
+
+def center(rect):
+    left, top, right, bottom = rect
+    return ((left + right) // 2, (top + bottom) // 2)
+
+
+def move(window, position):
+    run(['xdotool', 'mousemove', '--sync', '--window', window, *map(str, position)])
+
+
+def click(window, position, button='1'):
+    move(window, position)
+    run(['xdotool', 'click', button])
+    time.sleep(0.15)
+
+
+def toplevels(pid):
+    candidates = run(['xdotool', 'search', '--all', '--onlyvisible', '--pid', str(pid)]).split()
+    return [window for window in candidates
+            if 'window state:' in run(['xprop', '-id', window, 'WM_STATE']).lower()]
+
+
+def exercise(window, output, process, record):
+    scale = int(record['scale'])
+    owned = toplevels(process.pid)
+    if owned != [window]:
+        raise RuntimeError(f'expected one process-owned toplevel, got {owned}')
+    record['toplevels_before'] = owned
+    rect = wait_rectangle(window, output, 'island-initial', COLORS[0])
+    left, top, right, bottom = rect
+    if abs((right-left+1) - 120*scale) > 2 or abs((bottom-top+1) - 18*scale) > 2:
+        raise RuntimeError(f'logical scene was not scaled exactly once: {rect}, scale={scale}')
+    record['initial_scene_rectangle'] = rect
+    click(window, center(rect), '3')
+    run(['xdotool', 'keydown', 'shift'])
+    try:
+        click(window, center(rect))
+    finally:
+        run(['xdotool', 'keyup', 'shift'])
+    click(window, center(rect), '4')
+    wait_rectangle(window, output, 'island-unsupported-input', COLORS[0])
+    record['operations'].append('right, modified-left and wheel did not activate native scene')
+    move(window, center(rect))
+    run(['xdotool', 'mousedown', '1'])
+    time.sleep(0.4)
+    run(['xdotool', 'windowsize', '--sync', window, str(1120*scale), str(720*scale)])
+    time.sleep(0.4)
+    rect = wait_rectangle(window, output, 'island-held-after-resize', COLORS[0])
+    move(window, center(rect))
+    run(['xdotool', 'mouseup', '1'])
+    rect = wait_rectangle(window, output, 'island-clicked', COLORS[1])
+    record['operations'].append('one real plain-left sequence survived redraw/window resize and changed MoonBit scene')
+    move(window, center(rect))
+    run(['xdotool', 'mousedown', '1'])
+    move(window, (400, 250))
+    run(['xdotool', 'mouseup', '1'])
+    wait_rectangle(window, output, 'island-outside-release', COLORS[1])
+    record['operations'].append('owned outside release canceled without native activation')
+    move(window, center(rect))
+    run(['xdotool', 'mousedown', '1'])
+    run(['xdotool', 'windowminimize', window])
+    time.sleep(0.3)
+    run(['xdotool', 'mouseup', '1'])
+    run(['xdotool', 'windowactivate', '--sync', window])
+    rect = wait_rectangle(window, output, 'island-interrupted-press', COLORS[1])
+    click(window, (400, 250))
+    record['operations'].append('minimized during owned press, released outside, restored without stale ownership')
+    # A paired sequence followed by a bare late up must commit only once.
+    click(window, center(rect))
+    run(['xdotool', 'mouseup', '1'])
+    rect = wait_rectangle(window, output, 'island-repeat', COLORS[0])
+    toggle = (rect[0] - 18*scale, center(rect)[1])
+    click(window, toggle)
+    wait_rectangle(window, output, 'island-disabled', COLORS[0], expected=False)
+    wait_rectangle(window, output, 'island-disabled-pink', COLORS[1], expected=False)
+    # The host controller stays mounted to swallow late owned sequences, but no MoonBit state exists.
+    click(window, center(rect))
+    click(window, toggle)
+    rect = wait_rectangle(window, output, 'island-remounted', COLORS[0])
+    run(['xdotool', 'mouseup', '1'])
+    wait_rectangle(window, output, 'island-late-release', COLORS[0])
+    click(window, center(rect))
+    rect = wait_rectangle(window, output, 'island-remount-clicked', COLORS[1])
+    click(window, (rect[0] - 18*scale, center(rect)[1]))
+    wait_rectangle(window, output, 'island-final-disabled', COLORS[0], expected=False)
+    wait_rectangle(window, output, 'island-final-disabled-pink', COLORS[1], expected=False)
+    record['operations'].append('disabled, clicked inactive region, remounted fresh state, rejected bare late release, disabled again')
+    owned = toplevels(process.pid)
+    record['toplevels_after'] = owned
+    if owned != [window]:
+        raise RuntimeError(f'island created another native toplevel: {owned}')
+    record['native_interaction_pixels'] = 'passed'
