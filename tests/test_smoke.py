@@ -28,14 +28,19 @@ class SmokeHarnessTests(unittest.TestCase):
                 self.assertFalse(config['telemetry']['diagnostics'])
                 self.assertTrue(config['disable_ai'])
                 self.assertFalse(config['auto_update'])
+                self.assertFalse(config['auto_install_extensions']['html'])
+                self.assertEqual(kwargs['cwd'], root)
+                self.assertEqual(kwargs['env']['HOME'], str(output / 'home'))
                 self.assertTrue(config['ensure_final_newline_on_save'])
                 return process
             def native_command(argv, **kwargs):
+                if argv[-1] == 'getwindowfocus':
+                    return '42'
                 if argv[-1] == 'ctrl+s':
                     (output / 'mzed-baseline-fixture.txt').write_text(
                         'MZed pinned baseline fixture\nMZed native edit save verified\n')
                 return 'mocked harness output'
-            args = argparse.Namespace(binary=binary, output=output)
+            args = argparse.Namespace(source=Path(directory), binary=binary, output=output)
             with patch.object(smoke.argparse.ArgumentParser, 'parse_args', return_value=args), \
                     patch.object(smoke, 'run', side_effect=native_command), \
                     patch.object(smoke.subprocess, 'Popen', side_effect=start), \
@@ -49,7 +54,7 @@ class SmokeHarnessTests(unittest.TestCase):
     def test_missing_binary_records_failure(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / 'evidence'
-            args = argparse.Namespace(binary=Path(directory) / 'missing', output=output)
+            args = argparse.Namespace(source=Path(directory), binary=Path(directory) / 'missing', output=output)
             with patch.object(smoke.argparse.ArgumentParser, 'parse_args', return_value=args), \
                     patch.object(smoke.subprocess, 'Popen') as start:
                 self.assertEqual(smoke.main(), 1)
@@ -63,8 +68,68 @@ class SmokeHarnessTests(unittest.TestCase):
             output = Path(directory)
             sentinel = output / 'smoke.json'
             sentinel.write_text('old evidence')
-            args = argparse.Namespace(binary=output / 'missing', output=output)
+            args = argparse.Namespace(source=Path(directory), binary=output / 'missing', output=output)
             with patch.object(smoke.argparse.ArgumentParser, 'parse_args', return_value=args):
                 with self.assertRaises(FileExistsError):
                     smoke.main()
             self.assertEqual(sentinel.read_text(), 'old evidence')
+
+    def test_focus_mismatch_never_types_and_captures_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            binary = root / 'fake-binary'
+            binary.write_bytes(b'fixture')
+            output = root / 'evidence'
+            args = argparse.Namespace(source=root, binary=binary, output=output)
+            process = Mock(pid=12345)
+            process.poll.side_effect = [None, 0]
+            commands = []
+            def native_command(argv, **kwargs):
+                commands.append(argv)
+                return '99' if argv[-1] == 'getwindowfocus' else ''
+            with patch.object(smoke.argparse.ArgumentParser, 'parse_args', return_value=args), \
+                    patch.object(smoke, 'run', side_effect=native_command), \
+                    patch.object(smoke.subprocess, 'Popen', return_value=process), \
+                    patch.object(smoke.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '42\n')):
+                self.assertEqual(smoke.main(), 1)
+            self.assertFalse(any(c[:2] in [['xdotool', 'key'], ['xdotool', 'type']] for c in commands))
+            self.assertTrue(any(c[-1].endswith('after-input.png') for c in commands))
+            record = json.loads((output / 'smoke.json').read_text())
+            self.assertIn('focus mismatch', record['error'])
+
+    def test_managed_session_refuses_existing_evidence_before_start(self):
+        script = Path(__file__).resolve().parents[1] / 'scripts/managed_x11_smoke.sh'
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / '_build/smoke').mkdir(parents=True)
+            log = root / '_build/openbox.log'
+            log.write_text('keep previous evidence')
+            result = subprocess.run(['bash', str(script)], cwd=root, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn('already exists', result.stderr)
+            self.assertEqual(log.read_text(), 'keep previous evidence')
+
+    def test_unchanged_bytes_fail_and_capture_after_input(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            binary = root / 'fake-binary'
+            binary.write_bytes(b'fixture')
+            output = root / 'evidence'
+            args = argparse.Namespace(source=root, binary=binary, output=output)
+            process = Mock(pid=12345)
+            process.poll.side_effect = [None, 0]
+            commands = []
+            def native_command(argv, **kwargs):
+                commands.append(argv)
+                return '42' if argv[-1] == 'getwindowfocus' else ''
+            with patch.object(smoke.argparse.ArgumentParser, 'parse_args', return_value=args), \
+                    patch.object(smoke, 'run', side_effect=native_command), \
+                    patch.object(smoke.time, 'monotonic', side_effect=[0, 1, 2, 20]), \
+                    patch.object(smoke.subprocess, 'Popen', return_value=process), \
+                    patch.object(smoke.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '42\n')):
+                self.assertEqual(smoke.main(), 1)
+            record = json.loads((output / 'smoke.json').read_text())
+            self.assertEqual(record['editor_smoke'], 'failed')
+            self.assertIn('saved file', record['error'])
+            self.assertTrue(any(c[-1].endswith('before-input.png') for c in commands))
+            self.assertTrue(any(c[-1].endswith('after-input.png') for c in commands))

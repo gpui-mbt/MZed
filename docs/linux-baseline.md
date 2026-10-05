@@ -64,14 +64,16 @@ export LIBGL_ALWAYS_SOFTWARE=1 GPUI_X11_SCALE_FACTOR=1
 export XDG_RUNTIME_DIR="$(mktemp -d)"
 chmod 700 "$XDG_RUNTIME_DIR"
 xvfb-run -a -s '-screen 0 1280x800x24' dbus-run-session -- \
-  python3 scripts/smoke_x11.py --binary _build/zed/target/mzed-baseline/debug/zed \
-  --output _build/smoke
+  bash scripts/managed_x11_smoke.sh
 ```
 
-The smoke starts a fresh app data/config area, disables telemetry/AI/updates,
+The smoke starts Openbox and xcompmgr, waits for window-manager readiness,
+then creates a fresh HOME and app data/config area, disables telemetry/AI/updates
+and the default automatic HTML extension install,
 opens a synthetic plain-text fixture, identifies exactly one visible window
 owned by that process, types one sentinel, saves through native key events,
-and checks exact bytes. It records screenshot, XRandR, Vulkan information,
+and checks exact bytes. It verifies managed active focus before input and
+captures before/after screenshots even when editing fails. It records XRandR, Vulkan information,
 logs and binary hash. No account login, real document, extension, or external
 message is involved. A failed or ambiguous target fails closed.
 
@@ -105,3 +107,20 @@ resolve the harness repository before the source checkout. The updated harness
 places its fresh Cargo target under Zed's own source tree without patching Zed.
 A new full build and smoke run must verify the fix. The failed artifact and
 logs remain evidence; the first run does not establish working editor smoke.
+
+### Managed-focus retry
+
+[Run 37251447368](https://github.com/gpui-mbt/MZed/actions/runs/37251447368)
+on replacement PR #2 head `64c0700f9c6bb64edca23216d3edc0e97c2d570a`
+built successfully again in 1,078.875 seconds. The editor launched, rendered its
+first frame and selected Vulkan llvmpipe (software). The target fixture window
+was found, but native input did not produce saved bytes. Therefore editor smoke
+still failed; window existence and a first frame are not sufficient evidence.
+The prior no-window-manager Xvfb profile lacked before/after screenshots, so its
+precise input failure remains unproven.
+
+The next attempt uses a managed X11 session with explicit focus verification and
+captures failure screenshots. It also starts Zed with the source checkout as cwd
+for its dev grammar watcher. Logs revealed a default HTML extension installation;
+this is now explicitly disabled in isolated smoke settings. These changes do
+not patch or replace Zed's editor.

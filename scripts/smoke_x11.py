@@ -18,8 +18,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--binary', required=True, type=Path)
     parser.add_argument('--output', required=True, type=Path)
+    parser.add_argument('--source', required=True, type=Path)
     args = parser.parse_args()
     binary, output = args.binary.resolve(), args.output.resolve()
+    source = args.source.resolve()
     output.mkdir(parents=True, exist_ok=False)
     fixture = output / 'mzed-baseline-fixture.txt'
     original = 'MZed pinned baseline fixture\n'
@@ -35,14 +37,16 @@ def main():
         config = output / 'data/config'
         config.mkdir(parents=True)
         (config / 'settings.json').write_text(json.dumps({'telemetry': {'diagnostics': False, 'metrics': False},
-            'disable_ai': True, 'auto_update': False, 'ensure_final_newline_on_save': True, 'languages': {'Plain Text': {'enable_language_server': False}}}))
-        env = dict(os.environ, XDG_CONFIG_HOME=str(output / 'config'), XDG_DATA_HOME=str(output / 'data'),
+            'disable_ai': True, 'auto_update': False, 'auto_install_extensions': {'html': False}, 'ensure_final_newline_on_save': True, 'languages': {'Plain Text': {'enable_language_server': False}}}))
+        home = output / 'home'
+        home.mkdir()
+        env = dict(os.environ, HOME=str(home), XDG_CONFIG_HOME=str(output / 'config'), XDG_DATA_HOME=str(output / 'data'),
             XDG_CACHE_HOME=str(output / 'cache'), WAYLAND_DISPLAY='', ZED_UPDATE_EXPLANATION='Pinned baseline experiment')
         record['xrandr'] = run(['xrandr', '--current'])
         record['vulkaninfo'] = run(['vulkaninfo', '--summary'])
         with (output / 'editor.log').open('w') as log:
             process = subprocess.Popen([str(binary), '--user-data-dir', str(output / 'data'), str(fixture)],
-                env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+                cwd=source, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
             deadline = time.monotonic() + 90
             window = None
             while time.monotonic() < deadline and process.poll() is None:
@@ -60,7 +64,12 @@ def main():
                 raise RuntimeError('no unique visible editor window for this process and fixture within 90 seconds')
             record['window_id'] = window
             record['operations'].append('opened fixture in process-owned native window')
-            run(['xdotool', 'windowfocus', '--sync', window])
+            run(['xdotool', 'windowactivate', '--sync', window])
+            focused = run(['xdotool', 'getwindowfocus'])
+            record['focused_window_id'] = focused
+            if focused != window:
+                raise RuntimeError(f'focus mismatch: expected {window}, got {focused}')
+            run(['import', '-window', window, str(output / 'before-input.png')])
             run(['xdotool', 'key', '--clearmodifiers', 'ctrl+End'])
             run(['xdotool', 'type', '--clearmodifiers', '--delay', '30', addition])
             run(['xdotool', 'key', '--clearmodifiers', 'ctrl+s'])
@@ -77,6 +86,11 @@ def main():
     except (OSError, RuntimeError, subprocess.SubprocessError) as error:
         record['error'] = str(error)
     finally:
+        if record.get('window_id'):
+            try:
+                run(['import', '-window', record['window_id'], str(output / 'after-input.png')])
+            except (OSError, subprocess.SubprocessError) as error:
+                record['capture_error'] = str(error)
         if process is not None and process.poll() is None:
             os.killpg(process.pid, signal.SIGTERM)
             try:
