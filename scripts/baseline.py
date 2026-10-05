@@ -104,7 +104,7 @@ def build(source, output, jobs, timeout):
     try:
         verify_source(source)
         environment = record['environment']
-        environment['free_disk_bytes'] = shutil.disk_usage(output).free
+        environment['free_disk_bytes'] = shutil.disk_usage(source).free
         missing = [name for name, tool in environment['tools'].items() if not tool['path']]
         missing += [name for name, version in environment['packages'].items() if version is None]
         if missing:
@@ -115,11 +115,17 @@ def build(source, output, jobs, timeout):
             raise ValueError('less than 20 GiB free: choose a larger builder; no existing work is deleted')
         record['baseline_build'] = 'running'
         (output / 'build.json').write_text(json.dumps(record, indent=2) + '\n')
-        target = output / 'target'
+        # Dev assets resolve the first .git ancestor of the executable before cwd.
+        # Keep the binary under the exact Zed checkout, not the harness checkout.
+        target = source / 'target/mzed-baseline'
+        if target.exists():
+            record['baseline_build'] = 'blocked'
+            raise ValueError('baseline target already exists; preserve it and use a fresh source checkout')
+        record['target_directory'] = str(target)
         env = dict(os.environ, CARGO_TARGET_DIR=str(target), RUSTUP_TOOLCHAIN=LOCK['rust'],
                    ZED_UPDATE_EXPLANATION='Pinned MZed baseline experiment; no automatic updates')
         with (output / 'cargo.log').open('w') as log:
-            exit_code = run_bounded(argv, source, env, log, timeout, output)
+            exit_code = run_bounded(argv, source, env, log, timeout, source)
         record['exit_code'] = exit_code
         record['baseline_build'] = 'passed' if exit_code == 0 else 'failed'
         if exit_code == 0:

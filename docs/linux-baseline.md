@@ -45,7 +45,10 @@ python3 scripts/baseline.py build --jobs 2 --timeout-seconds 5400
 Acquisition verifies the full commit and tracked provenance, rejects dirty or
 untracked source, and disables the checkout's push URL. It does not delete,
 reset, stash, or clean existing work. An existing evidence directory is refused;
-choose a new `--output` path for each attempt. The build uses the upstream Cargo
+choose a new `--output` path and fresh source checkout for each build attempt.
+The target directory stays beneath the Zed checkout because its dev asset loader
+resolves the first `.git` ancestor of the executable. An existing target is
+refused rather than cleaned or silently reused. The build uses the upstream Cargo
 lock, no source patch, dev profile with debug info and incremental compilation
 disabled to limit disk consumption. This is not a release/performance profile.
 
@@ -61,7 +64,7 @@ export LIBGL_ALWAYS_SOFTWARE=1 GPUI_X11_SCALE_FACTOR=1
 export XDG_RUNTIME_DIR="$(mktemp -d)"
 chmod 700 "$XDG_RUNTIME_DIR"
 xvfb-run -a -s '-screen 0 1280x800x24' dbus-run-session -- \
-  python3 scripts/smoke_x11.py --binary _build/baseline/target/debug/zed \
+  python3 scripts/smoke_x11.py --binary _build/zed/target/mzed-baseline/debug/zed \
   --output _build/smoke
 ```
 
@@ -86,3 +89,19 @@ pass. CI software rendering, even when successful, does not qualify general
 Linux hardware performance. This first smoke covers one native open/edit/save
 sequence at scale 1; lifecycle, IME, multi-scale, input ownership, island churn,
 and failure recovery remain open.
+
+### Initial hosted run
+
+[Run 37249353561](https://github.com/gpui-mbt/MZed/actions/runs/37249353561)
+on PR head `d193820393eededa5c03696c4aed94e2c9e106d7` built the unchanged
+Zed source successfully in 1,054.12 seconds on Ubuntu 24.04.5, Rust 1.98.1,
+clang 18.1.3. The runner exposed ~16 GiB RAM and 91 GB initial free disk.
+Binary SHA-256: `6d784316fbb395c7adaa37f7d8e424cbc750af897de5b7c447b08c241c1dab8a`.
+The PR workflow checked GitHub's merge-test ref `3f588326dd65baf159e4bce485c71a839d8f6d90`.
+
+Native smoke failed at launch with `settings/default.json` missing. This exposed
+a harness layout error: the external Cargo target made upstream `dev_repo_root`
+resolve the harness repository before the source checkout. The updated harness
+places its fresh Cargo target under Zed's own source tree without patching Zed.
+A new full build and smoke run must verify the fix. The failed artifact and
+logs remain evidence; the first run does not establish working editor smoke.

@@ -81,8 +81,10 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(record['baseline_build'], 'blocked')
 
     def test_build_failure_is_not_smoke_success(self):
-        with patch.object(baseline, 'run_bounded', return_value=17):
+        with patch.object(baseline, 'run_bounded', return_value=17) as run:
             code, record = self.run_build()
+        self.assertEqual(run.call_args.args[2]['CARGO_TARGET_DIR'], '/fixture/target/mzed-baseline')
+        self.assertEqual(run.call_args.args[5], Path('/fixture'))
         self.assertEqual(code, 1)
         self.assertEqual(record['exit_code'], 17)
         self.assertEqual(record['baseline_build'], 'failed')

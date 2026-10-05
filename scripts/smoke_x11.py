@@ -54,6 +54,9 @@ def main():
                     break
                 time.sleep(0.5)
             if window is None:
+                record['editor_exit_code'] = process.poll()
+                if record['editor_exit_code'] is not None:
+                    raise RuntimeError(f"editor exited before its window appeared: {record['editor_exit_code']}; inspect editor.log")
                 raise RuntimeError('no unique visible editor window for this process and fixture within 90 seconds')
             record['window_id'] = window
             record['operations'].append('opened fixture in process-owned native window')
@@ -82,6 +85,7 @@ def main():
                 os.killpg(process.pid, signal.SIGKILL)
                 process.wait()
         (output / 'smoke.json').write_text(json.dumps(record, indent=2) + '\n')
+        print(json.dumps(record, indent=2))
     return 0 if record['editor_smoke'] == 'passed' else 1
 
 

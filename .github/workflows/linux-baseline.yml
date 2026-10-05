@@ -37,7 +37,7 @@ jobs:
         run: |
           export XDG_RUNTIME_DIR="$(mktemp -d)"
           chmod 700 "$XDG_RUNTIME_DIR"
-          xvfb-run -a -s '-screen 0 1280x800x24' dbus-run-session -- python3 scripts/smoke_x11.py --binary _build/baseline/target/debug/zed --output _build/smoke
+          xvfb-run -a -s '-screen 0 1280x800x24' dbus-run-session -- python3 scripts/smoke_x11.py --binary _build/zed/target/mzed-baseline/debug/zed --output _build/smoke
       - name: Preserve evidence, never publish an editor binary
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -47,5 +47,8 @@ jobs:
             upstream.lock.json
             _build/baseline/build.json
             _build/baseline/cargo.log
-            _build/smoke/
+            _build/smoke/smoke.json
+            _build/smoke/editor.log
+            _build/smoke/editor.png
+            _build/smoke/mzed-baseline-fixture.txt
           retention-days: 14
