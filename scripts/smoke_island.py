@@ -124,6 +124,18 @@ def main():
         record['editor_smoke'] = 'failed'
         record['same_window_island'] = 'failed'
         record['error'] = str(error)
+        record['editor_exit_code_before_teardown'] = process.poll() if process is not None else None
+        if isinstance(error, subprocess.CalledProcessError):
+            record['failed_command'] = error.cmd
+            record['command_return_code'] = error.returncode
+            record['command_stdout'] = str(error.stdout or '')[-2000:]
+        if getattr(error, 'stderr', None):
+            record['command_stderr'] = str(error.stderr)[-4000:]
+        if record.get('window_id'):
+            try:
+                record['window_state_on_failure'] = run(['xwininfo', '-id', record['window_id']])
+            except (OSError, subprocess.SubprocessError) as state_error:
+                record['window_state_error'] = str(state_error)
     finally:
         if record.get('window_id'):
             try:

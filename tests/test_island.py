@@ -29,6 +29,33 @@ class PixelEvidenceTests(unittest.TestCase):
                 interaction.move('42', (5, 7))
             self.assertEqual(run.call_count, 1)
 
+    def test_restoration_waits_for_mapping_and_actual_focus(self):
+        from unittest.mock import Mock
+        process = Mock()
+        process.poll.return_value = None
+        with patch.object(interaction, 'run', side_effect=['Map State: IsUnMapped', 'window state: Iconic', 'Map State: IsViewable', 'window state: Normal', '42', '99', 'Map State: IsViewable', 'window state: Normal', '42', '42']), \
+                patch.object(interaction.time, 'sleep'):
+            interaction.wait_window_state('42', process, visible=True)
+        self.assertEqual(process.poll.call_count, 3)
+
+    def test_hidden_gate_observes_actual_unmapping(self):
+        from unittest.mock import Mock
+        process = Mock()
+        process.poll.return_value = None
+        with patch.object(interaction, 'run', side_effect=['Map State: IsViewable', 'window state: Normal', 'Map State: IsUnMapped', 'window state: Iconic']), \
+                patch.object(interaction.time, 'sleep'):
+            interaction.wait_window_state('42', process, visible=False)
+        self.assertEqual(process.poll.call_count, 2)
+
+    def test_editor_exit_is_not_window_readiness(self):
+        from unittest.mock import Mock
+        process = Mock()
+        process.poll.return_value = -11
+        with patch.object(interaction, 'run') as run:
+            with self.assertRaisesRegex(RuntimeError, 'editor exited.*-11'):
+                interaction.wait_window_state('42', process, visible=True)
+        run.assert_not_called()
+
     def test_empty_scene_is_not_success(self):
         with patch.object(interaction, 'run', side_effect=['', '4 4']), patch.object(
                 interaction.subprocess, 'check_output', return_value=bytes(48)):
@@ -70,7 +97,7 @@ class NativeSmokeEvidenceTests(unittest.TestCase):
             binary.write_bytes(b'unit test; never native acceptance')
             output = root / 'evidence'
             process = Mock(pid=12345)
-            process.poll.side_effect = [None, 0]
+            process.poll.side_effect = [None, 0, 0]
             def start(*args, **kwargs):
                 if log_text is not None:
                     logs = output / 'data/logs'

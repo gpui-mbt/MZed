@@ -82,6 +82,33 @@ def toplevels(pid):
             if 'window state:' in run(['xprop', '-id', window, 'WM_STATE']).lower()]
 
 
+def wait_window_state(window, process, visible):
+    deadline = time.monotonic() + 10
+    last = ''
+    while time.monotonic() < deadline:
+        status = process.poll()
+        if status is not None:
+            raise RuntimeError(f'editor exited while waiting for window visibility: {status}')
+        geometry = run(['xwininfo', '-id', window])
+        map_state = re.search(r'Map State:\s*(IsViewable|IsUnMapped|IsUnviewable)', geometry)
+        if map_state is None:
+            raise RuntimeError('window query did not return a recognized map state')
+        manager_state = run(['xprop', '-id', window, 'WM_STATE'])
+        last = geometry + '\n' + manager_state
+        mapped = map_state.group(1) == 'IsViewable'
+        expected_manager = 'window state: normal' if visible else 'window state: iconic'
+        if mapped == visible and expected_manager in manager_state.lower():
+            if not visible:
+                return
+            active = run(['xdotool', 'getactivewindow'])
+            focus = run(['xdotool', 'getwindowfocus'])
+            last += f'\nactive={active}; focus={focus}'
+            if active == window and focus == window:
+                return
+        time.sleep(0.05)
+    raise RuntimeError(f'window did not reach visible={visible} with focus when required; last state: {last}')
+
+
 def exercise(window, output, process, record):
     scale = int(record['scale'])
     owned = toplevels(process.pid)
@@ -121,9 +148,11 @@ def exercise(window, output, process, record):
     move(window, center(rect))
     run(['xdotool', 'mousedown', '1'])
     run(['xdotool', 'windowminimize', window])
-    time.sleep(0.3)
+    wait_window_state(window, process, visible=False)
     run(['xdotool', 'mouseup', '1'])
-    run(['xdotool', 'windowactivate', '--sync', window])
+    run(['xdotool', 'windowmap', window])
+    run(['xdotool', 'windowactivate', window])
+    wait_window_state(window, process, visible=True)
     rect = wait_rectangle(window, output, 'island-interrupted-press', COLORS[1])
     click(window, (400, 250))
     record['operations'].append('minimized during owned press, released outside, restored without stale ownership')
