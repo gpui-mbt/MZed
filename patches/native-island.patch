@@ -1,0 +1,63 @@
+diff --git a/README.md b/README.md
+index 9f641fb..24840ee 100644
+--- a/README.md
++++ b/README.md
+@@ -1,3 +1,6 @@
++> [!IMPORTANT]
++> Remove this line to confirm you've reviewed this PR before submitting.
++
+ # Zed
+ 
+ [![Zed](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/zed-industries/zed/main/assets/badge/v0.json)](https://zed.dev)
+diff --git a/crates/zed/build.rs b/crates/zed/build.rs
+index 92407a3..6d21938 100644
+--- a/crates/zed/build.rs
++++ b/crates/zed/build.rs
+@@ -2,6 +2,16 @@
+ use std::process::Command;
+ 
+ fn main() {
++    println!("cargo:rerun-if-env-changed=MZED_NATIVE_LIB_DIR");
++    let native = match std::env::var("MZED_NATIVE_LIB_DIR") {
++        Ok(native) => native,
++        Err(error) => {
++            eprintln!("MZed derived build requires its pinned native library: {error}");
++            std::process::exit(1);
++        }
++    };
++    println!("cargo:rustc-link-search=native={native}");
++    println!("cargo:rustc-link-lib=static=mzed_native");
+     #[cfg(target_os = "linux")]
+     {
+         // Add rpaths for libraries that webrtc-sys dlopens at runtime.
+diff --git a/crates/zed/src/zed.rs b/crates/zed/src/zed.rs
+index 4034efd..ec2c7fd 100644
+--- a/crates/zed/src/zed.rs
++++ b/crates/zed/src/zed.rs
+@@ -3,6 +3,7 @@ pub mod edit_prediction_registry;
+ #[cfg(target_os = "macos")]
+ pub(crate) mod mac_only_instance;
+ mod migrate;
++mod native_island;
+ #[cfg(target_os = "macos")]
+ pub(crate) mod move_to_applications;
+ mod open_listener;
+@@ -599,6 +600,8 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
+             }
+         });
+ 
++        let native_island = (std::env::var("MZED_NATIVE_ISLAND").as_deref() == Ok("1"))
++            .then(|| cx.new(|cx| native_island::NativeIsland::new(window, cx)));
+         let search_button = cx.new(|_| search::search_status_button::SearchButton::new());
+         let diagnostic_summary =
+             cx.new(|cx| diagnostics::items::DiagnosticIndicator::new(workspace, cx));
+@@ -649,6 +652,9 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
+             // Keep these last so they stay leftmost and can change without moving the other items.
+             status_bar.add_right_item(vim_mode_indicator, window, cx);
+             status_bar.add_right_item(pending_keystrokes_indicator, window, cx);
++            if let Some(native_island) = native_island {
++                status_bar.add_right_item(native_island, window, cx);
++            }
+         });
+ 
+         let panels_task = initialize_panels(window, cx);

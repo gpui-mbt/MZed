@@ -1,7 +1,8 @@
 # Native island seam investigation
 
-This is source inspection, not runtime acceptance. The current harness does
-not implement an island or alter the original Rust editor.
+This records the baseline-stage source inspection, not runtime acceptance.
+The subsequent opt-in implementation and its bounded qualification are described
+in [native-island.md](native-island.md).
 
 ## Candidate: host-composited copied quads
 

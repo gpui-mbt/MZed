@@ -1,0 +1,138 @@
+name: Same-window native island
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      uncached:
+        description: Force final uncached qualification
+        type: boolean
+        default: false
+permissions:
+  contents: read
+jobs:
+  harness:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - run: python3 -m unittest discover -s tests -v
+      - run: python3 -m py_compile scripts/*.py
+  native-island:
+    needs: harness
+    runs-on: ubuntu-24.04
+    timeout-minutes: 110
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: gpui-mbt/gpui.mbt
+          ref: bf965aebbeb1dfdfed26373d4a7a58bb51a5ad01
+          path: _build/gpui
+      - uses: hustcer/setup-moonbit@1522f9aef02a8ca0187dfc00a41f5dd6b16750f7
+        with:
+          version: 0.10.14+7d59c7ec9
+          core-version: 0.10.14+7d59c7ec9
+      - name: Acquire immutable upstream source in a separate derived checkout
+        run: |
+          python3 scripts/baseline.py source --source _build/zed-island
+          python3 scripts/prepare_island.py --source _build/zed-island
+      - name: Install reviewed Linux build and software-rendering dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc g++ libasound2-dev libfontconfig-dev libgit2-dev libglib2.0-dev libssl-dev libva-dev libvulkan1 libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev libzstd-dev make cmake clang lld llvm jq gettext-base elfutils libsqlite3-dev musl-tools musl-dev libstdc++-14-dev pipewire xdg-desktop-portal xvfb xauth xdotool x11-xserver-utils x11-utils imagemagick mesa-vulkan-drivers vulkan-tools openbox xcompmgr tesseract-ocr
+          rustup toolchain install 1.98.1 --profile minimal
+      - name: Native copied-scene ABI and bounded lifecycle regressions
+        env:
+          RUSTUP_TOOLCHAIN: 1.98.1
+        run: |
+          set -o pipefail
+          for mode in normal ubsan asan_ubsan; do
+            python3 scripts/build_native.py --source _build/gpui --output "_build/native-$mode" --mode "$mode" 2>&1 | tee "_build/native-$mode-build.log"
+            bash scripts/test_native.sh "_build/native-$mode" "$mode" 2>&1 | tee "_build/native-$mode-test.log"
+          done
+      - name: Fingerprint application, compiler, runtime and system inputs
+        id: fingerprint
+        run: python3 scripts/editor_cache.py fingerprint
+      - name: Restore exact repository build cache
+        id: editor-cache
+        if: ${{ github.run_attempt == 1 && inputs.uncached != true }}
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: _build/editor-cache
+          key: ${{ steps.fingerprint.outputs.key }}
+      - name: Reject any inexact cache match
+        if: ${{ steps.editor-cache.outputs.cache-matched-key != '' && steps.editor-cache.outputs.cache-hit != 'true' }}
+        run: exit 1
+      - name: Verify and materialize the exact cached executable
+        if: ${{ steps.editor-cache.outputs.cache-hit == 'true' }}
+        run: python3 scripts/editor_cache.py restore
+      - name: Build intentional derived editor with pinned MoonBit scene image
+        if: ${{ steps.editor-cache.outputs.cache-hit != 'true' }}
+        env:
+          RUSTUP_TOOLCHAIN: 1.98.1
+        run: python3 scripts/build_island.py --source _build/zed-island --native _build/native-normal --output _build/island-build
+      - name: Prepare bounded public-source build cache before smoke
+        if: ${{ github.run_attempt == 1 && inputs.uncached != true && steps.editor-cache.outputs.cache-hit != 'true' }}
+        run: python3 scripts/editor_cache.py save
+      - name: Save repository build cache, never a release artifact
+        if: ${{ github.run_attempt == 1 && inputs.uncached != true && steps.editor-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: _build/editor-cache
+          key: ${{ steps.fingerprint.outputs.key }}
+      - name: Preserve produced payload before fresh cache extraction
+        if: ${{ github.run_attempt == 1 && inputs.uncached != true && steps.editor-cache.outputs.cache-hit != 'true' }}
+        run: |
+          test ! -e _build/editor-cache-produced
+          mv _build/editor-cache _build/editor-cache-produced
+      - name: Check exact cache round-trip without recompilation
+        id: cache-round-trip
+        if: ${{ github.run_attempt == 1 && inputs.uncached != true && steps.editor-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: _build/editor-cache
+          key: ${{ steps.fingerprint.outputs.key }}
+          fail-on-cache-miss: true
+      - name: Require an exact round-trip hit
+        if: ${{ github.run_attempt == 1 && inputs.uncached != true && steps.editor-cache.outputs.cache-hit != 'true' }}
+        run: test '${{ steps.cache-round-trip.outputs.cache-hit }}' = true
+      - name: Verify restored cache bytes and system linkage
+        if: ${{ github.run_attempt == 1 && inputs.uncached != true }}
+        run: python3 scripts/editor_cache.py verify
+      - name: Same-window scene, real pointer lifecycle, fallback edit/save at 1x and 2x
+        env:
+          LIBGL_ALWAYS_SOFTWARE: '1'
+        run: |
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          chmod 700 "$XDG_RUNTIME_DIR"
+          status=0
+          GPUI_X11_SCALE_FACTOR=1 xvfb-run -a -s '-screen 0 1280x800x24' dbus-run-session -- bash scripts/managed_island_smoke.sh || status=$?
+          GPUI_X11_SCALE_FACTOR=2 xvfb-run -a -s '-screen 0 2560x1600x24' dbus-run-session -- bash scripts/managed_island_smoke.sh || status=$?
+          exit "$status"
+      - name: Preserve source provenance and evidence, never publish an editor binary
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: native-island-${{ github.event.pull_request.head.sha || github.sha }}
+          path: |
+            upstream.lock.json
+            _build/editor-fingerprint.json
+            _build/editor-cache/manifest.json
+            _build/zed-island/mzed-derived.json
+            _build/native-*/build.json
+            _build/native-*-build.log
+            _build/native-*-test.log
+            _build/island-build/build.json
+            _build/island-build/cargo.log
+            _build/island-smoke-*/smoke.json
+            _build/island-smoke-*/*.png
+            _build/island-smoke-*/editor.log
+            _build/island-smoke-*/data/logs/Zed.log*
+            _build/island-smoke-*/mzed-baseline-fixture.txt
+            _build/island-openbox-*.log
+            _build/island-xcompmgr-*.log
+          retention-days: 14

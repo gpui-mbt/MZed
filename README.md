@@ -1,3 +1,6 @@
+> [!IMPORTANT]
+> Remove this line to confirm you've reviewed this PR before submitting.
+
 # MZed
 
 Keep a working Rust Zed editor while replacing small, optional regions with
@@ -23,3 +26,11 @@ Zed upstream is strictly read-only. Never open issues, PRs, comments, or push
 there. Zed-derived changes belong in this repository with original licenses and
 attribution retained; independently authored generic framework changes belong
 in their own repositories. Nothing here publishes an editor release.
+
+## Opt-in native island experiment
+
+The separate derived-source lane hosts one MoonBit/gpui.mbt copied-scene region
+inside the original editor status bar. See [the bounded contract and reproduction
+steps](docs/native-island.md). The unchanged baseline lane remains separate.
+Same-window acceptance requires the exact commit's native smoke evidence; ABI
+linkage alone is not sufficient. No upstream Zed writes or editor release.
