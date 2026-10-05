@@ -124,3 +124,24 @@ captures failure screenshots. It also starts Zed with the source checkout as cwd
 for its dev grammar watcher. Logs revealed a default HTML extension installation;
 this is now explicitly disabled in isolated smoke settings. These changes do
 not patch or replace Zed's editor.
+
+### Startup readiness correction
+
+[Run 37254065614](https://github.com/gpui-mbt/MZed/actions/runs/37254065614)
+at head `b6d0c7f90ac5681489b85128e1b85c5d9a01aa78` again built successfully.
+The managed client had the exact requested X11 focus, but native edit/save
+failed. Failure screenshots finally identify two intercepting startup dialogs:
+“Unsupported GPU” above “Unrecognized Project”. The earlier focus hypothesis
+alone did not explain or fix the failure. The first screenshot was black;
+window existence is also not a visible-editor readiness signal.
+
+For the declared software-only profile, the harness now preconfigures upstream's
+`ZED_ALLOW_EMULATED_GPU=1` before launch. This is documented by that exact warning
+and implemented in `crates/zed/src/zed.rs`; it does not claim hardware support.
+The fixture remains untrusted. OCR waits for the known security modal, then
+invokes only **Stay in Restricted Mode** through its pinned Linux
+`ctrl-alt-shift-s` binding. `SecurityModal` handles that action by setting
+`trusted = Some(false)`. No trust-all setting, trust record or Trust and Continue
+action is used. A subsequent OCR gate requires visible fixture text and absence
+of both startup prompts before any edit keystrokes. Unknown UI fails closed.
+The next actual run must qualify this sequence; model tests cannot do so.

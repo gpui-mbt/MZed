@@ -14,6 +14,19 @@ def run(argv, **kwargs):
     return subprocess.run(argv, check=True, text=True, capture_output=True, timeout=15, **kwargs).stdout.strip()
 
 
+def wait_for_text(window, screenshot, predicate, description):
+    deadline = time.monotonic() + 30
+    last_text = ''
+    while time.monotonic() < deadline:
+        run(['import', '-window', window, str(screenshot)])
+        last_text = run(['tesseract', str(screenshot), 'stdout', '--psm', '11'])
+        normalized = ' '.join(last_text.split()).casefold()
+        if predicate(normalized):
+            return last_text
+        time.sleep(0.2)
+    raise RuntimeError(f'{description} not observed within 30 seconds; last OCR: {last_text!r}')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--binary', required=True, type=Path)
@@ -41,7 +54,7 @@ def main():
         home = output / 'home'
         home.mkdir()
         env = dict(os.environ, HOME=str(home), XDG_CONFIG_HOME=str(output / 'config'), XDG_DATA_HOME=str(output / 'data'),
-            XDG_CACHE_HOME=str(output / 'cache'), WAYLAND_DISPLAY='', ZED_UPDATE_EXPLANATION='Pinned baseline experiment')
+            XDG_CACHE_HOME=str(output / 'cache'), WAYLAND_DISPLAY='', ZED_ALLOW_EMULATED_GPU='1', ZED_UPDATE_EXPLANATION='Pinned baseline experiment')
         record['xrandr'] = run(['xrandr', '--current'])
         record['vulkaninfo'] = run(['vulkaninfo', '--summary'])
         with (output / 'editor.log').open('w') as log:
@@ -69,7 +82,18 @@ def main():
             record['focused_window_id'] = focused
             if focused != window:
                 raise RuntimeError(f'focus mismatch: expected {window}, got {focused}')
-            run(['import', '-window', window, str(output / 'before-input.png')])
+            record['startup_modal_text'] = wait_for_text(
+                window, output / 'startup-modal.png',
+                lambda text: 'unrecognized project' in text and 'unsupported gpu' not in text,
+                'fresh-profile restricted-mode prompt')
+            # Exact pinned keymap/action: dismisses the modal with trusted = Some(false).
+            run(['xdotool', 'key', '--clearmodifiers', 'ctrl+alt+shift+s'])
+            record['ready_editor_text'] = wait_for_text(
+                window, output / 'before-input.png',
+                lambda text: 'mzed pinned baseline fixture' in text
+                and 'unrecognized project' not in text and 'unsupported gpu' not in text,
+                'visible fixture after staying in Restricted Mode')
+            record['operations'].append('dismissed project prompt into Restricted Mode without trusting worktree')
             run(['xdotool', 'key', '--clearmodifiers', 'ctrl+End'])
             run(['xdotool', 'type', '--clearmodifiers', '--delay', '30', addition])
             run(['xdotool', 'key', '--clearmodifiers', 'ctrl+s'])

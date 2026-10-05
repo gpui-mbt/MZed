@@ -24,7 +24,7 @@ jobs:
       - name: Install reviewed Linux build and software-rendering dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc g++ libasound2-dev libfontconfig-dev libgit2-dev libglib2.0-dev libssl-dev libva-dev libvulkan1 libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev libzstd-dev make cmake clang lld llvm jq gettext-base elfutils libsqlite3-dev musl-tools musl-dev libstdc++-14-dev pipewire xdg-desktop-portal xvfb xauth xdotool x11-xserver-utils x11-utils imagemagick mesa-vulkan-drivers vulkan-tools openbox xcompmgr
+          sudo apt-get install -y gcc g++ libasound2-dev libfontconfig-dev libgit2-dev libglib2.0-dev libssl-dev libva-dev libvulkan1 libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev libzstd-dev make cmake clang lld llvm jq gettext-base elfutils libsqlite3-dev musl-tools musl-dev libstdc++-14-dev pipewire xdg-desktop-portal xvfb xauth xdotool x11-xserver-utils x11-utils imagemagick mesa-vulkan-drivers vulkan-tools openbox xcompmgr tesseract-ocr
           rustup toolchain install 1.98.1 --profile minimal
       - name: Build unchanged pinned editor within declared resource bounds
         env:
@@ -52,6 +52,7 @@ jobs:
             _build/smoke/data/logs/Zed.log
             _build/smoke/data/logs/Zed.log.old
             _build/smoke/editor.png
+            _build/smoke/startup-modal.png
             _build/smoke/before-input.png
             _build/smoke/after-input.png
             _build/openbox.log

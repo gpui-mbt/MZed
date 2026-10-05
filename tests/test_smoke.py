@@ -31,6 +31,7 @@ class SmokeHarnessTests(unittest.TestCase):
                 self.assertFalse(config['auto_install_extensions']['html'])
                 self.assertEqual(kwargs['cwd'], root)
                 self.assertEqual(kwargs['env']['HOME'], str(output / 'home'))
+                self.assertEqual(kwargs['env']['ZED_ALLOW_EMULATED_GPU'], '1')
                 self.assertTrue(config['ensure_final_newline_on_save'])
                 return process
             def native_command(argv, **kwargs):
@@ -43,6 +44,7 @@ class SmokeHarnessTests(unittest.TestCase):
             args = argparse.Namespace(source=Path(directory), binary=binary, output=output)
             with patch.object(smoke.argparse.ArgumentParser, 'parse_args', return_value=args), \
                     patch.object(smoke, 'run', side_effect=native_command), \
+                    patch.object(smoke, 'wait_for_text', return_value='observed expected UI'), \
                     patch.object(smoke.subprocess, 'Popen', side_effect=start), \
                     patch.object(smoke.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '42\n')):
                 self.assertEqual(smoke.main(), 0)
@@ -89,6 +91,7 @@ class SmokeHarnessTests(unittest.TestCase):
                 return '99' if argv[-1] == 'getwindowfocus' else ''
             with patch.object(smoke.argparse.ArgumentParser, 'parse_args', return_value=args), \
                     patch.object(smoke, 'run', side_effect=native_command), \
+                    patch.object(smoke, 'wait_for_text', return_value='observed expected UI'), \
                     patch.object(smoke.subprocess, 'Popen', return_value=process), \
                     patch.object(smoke.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '42\n')):
                 self.assertEqual(smoke.main(), 1)
@@ -124,6 +127,7 @@ class SmokeHarnessTests(unittest.TestCase):
                 return '42' if argv[-1] == 'getwindowfocus' else ''
             with patch.object(smoke.argparse.ArgumentParser, 'parse_args', return_value=args), \
                     patch.object(smoke, 'run', side_effect=native_command), \
+                    patch.object(smoke, 'wait_for_text', return_value='observed expected UI'), \
                     patch.object(smoke.time, 'monotonic', side_effect=[0, 1, 2, 20]), \
                     patch.object(smoke.subprocess, 'Popen', return_value=process), \
                     patch.object(smoke.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '42\n')):
@@ -131,5 +135,22 @@ class SmokeHarnessTests(unittest.TestCase):
             record = json.loads((output / 'smoke.json').read_text())
             self.assertEqual(record['editor_smoke'], 'failed')
             self.assertIn('saved file', record['error'])
-            self.assertTrue(any(c[-1].endswith('before-input.png') for c in commands))
             self.assertTrue(any(c[-1].endswith('after-input.png') for c in commands))
+
+    def test_readiness_waits_for_observed_text_not_window_existence(self):
+        observations = iter(['', 'Unrecognized Project\nStay in Restricted Mode'])
+        def native_command(argv, **kwargs):
+            return next(observations) if argv[0] == 'tesseract' else ''
+        with patch.object(smoke, 'run', side_effect=native_command), \
+                patch.object(smoke.time, 'sleep'):
+            text = smoke.wait_for_text('42', Path('/fixture.png'),
+                lambda value: 'unrecognized project' in value, 'modal')
+        self.assertIn('Restricted Mode', text)
+
+    def test_missing_readiness_fails_closed(self):
+        with patch.object(smoke, 'run', return_value='unexpected dialog'), \
+                patch.object(smoke.time, 'sleep'), \
+                patch.object(smoke.time, 'monotonic', side_effect=[0, 1, 31]):
+            with self.assertRaisesRegex(RuntimeError, 'not observed'):
+                smoke.wait_for_text('42', Path('/fixture.png'),
+                    lambda value: 'unrecognized project' in value, 'modal')
