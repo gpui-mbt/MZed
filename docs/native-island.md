@@ -118,3 +118,27 @@ python3 scripts/build_island.py --source _build/zed-island --native _build/nativ
 
 The application mount is opt-in through `MZED_NATIVE_ISLAND=1`; the unchanged
 baseline build does not include the patch. No editor binary is published.
+
+## One-shot handled-dispatch rejection gate (pending)
+
+The `dispatch-rejection` Linux smoke scenario opts in to one deliberately
+rejected native dispatch by setting `MZED_NATIVE_ISLAND_PROBE` to the exact
+value `reject-first-increment` for that fresh editor process. Normal smoke runs
+remove any inherited value, and no UI control or IPC arms the probe. Unsupported
+input does not consume it; the first accepted plain-left release calls the real
+MoonBit dispatch ABI with opcode 0, which returns the existing `-8` error. The
+existing Rust error path then disables only the island and restores focus.
+
+Acceptance requires the rejected scene to disappear with the same editor
+process, process-owned toplevel and focused window still present, followed
+immediately by an exact editor save before any remount. A later one-shot `M`
+remount must paint fresh MB0, accept one ordinary increment to MB1, and disable
+normally; a late release must not dispatch. The smoke validator checks the
+scenario-specific exact native event sequence from `data/logs/Zed.log`, not
+empty editor stdout. It preserves the intermediate and final expected/actual
+fixture bytes, screenshots, native log and final fixture.
+
+This gate qualifies only a handled synchronous dispatch rejection. It says
+nothing about process crashes, OOM, corruption, panic containment, resource
+limits, performance, IME, other platforms, or full issue 0019 acceptance. Results
+remain pending until the exact candidate passes its Linux workflow cases.

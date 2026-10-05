@@ -79,7 +79,8 @@ class FingerprintTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source, native, moon = root / 'source', root / 'built', root / 'moon'
-            for filename in editor_cache.BUILD_FILES + ['native/island.mbt', 'scripts/smoke_island.py']:
+            for filename in editor_cache.BUILD_FILES + ['native/island.mbt', 'native/protocol.rs',
+                    'native/island_view.rs', 'scripts/smoke_island.py']:
                 path = root / filename
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text('public source')
@@ -110,6 +111,11 @@ class FingerprintTests(unittest.TestCase):
                 (root / 'native/island.mbt').write_text('different application')
                 self.assertNotEqual(editor_cache.fingerprint(source, native)['key'], original)
                 (root / 'native/island.mbt').write_text('public source')
+                for filename in ['native/protocol.rs', 'native/island_view.rs']:
+                    path = root / filename
+                    path.write_text('new fault-enabled application source')
+                    self.assertNotEqual(editor_cache.fingerprint(source, native)['key'], original)
+                    path.write_text('public source')
                 with patch.dict(editor_cache.os.environ, {'CFLAGS': '-O0'}):
                     self.assertNotEqual(editor_cache.fingerprint(source, native)['key'], original)
                 (native / 'libmzed_native.a').write_bytes(b'changed native runtime')

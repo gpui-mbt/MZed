@@ -34,3 +34,5 @@ inside the original editor status bar. See [the bounded contract and reproductio
 steps](docs/native-island.md). The unchanged baseline lane remains separate.
 Same-window acceptance requires the exact commit's native smoke evidence; ABI
 linkage alone is not sufficient. No upstream Zed writes or editor release.
+The one-shot handled-dispatch rejection/fallback gate is pending its exact
+candidate Linux workflow results and does not qualify all of issue 0019.

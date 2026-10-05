@@ -138,6 +138,10 @@ impl Native {
         self.dispatch(1, 1, 0)
     }
 
+    pub fn reject_increment_for_probe(&mut self) -> Result<(), i32> {
+        self.dispatch(0, 1, 0)
+    }
+
     pub fn resize(&mut self, width: i32, height: i32) -> Result<(), i32> {
         if self.scene.width == width && self.scene.height == height {
             return Ok(());
@@ -221,6 +225,10 @@ mod tests {
                 rgb: 0x2860a0
             }
         );
+        let original_request = native.request;
+        assert_eq!(native.reject_increment_for_probe(), Err(-8));
+        assert_eq!(native.request, original_request);
+        assert_eq!(native.scene(), original);
         native.increment().expect("increment");
         assert_eq!(native.scene().rgb, 0xc860a0);
         assert_eq!(native.scene().counter, 1);

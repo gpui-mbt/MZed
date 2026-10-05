@@ -103,7 +103,7 @@ jobs:
       - name: Verify restored cache bytes and system linkage
         if: ${{ github.run_attempt == 1 && inputs.uncached != true }}
         run: python3 scripts/editor_cache.py verify
-      - name: Same-window scene, real pointer lifecycle, fallback edit/save at 1x and 2x
+      - name: Same-window scene, real pointer lifecycle, and original-editor save at 1x and 2x
         env:
           LIBGL_ALWAYS_SOFTWARE: '1'
         run: |
@@ -112,6 +112,8 @@ jobs:
           status=0
           GPUI_X11_SCALE_FACTOR=1 xvfb-run -a -s '-screen 0 1280x800x24' dbus-run-session -- bash scripts/managed_island_smoke.sh || status=$?
           GPUI_X11_SCALE_FACTOR=2 xvfb-run -a -s '-screen 0 2560x1600x24' dbus-run-session -- bash scripts/managed_island_smoke.sh || status=$?
+          GPUI_X11_SCALE_FACTOR=1 xvfb-run -a -s '-screen 0 1280x800x24' dbus-run-session -- bash scripts/managed_island_smoke.sh dispatch-rejection || status=$?
+          GPUI_X11_SCALE_FACTOR=2 xvfb-run -a -s '-screen 0 2560x1600x24' dbus-run-session -- bash scripts/managed_island_smoke.sh dispatch-rejection || status=$?
           exit "$status"
       - name: Preserve source provenance and evidence, never publish an editor binary
         if: always()

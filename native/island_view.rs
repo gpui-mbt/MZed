@@ -14,6 +14,7 @@ use workspace::{HideStatusItem, ItemHandle, StatusItemView};
 
 pub struct NativeIsland {
     native: Option<Native>,
+    reject_next_increment_for_probe: bool,
     press: Press,
     capture: Option<HitboxId>,
     editor_focus: Option<FocusHandle>,
@@ -53,9 +54,12 @@ impl NativeIsland {
                 }
             }),
         ];
+        let reject_next_increment_for_probe = std::env::var("MZED_NATIVE_ISLAND_PROBE")
+            .is_ok_and(|value| value == "reject-first-increment");
         log::info!("MZed island mounted: gpui.mbt bf965ae, copied scene v1");
         Self {
             native,
+            reject_next_increment_for_probe,
             press: Press::default(),
             capture: None,
             editor_focus: None,
@@ -288,7 +292,13 @@ impl NativeIsland {
                 cx.stop_propagation();
                 if accept {
                     if let Some(native) = this.native.as_mut() {
-                        match native.increment() {
+                        let result = if std::mem::take(&mut this.reject_next_increment_for_probe) {
+                            log::info!("MZed island dispatch rejection probe");
+                            native.reject_increment_for_probe()
+                        } else {
+                            native.increment()
+                        };
+                        match result {
                             Ok(()) => log::info!("MZed island counter={}", native.scene().counter),
                             Err(error) => {
                                 log::error!("MZed island dispatch failed: {error}; disabling");

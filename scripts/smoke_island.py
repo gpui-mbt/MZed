@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 """Same-window native island interactions followed by original editor input/save."""
-from island_interactions import exercise
+from island_interactions import (
+    FALLBACK_ADDITION,
+    POST_FAILURE_ADDITION,
+    exercise,
+    exercise_dispatch_rejection,
+    wait_for_fixture_bytes,
+)
 import argparse
 import hashlib
 import json
@@ -10,6 +16,56 @@ import signal
 import re
 import subprocess
 import time
+
+SCENARIOS = ('normal', 'dispatch-rejection')
+PROBE_SETTING = 'reject-first-increment'
+
+
+def scenario_environment(inherited, scenario):
+    if scenario not in SCENARIOS:
+        raise ValueError(f'unsupported smoke scenario: {scenario}')
+    env = dict(inherited)
+    env.pop('MZED_NATIVE_ISLAND_PROBE', None)
+    env.update(MZED_NATIVE_ISLAND='1', ZED_ALLOW_EMULATED_GPU='1',
+        ZED_UPDATE_EXPLANATION='Pinned baseline experiment')
+    if scenario == 'dispatch-rejection':
+        env['MZED_NATIVE_ISLAND_PROBE'] = PROBE_SETTING
+    return env
+
+
+def validate_native_log(scenario, native_log):
+    expected = {
+        'normal': [
+            'MZed island mounted: gpui.mbt bf965ae, copied scene v1',
+            'MZed island counter=1',
+            'MZed island counter=2',
+            'MZed island disabled and native instance destroyed',
+            'MZed island remounted',
+            'MZed island counter=1',
+            'MZed island disabled and native instance destroyed',
+        ],
+        'dispatch-rejection': [
+            'MZed island mounted: gpui.mbt bf965ae, copied scene v1',
+            'MZed island dispatch rejection probe',
+            'MZed island dispatch failed: -8; disabling',
+            'MZed island counter=1',
+            'MZed island remounted',
+            'MZed island disabled and native instance destroyed',
+        ],
+    }
+    if scenario not in expected:
+        raise ValueError(f'unsupported smoke scenario: {scenario}')
+    events = re.findall(r'MZed (?:island|native) [^\n]*', native_log)
+    if events != expected[scenario]:
+        raise RuntimeError(
+            f'{scenario} native log did not match the exact event sequence: {events!r}')
+    return {
+        'native_events': events,
+        'native_dispatches': [int(event.rsplit('=', 1)[1]) for event in events
+            if event.startswith('MZed island counter=')],
+        'native_diagnostics': [event for event in events
+            if ' failed:' in event or ' rejected:' in event],
+    }
 
 
 def run(argv, **kwargs):
@@ -34,14 +90,18 @@ def main():
     parser.add_argument('--binary', required=True, type=Path)
     parser.add_argument('--output', required=True, type=Path)
     parser.add_argument('--source', required=True, type=Path)
+    parser.add_argument('--scenario', choices=SCENARIOS, default='normal')
     args = parser.parse_args()
     binary, output = args.binary.resolve(), args.output.resolve()
     source = args.source.resolve()
+    scenario = getattr(args, 'scenario', 'normal')
+    env = scenario_environment(os.environ, scenario)
     output.mkdir(parents=True, exist_ok=False)
     fixture = output / 'mzed-baseline-fixture.txt'
     original = 'MZed pinned baseline fixture\n'
-    addition = 'MZed native edit save verified'
-    record = {'schema': 1, 'editor_smoke': 'failed', 'same_window_island': 'failed',
+    record = {'schema': 1, 'scenario': scenario,
+        'probe_setting': env.get('MZED_NATIVE_ISLAND_PROBE'),
+        'editor_smoke': 'failed', 'same_window_island': 'failed',
         'backend': 'X11',
         'rendering_class': 'software-requested-not-hardware-qualified', 'scale': int(os.environ.get('GPUI_X11_SCALE_FACTOR', '1')),
         'display': os.environ.get('DISPLAY'), 'operations': []}
@@ -55,8 +115,8 @@ def main():
             'disable_ai': True, 'auto_update': False, 'auto_install_extensions': {'html': False}, 'ensure_final_newline_on_save': True, 'languages': {'Plain Text': {'enable_language_server': False}}}))
         home = output / 'home'
         home.mkdir()
-        env = dict(os.environ, HOME=str(home), XDG_CONFIG_HOME=str(output / 'config'), XDG_DATA_HOME=str(output / 'data'),
-            XDG_CACHE_HOME=str(output / 'cache'), WAYLAND_DISPLAY='', MZED_NATIVE_ISLAND='1', ZED_ALLOW_EMULATED_GPU='1', ZED_UPDATE_EXPLANATION='Pinned baseline experiment')
+        env.update(HOME=str(home), XDG_CONFIG_HOME=str(output / 'config'), XDG_DATA_HOME=str(output / 'data'),
+            XDG_CACHE_HOME=str(output / 'cache'), WAYLAND_DISPLAY='')
         record['xrandr'] = run(['xrandr', '--current'])
         record['vulkaninfo'] = run(['vulkaninfo', '--summary'])
         with (output / 'editor.log').open('w') as log:
@@ -96,28 +156,35 @@ def main():
                 and 'unrecognized project' not in text and 'unsupported gpu' not in text,
                 'visible fixture after staying in Restricted Mode')
             record['operations'].append('dismissed project prompt into Restricted Mode without trusting worktree')
-            exercise(window, output, process, record)
-            run(['xdotool', 'key', '--clearmodifiers', 'ctrl+End'])
-            run(['xdotool', 'type', '--clearmodifiers', '--delay', '30', addition])
-            run(['xdotool', 'key', '--clearmodifiers', 'ctrl+s'])
-            deadline = time.monotonic() + 10
-            while time.monotonic() < deadline and fixture.read_text() != original + addition + '\n':
-                time.sleep(0.2)
-            actual = fixture.read_text()
-            record['fixture_content'] = actual
-            if actual != original + addition + '\n':
-                raise RuntimeError('saved file does not contain exactly the expected native edit')
-            record['operations'].append('typed once and saved expected bytes through native keyboard input')
+            if scenario == 'normal':
+                exercise(window, output, process, record)
+                run(['xdotool', 'key', '--clearmodifiers', 'ctrl+End'])
+                run(['xdotool', 'type', '--clearmodifiers', '--delay', '30', FALLBACK_ADDITION])
+                run(['xdotool', 'key', '--clearmodifiers', 'ctrl+s'])
+                expected = (original + FALLBACK_ADDITION + '\n').encode()
+                wait_for_fixture_bytes(fixture, expected, 'normal editor save')
+                record['fixture_content'] = fixture.read_bytes().decode()
+                record['operations'].append('typed once and saved expected bytes through native keyboard input')
+            else:
+                exercise_dispatch_rejection(window, output, process, record)
+                run(['xdotool', 'key', '--clearmodifiers', 'ctrl+End'])
+                run(['xdotool', 'type', '--clearmodifiers', '--delay', '30', POST_FAILURE_ADDITION])
+                run(['xdotool', 'key', '--clearmodifiers', 'ctrl+s'])
+                intermediate = (original + FALLBACK_ADDITION + '\n').encode()
+                expected = intermediate + (POST_FAILURE_ADDITION + '\n').encode()
+                wait_for_fixture_bytes(fixture, expected, 'post-remount editor save')
+                actual = fixture.read_bytes()
+                record['post_remount_save'] = {
+                    'expected_utf8': expected.decode(),
+                    'expected_hex': expected.hex(),
+                    'actual_utf8': actual.decode(),
+                    'actual_hex': actual.hex(),
+                }
+                record['fixture_content'] = actual.decode()
+                record['operations'].append('appended and saved the post-failure remount line through native editor keys')
             run(['import', '-window', window, str(output / 'editor.png')])
             native_log = (output / 'data/logs/Zed.log').read_text()
-            dispatches = [int(value) for value in re.findall(r'MZed island counter=(\d+)', native_log)]
-            record['native_dispatches'] = dispatches
-            if dispatches != [1, 2, 1]:
-                raise RuntimeError(f'native dispatch sequence was not exactly [1, 2, 1]: {dispatches}')
-            if native_log.count('MZed island remounted') != 1 or native_log.count('MZed island disabled') != 2:
-                raise RuntimeError('native mount/destroy lifecycle count mismatch')
-            if re.search(r'MZed island [^\n]*failed', native_log):
-                raise RuntimeError('native island reported an error')
+            record.update(validate_native_log(scenario, native_log))
             record['editor_smoke'] = 'passed'
             record['same_window_island'] = 'passed'
     except (OSError, RuntimeError, subprocess.SubprocessError) as error:
