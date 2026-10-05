@@ -2,10 +2,25 @@ name: Same-window native island
 on:
   pull_request:
   workflow_dispatch:
+    inputs:
+      uncached:
+        description: Force final uncached qualification
+        type: boolean
+        default: false
 permissions:
   contents: read
 jobs:
+  harness:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - run: python3 -m unittest discover -s tests -v
+      - run: python3 -m py_compile scripts/*.py
   native-island:
+    needs: harness
     runs-on: ubuntu-24.04
     timeout-minutes: 110
     steps:
@@ -39,10 +54,55 @@ jobs:
             python3 scripts/build_native.py --source _build/gpui --output "_build/native-$mode" --mode "$mode" 2>&1 | tee "_build/native-$mode-build.log"
             bash scripts/test_native.sh "_build/native-$mode" "$mode" 2>&1 | tee "_build/native-$mode-test.log"
           done
+      - name: Fingerprint application, compiler, runtime and system inputs
+        id: fingerprint
+        run: python3 scripts/editor_cache.py fingerprint
+      - name: Restore exact repository build cache
+        id: editor-cache
+        if: ${{ github.run_attempt == 1 && inputs.uncached != true }}
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: _build/editor-cache
+          key: ${{ steps.fingerprint.outputs.key }}
+      - name: Reject any inexact cache match
+        if: ${{ steps.editor-cache.outputs.cache-matched-key != '' && steps.editor-cache.outputs.cache-hit != 'true' }}
+        run: exit 1
+      - name: Verify and materialize the exact cached executable
+        if: ${{ steps.editor-cache.outputs.cache-hit == 'true' }}
+        run: python3 scripts/editor_cache.py restore
       - name: Build intentional derived editor with pinned MoonBit scene image
+        if: ${{ steps.editor-cache.outputs.cache-hit != 'true' }}
         env:
           RUSTUP_TOOLCHAIN: 1.98.1
         run: python3 scripts/build_island.py --source _build/zed-island --native _build/native-normal --output _build/island-build
+      - name: Prepare bounded public-source build cache before smoke
+        if: ${{ github.run_attempt == 1 && inputs.uncached != true && steps.editor-cache.outputs.cache-hit != 'true' }}
+        run: python3 scripts/editor_cache.py save
+      - name: Save repository build cache, never a release artifact
+        if: ${{ github.run_attempt == 1 && inputs.uncached != true && steps.editor-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: _build/editor-cache
+          key: ${{ steps.fingerprint.outputs.key }}
+      - name: Preserve produced payload before fresh cache extraction
+        if: ${{ github.run_attempt == 1 && inputs.uncached != true && steps.editor-cache.outputs.cache-hit != 'true' }}
+        run: |
+          test ! -e _build/editor-cache-produced
+          mv _build/editor-cache _build/editor-cache-produced
+      - name: Check exact cache round-trip without recompilation
+        id: cache-round-trip
+        if: ${{ github.run_attempt == 1 && inputs.uncached != true && steps.editor-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: _build/editor-cache
+          key: ${{ steps.fingerprint.outputs.key }}
+          fail-on-cache-miss: true
+      - name: Require an exact round-trip hit
+        if: ${{ github.run_attempt == 1 && inputs.uncached != true && steps.editor-cache.outputs.cache-hit != 'true' }}
+        run: test '${{ steps.cache-round-trip.outputs.cache-hit }}' = true
+      - name: Verify restored cache bytes and system linkage
+        if: ${{ github.run_attempt == 1 && inputs.uncached != true }}
+        run: python3 scripts/editor_cache.py verify
       - name: Same-window scene, real pointer lifecycle, fallback edit/save at 1x and 2x
         env:
           LIBGL_ALWAYS_SOFTWARE: '1'
@@ -57,9 +117,11 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: native-island-${{ github.sha }}
+          name: native-island-${{ github.event.pull_request.head.sha || github.sha }}
           path: |
             upstream.lock.json
+            _build/editor-fingerprint.json
+            _build/editor-cache/manifest.json
             _build/zed-island/mzed-derived.json
             _build/native-*/build.json
             _build/native-*-build.log

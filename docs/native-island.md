@@ -76,6 +76,32 @@ Wayland, macOS application UI, Windows, accessibility, IME, modal-during-drag,
 full-frame performance and all hidden/clipped lifecycle paths remain outside
 this first qualification unless separately demonstrated.
 
+## Faster harness iteration, separate final qualification
+
+The Linux lane keeps an exact-input repository build cache. It is not a private
+or confidential store: it contains only this public-source executable, matching
+source/license metadata and integrity information. No user profile, credential,
+editor binary artifact or release is uploaded. The key includes source/patch and
+build-script contents, actual native archive/runtime/compiler inputs, Rust,
+normalized build environment and the installed system package set. Unsupported
+external Cargo configuration and compiler/loader overrides fail closed.
+
+An exact hit must match the source fingerprint, successful build record,
+executable size/SHA256, permissions and system-library hashes before it is copied
+under the same derived source tree. There are no restore-prefix keys; an inexact
+match is rejected. A miss builds once and saves before smoke, so a subsequent
+harness-only fix can reuse that verified executable. Cache round-trip extraction
+uses a fresh directory and is verified. Payload is capped at 2 GiB and requires
+explicit free disk headroom. These hashes establish integrity, not authenticated
+provenance against a malicious cache writer.
+
+Cached smoke is provisional. For final qualification, rerun the workflow (attempt
+2 or later) or select the uncached manual input: both bypass cache restore/save.
+A first attempt with a cache miss also records a genuine clean build. Build JSON
+states cache reuse and the executable's original source commit explicitly.
+The unchanged baseline lane remains available by manual dispatch and runs when
+its own inputs change; fast island harness tests gate the expensive island job.
+
 ## Local commands
 
 Set MOON_HOME to the matching toolchain, then acquire gpui.mbt at the exact pin

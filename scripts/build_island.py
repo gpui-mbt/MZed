@@ -12,6 +12,16 @@ import subprocess
 from baseline import LOCK, ROOT, run_bounded
 
 
+def build_environment(native, target):
+    names = ['PATH', 'HOME', 'USER', 'LOGNAME', 'LANG', 'LC_ALL', 'TMPDIR', 'TMP', 'TEMP',
+             'CARGO_HOME', 'RUSTUP_HOME', 'SSL_CERT_FILE', 'SSL_CERT_DIR']
+    env = {name: os.environ[name] for name in names if name in os.environ}
+    env.update(CI='true', CARGO_TARGET_DIR=str(target), RUSTUP_TOOLCHAIN=LOCK['rust'],
+               MZED_NATIVE_LIB_DIR=str(native),
+               ZED_UPDATE_EXPLANATION='MZed bounded derived-source experiment')
+    return env
+
+
 def build(source, native, output):
     output.mkdir(parents=True, exist_ok=False)
     target = source / 'target/mzed-island'
@@ -25,8 +35,9 @@ def build(source, native, output):
     argv = ['cargo', '+' + LOCK['rust'], 'build', '--locked', '-p', 'zed', '--bin', 'zed', '--jobs', '2',
         '--config', 'profile.dev.debug=0', '--config', 'profile.dev.build-override.debug=0',
         '--config', 'profile.dev.incremental=false']
-    env = dict(os.environ, CARGO_TARGET_DIR=str(target), RUSTUP_TOOLCHAIN=LOCK['rust'],
-        MZED_NATIVE_LIB_DIR=str(native), ZED_UPDATE_EXPLANATION='MZed bounded derived-source experiment')
+    env = build_environment(native, target)
+    # Per-run CI labels and undeclared compiler overrides are deliberately absent.
+    record['cache_reused'] = False
     try:
         if shutil.disk_usage(source).free < 20 * 1024**3:
             raise OSError('less than 20 GiB free; existing work is preserved')

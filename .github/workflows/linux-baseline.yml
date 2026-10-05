@@ -1,6 +1,14 @@
 name: Pinned Linux baseline
 on:
   pull_request:
+    paths:
+      - upstream.lock.json
+      - scripts/baseline.py
+      - scripts/smoke_x11.py
+      - scripts/managed_x11_smoke.sh
+      - tests/test_baseline.py
+      - tests/test_smoke.py
+      - .github/workflows/linux-baseline.yml
   push:
     branches: [main]
   workflow_dispatch:

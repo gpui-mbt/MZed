@@ -56,6 +56,23 @@ class PixelEvidenceTests(unittest.TestCase):
                 interaction.wait_window_state('42', process, visible=True)
         run.assert_not_called()
 
+    def test_temporary_capture_failure_is_not_absence(self):
+        failure = interaction.subprocess.CalledProcessError(1, ['import'], stderr='Resource temporarily unavailable')
+        diagnostics = {}
+        with patch.object(interaction, 'rectangle', side_effect=[failure, None]) as capture, \
+                patch.object(interaction.time, 'sleep'):
+            self.assertIsNone(interaction.wait_rectangle('42', Path('.'), 'disabled', (40, 96, 160), False, diagnostics))
+        self.assertEqual(capture.call_count, 2)
+        self.assertEqual(diagnostics, {'disabled': 1})
+
+    def test_persistent_capture_failure_cannot_pass_absence(self):
+        failure = interaction.subprocess.CalledProcessError(1, ['import'], stderr='Resource temporarily unavailable')
+        with patch.object(interaction, 'rectangle', side_effect=failure), \
+                patch.object(interaction.time, 'monotonic', side_effect=[0, 0, 11]), \
+                patch.object(interaction.time, 'sleep'):
+            with self.assertRaisesRegex(RuntimeError, 'last capture error'):
+                interaction.wait_rectangle('42', Path('.'), 'disabled', (40, 96, 160), False)
+
     def test_empty_scene_is_not_success(self):
         with patch.object(interaction, 'run', side_effect=['', '4 4']), patch.object(
                 interaction.subprocess, 'check_output', return_value=bytes(48)):

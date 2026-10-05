@@ -23,14 +23,25 @@ def rectangle(window, screenshot, color):
     return (left, top, right, bottom)
 
 
-def wait_rectangle(window, output, stage, color, expected=True):
+def wait_rectangle(window, output, stage, color, expected=True, diagnostics=None):
     deadline = time.monotonic() + 10
+    last_capture_error = None
     while time.monotonic() < deadline:
-        found = rectangle(window, output / (stage + '.png'), color)
+        try:
+            found = rectangle(window, output / (stage + '.png'), color)
+        except subprocess.CalledProcessError as error:
+            if error.cmd[:1] != ['import'] or 'Resource temporarily unavailable' not in str(error.stderr):
+                raise
+            # A failed capture is never evidence that the scene is absent.
+            last_capture_error = str(error.stderr)[-1000:]
+            if diagnostics is not None:
+                diagnostics[stage] = diagnostics.get(stage, 0) + 1
+            time.sleep(0.15)
+            continue
         if bool(found) == expected:
             return found
         time.sleep(0.15)
-    raise RuntimeError(f'{stage}: expected scene pixels were not observed')
+    raise RuntimeError(f'{stage}: expected scene pixels were not observed; last capture error: {last_capture_error}')
 
 
 def center(rect):
@@ -111,11 +122,14 @@ def wait_window_state(window, process, visible):
 
 def exercise(window, output, process, record):
     scale = int(record['scale'])
+    record['capture_retries'] = {}
+    def scene(stage, color, expected=True):
+        return wait_rectangle(window, output, stage, color, expected, record['capture_retries'])
     owned = toplevels(process.pid)
     if owned != [window]:
         raise RuntimeError(f'expected one process-owned toplevel, got {owned}')
     record['toplevels_before'] = owned
-    rect = wait_rectangle(window, output, 'island-initial', COLORS[0])
+    rect = scene('island-initial', COLORS[0])
     left, top, right, bottom = rect
     if abs((right-left+1) - 120*scale) > 2 or abs((bottom-top+1) - 18*scale) > 2:
         raise RuntimeError(f'logical scene was not scaled exactly once: {rect}, scale={scale}')
@@ -127,23 +141,23 @@ def exercise(window, output, process, record):
     finally:
         run(['xdotool', 'keyup', 'shift'])
     click(window, center(rect), '4')
-    wait_rectangle(window, output, 'island-unsupported-input', COLORS[0])
+    scene('island-unsupported-input', COLORS[0])
     record['operations'].append('right, modified-left and wheel did not activate native scene')
     move(window, center(rect))
     run(['xdotool', 'mousedown', '1'])
     time.sleep(0.4)
     run(['xdotool', 'windowsize', '--sync', window, str(1120*scale), str(720*scale)])
     time.sleep(0.4)
-    rect = wait_rectangle(window, output, 'island-held-after-resize', COLORS[0])
+    rect = scene('island-held-after-resize', COLORS[0])
     move(window, center(rect))
     run(['xdotool', 'mouseup', '1'])
-    rect = wait_rectangle(window, output, 'island-clicked', COLORS[1])
+    rect = scene('island-clicked', COLORS[1])
     record['operations'].append('one real plain-left sequence survived redraw/window resize and changed MoonBit scene')
     move(window, center(rect))
     run(['xdotool', 'mousedown', '1'])
     move(window, (400, 250))
     run(['xdotool', 'mouseup', '1'])
-    wait_rectangle(window, output, 'island-outside-release', COLORS[1])
+    scene('island-outside-release', COLORS[1])
     record['operations'].append('owned outside release canceled without native activation')
     move(window, center(rect))
     run(['xdotool', 'mousedown', '1'])
@@ -153,28 +167,28 @@ def exercise(window, output, process, record):
     run(['xdotool', 'windowmap', window])
     run(['xdotool', 'windowactivate', window])
     wait_window_state(window, process, visible=True)
-    rect = wait_rectangle(window, output, 'island-interrupted-press', COLORS[1])
+    rect = scene('island-interrupted-press', COLORS[1])
     click(window, (400, 250))
     record['operations'].append('minimized during owned press, released outside, restored without stale ownership')
     # A paired sequence followed by a bare late up must commit only once.
     click(window, center(rect))
     run(['xdotool', 'mouseup', '1'])
-    rect = wait_rectangle(window, output, 'island-repeat', COLORS[0])
+    rect = scene('island-repeat', COLORS[0])
     toggle = (rect[0] - 18*scale, center(rect)[1])
     click(window, toggle)
-    wait_rectangle(window, output, 'island-disabled', COLORS[0], expected=False)
-    wait_rectangle(window, output, 'island-disabled-pink', COLORS[1], expected=False)
+    scene('island-disabled', COLORS[0], expected=False)
+    scene('island-disabled-pink', COLORS[1], expected=False)
     # The host controller stays mounted to swallow late owned sequences, but no MoonBit state exists.
     click(window, center(rect))
     click(window, toggle)
-    rect = wait_rectangle(window, output, 'island-remounted', COLORS[0])
+    rect = scene('island-remounted', COLORS[0])
     run(['xdotool', 'mouseup', '1'])
-    wait_rectangle(window, output, 'island-late-release', COLORS[0])
+    scene('island-late-release', COLORS[0])
     click(window, center(rect))
-    rect = wait_rectangle(window, output, 'island-remount-clicked', COLORS[1])
+    rect = scene('island-remount-clicked', COLORS[1])
     click(window, (rect[0] - 18*scale, center(rect)[1]))
-    wait_rectangle(window, output, 'island-final-disabled', COLORS[0], expected=False)
-    wait_rectangle(window, output, 'island-final-disabled-pink', COLORS[1], expected=False)
+    scene('island-final-disabled', COLORS[0], expected=False)
+    scene('island-final-disabled-pink', COLORS[1], expected=False)
     record['operations'].append('disabled, clicked inactive region, remounted fresh state, rejected bare late release, disabled again')
     owned = toplevels(process.pid)
     record['toplevels_after'] = owned
