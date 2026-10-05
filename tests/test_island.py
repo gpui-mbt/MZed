@@ -10,6 +10,25 @@ import island_interactions as interaction
 
 
 class PixelEvidenceTests(unittest.TestCase):
+    def test_repeated_same_position_is_verified_without_waiting_for_motion(self):
+        with patch.object(interaction, 'run', side_effect=['Absolute upper-left X: 10\nAbsolute upper-left Y: 20\nBorder width: 0\n', '', 'X=15\nY=27\n']) as run:
+            interaction.move('42', (5, 7))
+            self.assertEqual(run.call_args_list[1].args[0], ['xdotool', 'mousemove', '--window', '42', '5', '7'])
+            self.assertEqual(run.call_args_list[2].args[0], ['xdotool', 'getmouselocation', '--shell'])
+
+    def test_unreached_pointer_position_fails_closed(self):
+        with patch.object(interaction, 'run', side_effect=['Absolute upper-left X: 10\nAbsolute upper-left Y: 20\nBorder width: 0\n', '', 'X=0\nY=0\n']), \
+                patch.object(interaction.time, 'monotonic', side_effect=[0, 0, 3]), \
+                patch.object(interaction.time, 'sleep'):
+            with self.assertRaisesRegex(RuntimeError, 'did not reach'):
+                interaction.move('42', (5, 7))
+
+    def test_unqualified_client_border_fails_before_motion(self):
+        with patch.object(interaction, 'run', return_value='Absolute upper-left X: 10\nAbsolute upper-left Y: 20\nBorder width: 1\n') as run:
+            with self.assertRaisesRegex(RuntimeError, 'zero-border'):
+                interaction.move('42', (5, 7))
+            self.assertEqual(run.call_count, 1)
+
     def test_empty_scene_is_not_success(self):
         with patch.object(interaction, 'run', side_effect=['', '4 4']), patch.object(
                 interaction.subprocess, 'check_output', return_value=bytes(48)):

@@ -1,6 +1,7 @@
 """Real X11 input plus pixels and process-owned toplevel evidence; no simulated UI."""
 import subprocess
 import time
+import re
 from smoke_x11 import run
 
 COLORS = [(40, 96, 160), (200, 96, 160)]
@@ -37,8 +38,36 @@ def center(rect):
     return ((left + right) // 2, (top + bottom) // 2)
 
 
+def shell_coordinates(output):
+    values = dict(line.split('=', 1) for line in output.splitlines() if '=' in line)
+    try:
+        return int(values['X']), int(values['Y'])
+    except (KeyError, ValueError) as error:
+        raise RuntimeError('pointer query did not return numeric X/Y') from error
+
+
 def move(window, position):
-    run(['xdotool', 'mousemove', '--sync', '--window', window, *map(str, position)])
+    geometry = run(['xwininfo', '-id', window])
+    x = re.search(r'Absolute upper-left X:\s*(-?\d+)', geometry)
+    y = re.search(r'Absolute upper-left Y:\s*(-?\d+)', geometry)
+    if x is None or y is None:
+        raise RuntimeError('window query did not return an absolute client origin')
+    border = re.search(r'Border width:\s*(\d+)', geometry)
+    if border is None or int(border.group(1)) != 0:
+        raise RuntimeError('pointer proof requires the pinned zero-border client window')
+    origin = (int(x.group(1)), int(y.group(1)))
+    target = (origin[0] + position[0], origin[1] + position[1])
+    # --sync waits for movement, which is unsuitable for repeated same-position
+    # window-relative moves on the pinned X11 driver. Verify actual coordinates.
+    run(['xdotool', 'mousemove', '--window', window, *map(str, position)])
+    deadline = time.monotonic() + 2
+    current = None
+    while time.monotonic() < deadline:
+        current = shell_coordinates(run(['xdotool', 'getmouselocation', '--shell']))
+        if current == target:
+            return
+        time.sleep(0.05)
+    raise RuntimeError(f'pointer did not reach verified root coordinates {target}; got {current}')
 
 
 def click(window, position, button='1'):

@@ -49,8 +49,10 @@ jobs:
         run: |
           export XDG_RUNTIME_DIR="$(mktemp -d)"
           chmod 700 "$XDG_RUNTIME_DIR"
-          GPUI_X11_SCALE_FACTOR=1 xvfb-run -a -s '-screen 0 1280x800x24' dbus-run-session -- bash scripts/managed_island_smoke.sh
-          GPUI_X11_SCALE_FACTOR=2 xvfb-run -a -s '-screen 0 2560x1600x24' dbus-run-session -- bash scripts/managed_island_smoke.sh
+          status=0
+          GPUI_X11_SCALE_FACTOR=1 xvfb-run -a -s '-screen 0 1280x800x24' dbus-run-session -- bash scripts/managed_island_smoke.sh || status=$?
+          GPUI_X11_SCALE_FACTOR=2 xvfb-run -a -s '-screen 0 2560x1600x24' dbus-run-session -- bash scripts/managed_island_smoke.sh || status=$?
+          exit "$status"
       - name: Preserve source provenance and evidence, never publish an editor binary
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
