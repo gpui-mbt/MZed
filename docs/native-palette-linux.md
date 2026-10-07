@@ -4,10 +4,11 @@ This document describes the bounded MZed integration work. The pinned derived
 Zed package passed a serial compile/link check. In a dedicated X11 profile, the
 MZed palette opened in the existing Zed window, rendered its field and selected
 command row legibly, accepted a keyboard query, filtered to `Open Settings File`,
-and closed cleanly. The query `Settings` matched; lowercase `settings`
+and closed with exit code 0. The query `Settings` matched; lowercase `settings`
 did not, because the pinned shared picker currently filters case-sensitively.
-This smoke covers the X11 window, palette, query, and close path. Wayland and
-IME input have not been qualified.
+The shutdown log also contains an inotify-watch removal warning and a GPUI
+`window not found` error. This smoke covers the X11 window, palette, query, and
+close path. Wayland and IME input have not been qualified.
 
 The Linux-only palette is mounted as a modal in the existing Zed window when
 `MZED_NATIVE_PALETTE=1` and opened with `Ctrl+Alt+Shift+P`. The Rust view owns
