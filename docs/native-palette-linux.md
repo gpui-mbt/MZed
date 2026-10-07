@@ -18,8 +18,30 @@ exit code 0. The profile used llvmpipe OpenGL with software rendering. Its Zed
 log records unavailable Vulkan drivers, network failures for extension and ACP
 registries, missing DBus, and a `timed out waiting on app_will_quit` error at
 shutdown. The smoke covers normal keyboard events and palette open/query/dismiss
-on the nested Wayland session; it does not exercise text-input-v3 preedit or
-commit, Fcitx5, Mozc, or IME behavior.
+on the nested Wayland session; it did not exercise IME behavior.
+
+A separate nested Wayland IME smoke used the pinned `ZED_STATELESS=1` diagnostic
+path, which uses in-memory databases and skips the Linux single-instance
+listener. With nested Fcitx5 running and its Mozc addon loaded, the palette
+displayed `にほんご` preedit and candidate choices; Escape canceled composition
+while keeping the palette open; Space and Return committed `日本語`; a fresh
+Escape dismissed the palette.
+This demonstrates visible Japanese preedit, cancel, and commit behavior in the
+tested nested profile. The selected Fcitx engine was not independently
+confirmed by the saved status command, and a direct Fcitx-to-Mozc IPC identity
+trace was not captured. The Mozc server PID and executable were not captured
+while input was active.
+
+The stateless run does not resolve the persistent-profile startup issue: the
+earlier normal run still reported `zed is already running`, and no bind errno
+was available in its log. The diagnostic is limited to its isolated profile
+and does not imply that all settings, logs, caches, or other files are
+disabled. Zed and the runner both exited with code 0, while Zed logged a
+`timed out waiting on app_will_quit` diagnostic. Fcitx logged a SIGTERM
+shutdown trace. After shutdown, a Mozc server was observed as a zombie with
+parent PID 1; a later check no longer found its process entry, but the
+reaping time and cause were not observed. This is not an error-free or
+complete-cleanup claim.
 
 The Linux-only palette is mounted as a modal in the existing Zed window when
 `MZED_NATIVE_PALETTE=1` and opened with `Ctrl+Alt+Shift+Z`. This avoids the
@@ -58,16 +80,18 @@ The following paths remain outside this profile:
   grapheme clusters, merged glyphs, missing glyphs, and non-monotone caret
   stops. The host uses GPUI shaping; it makes no Pango-equivalence or complete
   native raster-admission claim.
-- Runtime coverage is limited to the pinned X11 profile and the nested
-  labwc/Pixman keyboard smoke. Actual Wayland text-input-v3 preedit/commit,
-  other compositors, seat hot-unplug, macOS, Windows, and accessibility
-  behavior remain unqualified.
+- Runtime coverage is limited to the pinned X11 profile and nested
+  labwc/Pixman keyboard and Japanese IME smoke. Other compositors, hardware
+  renderers, seat hot-unplug, macOS, Windows, and accessibility behavior
+  remain unqualified.
 
 The linked C tests exercise the copied MoonBit ABI, Unicode boundaries,
 composition transactions, and delayed Enter/Escape state transitions. The
 derived Zed package compile/link check confirms the Rust host graph builds, but
 the linked tests and compile do not execute the Rust ModalLayer, GPUI keybinding
 interceptor, Wayland client, or an IME. The X11 and nested Wayland runs exercised
-the mounted palette, visible keyboard query/filter result, and dismissal; the
-Wayland launcher exited with code 0. The Wayland run does not qualify
-text-input-v3 preedit/commit or real Fcitx5/Mozc input.
+the mounted palette, visible keyboard query/filter result, and dismissal. The
+separate stateless Wayland run also showed Japanese preedit, cancellation, and
+commit using Fcitx5/Mozc in the nested profile. Persistent-profile startup,
+direct Fcitx-to-Mozc IPC identity, selected-engine machine verification, and
+complete process reaping remain unqualified or incomplete as recorded above.
