@@ -14,3 +14,7 @@ cc -std=gnu11 -Wall -Wextra -Werror -I "$root/native" \
   "$root/tests/native_palette_lifecycle.c" "$out/libmzed_native.a" \
   -o "$out/palette-lifecycle-tests"
 "$out/palette-lifecycle-tests"
+cc -std=gnu11 -Wall -Wextra -Werror -I "$root/native" \
+  "$root/tests/native_palette_host_lifecycle.c" "$out/libmzed_native.a" \
+  -o "$out/palette-host-lifecycle-tests"
+"$out/palette-host-lifecycle-tests"

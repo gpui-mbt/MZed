@@ -1,3 +1,16 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index aaf8740..1bc8175 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -23010,6 +23010,8 @@ dependencies = [
+  "tracing",
+  "ui",
+  "ui_prompt",
++ "unicode-bidi",
++ "unicode-segmentation",
+  "url",
+  "urlencoding",
+  "util",
 diff --git a/README.md b/README.md
 index 9f641fb..24840ee 100644
 --- a/README.md
@@ -10,7 +23,7 @@ index 9f641fb..24840ee 100644
  
  [![Zed](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/zed-industries/zed/main/assets/badge/v0.json)](https://zed.dev)
 diff --git a/crates/gpui/src/input.rs b/crates/gpui/src/input.rs
-index 4167aa0..1dfe727 100644
+index 4167aa0..b087307 100644
 --- a/crates/gpui/src/input.rs
 +++ b/crates/gpui/src/input.rs
 @@ -54,6 +54,14 @@ pub trait EntityInputHandler: 'static + Sized {
@@ -28,7 +41,25 @@ index 4167aa0..1dfe727 100644
      /// See [`InputHandler::replace_and_mark_text_in_range`] for details
      fn replace_and_mark_text_in_range(
          &mut self,
-@@ -183,6 +191,11 @@ impl<V: EntityInputHandler> InputHandler for ElementInputHandler<V> {
+@@ -104,6 +112,17 @@ pub trait EntityInputHandler: 'static + Sized {
+         true
+     }
+ 
++    /// Whether a one-byte Wayland text-input-v3 commit should be delivered to
++    /// this focused field as text. The default preserves the platform's
++    /// existing key-event routing for other input handlers.
++    fn prefers_direct_ime_commit_as_text(
++        &self,
++        _window: &mut Window,
++        _cx: &mut Context<Self>,
++    ) -> bool {
++        false
++    }
++
+     /// See [`InputHandler::text_input_configuration`] for details
+     fn text_input_configuration(
+         &mut self,
+@@ -183,6 +202,11 @@ impl<V: EntityInputHandler> InputHandler for ElementInputHandler<V> {
          });
      }
  
@@ -40,7 +71,20 @@ index 4167aa0..1dfe727 100644
      fn replace_and_mark_text_in_range(
          &mut self,
          range_utf16: Option<Range<usize>>,
-@@ -287,10 +300,14 @@ impl<V: EntityInputHandler> InputHandler for ElementInputHandler<V> {
+@@ -264,6 +288,12 @@ impl<V: EntityInputHandler> InputHandler for ElementInputHandler<V> {
+             .update(cx, |view, cx| view.accepts_text_input(window, cx))
+     }
+ 
++    fn prefers_direct_ime_commit_as_text(&mut self, window: &mut Window, cx: &mut App) -> bool {
++        self.view.update(cx, |view, cx| {
++            view.prefers_direct_ime_commit_as_text(window, cx)
++        })
++    }
++
+     fn text_input_configuration(
+         &mut self,
+         window: &mut Window,
+@@ -287,10 +317,14 @@ impl<V: EntityInputHandler> InputHandler for ElementInputHandler<V> {
  mod tests {
      use super::*;
      use crate::{
@@ -57,7 +101,7 @@ index 4167aa0..1dfe727 100644
  
      #[gpui::test]
      fn text_input_configuration_and_focus_state_are_forwarded_on_change(cx: &mut TestAppContext) {
-@@ -381,6 +398,159 @@ mod tests {
+@@ -381,6 +415,159 @@ mod tests {
          );
      }
  
@@ -218,7 +262,7 @@ index 4167aa0..1dfe727 100644
          focus_handle: FocusHandle,
          configuration: TextInputConfiguration,
 diff --git a/crates/gpui/src/platform.rs b/crates/gpui/src/platform.rs
-index c03653e..ccac54e 100644
+index c03653e..e4f2ac7 100644
 --- a/crates/gpui/src/platform.rs
 +++ b/crates/gpui/src/platform.rs
 @@ -37,9 +37,9 @@ pub(crate) type PlatformScreenCaptureFrame =
@@ -321,7 +365,23 @@ index c03653e..ccac54e 100644
      }
  
      /// See [`InputHandler::prefers_ime_for_printable_keys`].
-@@ -1962,6 +2007,14 @@ pub trait InputHandler: 'static {
+@@ -1886,6 +1931,15 @@ impl PlatformInputHandler {
+             .unwrap_or(false)
+     }
+ 
++    /// Queries whether a one-byte Wayland text-input-v3 commit is explicitly
++    /// opted into direct text delivery by this handler. `None` means its owner
++    /// is unavailable and the caller must discard the stale input batch.
++    pub fn query_prefers_direct_ime_commit_as_text(&mut self) -> Option<bool> {
++        self.cx
++            .update(|window, cx| self.handler.prefers_direct_ime_commit_as_text(window, cx))
++            .ok()
++    }
++
+     /// See [`InputHandler::text_input_configuration`].
+     pub fn text_input_configuration(
+         &mut self,
+@@ -1962,6 +2016,14 @@ pub trait InputHandler: 'static {
          cx: &mut App,
      );
  
@@ -336,6 +396,20 @@ index c03653e..ccac54e 100644
      /// Replace the text in the given document range with the given text,
      /// and mark the given text as part of an IME 'composing' state
      /// Corresponds to [setMarkedText(_:selectedRange:replacementRange:)](https://developer.apple.com/documentation/appkit/nstextinputclient/1438246-setmarkedtext)
+@@ -2090,6 +2152,13 @@ pub trait InputHandler: 'static {
+         false
+     }
+ 
++    /// Whether a one-byte Wayland text-input-v3 commit should reach this
++    /// focused input handler as text instead of its existing key-event path.
++    /// Defaults to `false` so handlers retain current editor dispatch behavior.
++    fn prefers_direct_ime_commit_as_text(&mut self, _window: &mut Window, _cx: &mut App) -> bool {
++        false
++    }
++
+     /// Get this handler's preferences for platform text assistance.
+     ///
+     /// GPUI re-queries this every frame and forwards it to the platform window
 diff --git a/crates/gpui/src/platform/test/window.rs b/crates/gpui/src/platform/test/window.rs
 index 14fb889..1848e40 100644
 --- a/crates/gpui/src/platform/test/window.rs
@@ -382,7 +456,7 @@ index 14fb889..1848e40 100644
          self.0.lock().text_input_configurations.push(configuration);
      }
 diff --git a/crates/gpui/src/window.rs b/crates/gpui/src/window.rs
-index b1c9e11..1d12517 100644
+index b1c9e11..199c8de 100644
 --- a/crates/gpui/src/window.rs
 +++ b/crates/gpui/src/window.rs
 @@ -2307,6 +2307,8 @@ impl Window {
@@ -394,7 +468,7 @@ index b1c9e11..1d12517 100644
  
          self.refresh();
      }
-@@ -2319,10 +2321,15 @@ impl Window {
+@@ -2319,13 +2321,27 @@ impl Window {
              return;
          }
  
@@ -411,7 +485,19 @@ index b1c9e11..1d12517 100644
          self.refresh();
      }
  
-@@ -5214,7 +5221,12 @@ impl Window {
++    /// Immediately retires the native text-input owner for the current focus
++    /// generation without moving GPUI focus. This is for bounded modal owners
++    /// that close synchronously but must let `ModalLayer` restore their prior
++    /// focus only after dismissal.
++    pub fn retire_text_input_owner(&self) {
++        self.platform_window
++            .invalidate_text_input_owner(self.focus_generation);
++    }
++
+     /// Blur the window and don't allow anything in it to be focused again.
+     pub fn disable_focus(&mut self, cx: &mut App) {
+         self.blur(cx);
+@@ -5214,7 +5230,12 @@ impl Window {
              let cx = self.to_async(cx);
              self.next_frame
                  .input_handlers
@@ -425,7 +511,7 @@ index b1c9e11..1d12517 100644
          }
      }
  
-@@ -8564,6 +8576,9 @@ mod tests {
+@@ -8564,6 +8585,9 @@ mod tests {
              .update(cx, |_, window, _| window.activate_window())
              .unwrap();
          cx.executor().run_until_parked();
@@ -435,11 +521,16 @@ index b1c9e11..1d12517 100644
  
          window
              .update(cx, |this, window, cx| {
-@@ -8579,6 +8594,18 @@ mod tests {
+@@ -8579,6 +8603,26 @@ mod tests {
              })
              .unwrap();
          assert_eq!(b_focus_count.get(), 1);
 +        assert_eq!(platform_window.text_input_owner_invalidations(), [1, 2]);
++
++        window
++            .update(cx, |_, window, _| window.retire_text_input_owner())
++            .unwrap();
++        assert_eq!(platform_window.text_input_owner_invalidations(), [1, 2, 2]);
 +
 +        window
 +            .update(cx, |this, window, cx| {
@@ -447,10 +538,13 @@ index b1c9e11..1d12517 100644
 +                window.focus(&b, cx);
 +            })
 +            .unwrap();
-+        assert_eq!(platform_window.text_input_owner_invalidations(), [1, 2]);
++        assert_eq!(platform_window.text_input_owner_invalidations(), [1, 2, 2]);
 +
 +        window.update(cx, |_, window, cx| window.blur(cx)).unwrap();
-+        assert_eq!(platform_window.text_input_owner_invalidations(), [1, 2, 3]);
++        assert_eq!(
++            platform_window.text_input_owner_invalidations(),
++            [1, 2, 2, 3]
++        );
      }
  
      #[gpui::test]
@@ -467,7 +561,7 @@ index cbc962b..b506a66 100644
  mod serial;
  mod window;
 diff --git a/crates/gpui_linux/src/linux/wayland/client.rs b/crates/gpui_linux/src/linux/wayland/client.rs
-index 469eb44..118f6d0 100644
+index 469eb44..9697b8e 100644
 --- a/crates/gpui_linux/src/linux/wayland/client.rs
 +++ b/crates/gpui_linux/src/linux/wayland/client.rs
 @@ -28,7 +28,8 @@ use wayland_client::protocol::wl_data_device_manager::DndAction;
@@ -1078,7 +1172,7 @@ index 469eb44..118f6d0 100644
          }
      }
  }
-@@ -1557,6 +1892,88 @@ pub(crate) fn get_window(
+@@ -1557,6 +1892,103 @@ pub(crate) fn get_window(
      state.windows.get(surface_id).cloned()
  }
  
@@ -1097,6 +1191,21 @@ index 469eb44..118f6d0 100644
 +            state.ime_candidate.as_ref(),
 +            owner,
 +        )
++}
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++enum SingleByteCommitRoute {
++    KeyEvent,
++    TextInput,
++    Drop,
++}
++
++fn single_byte_commit_route(preference: Option<bool>) -> SingleByteCommitRoute {
++    match preference {
++        Some(false) => SingleByteCommitRoute::KeyEvent,
++        Some(true) => SingleByteCommitRoute::TextInput,
++        None => SingleByteCommitRoute::Drop,
++    }
 +}
 +
 +fn key_sequence_owner_is_current(
@@ -1167,7 +1276,7 @@ index 469eb44..118f6d0 100644
  impl Dispatch<wl_surface::WlSurface, ()> for WaylandClientStatePtr {
      fn event(
          this: &mut Self,
-@@ -1768,28 +2185,38 @@ impl Dispatch<xdg_activation_token_v1::XdgActivationTokenV1, ()> for WaylandClie
+@@ -1768,28 +2200,38 @@ impl Dispatch<xdg_activation_token_v1::XdgActivationTokenV1, ()> for WaylandClie
  
  impl Dispatch<wl_seat::WlSeat, ()> for WaylandClientStatePtr {
      fn event(
@@ -1210,7 +1319,7 @@ index 469eb44..118f6d0 100644
                  state.text_input = state
                      .globals
                      .text_input_manager
-@@ -1801,6 +2228,20 @@ impl Dispatch<wl_seat::WlSeat, ()> for WaylandClientStatePtr {
+@@ -1801,6 +2243,20 @@ impl Dispatch<wl_seat::WlSeat, ()> for WaylandClientStatePtr {
                  }
  
                  state.wl_keyboard = Some(keyboard);
@@ -1231,7 +1340,7 @@ index 469eb44..118f6d0 100644
              }
              if capabilities.contains(wl_seat::Capability::Pointer) {
                  let pointer = seat.get_pointer(qh, ());
-@@ -1826,6 +2267,13 @@ impl Dispatch<wl_seat::WlSeat, ()> for WaylandClientStatePtr {
+@@ -1826,6 +2282,13 @@ impl Dispatch<wl_seat::WlSeat, ()> for WaylandClientStatePtr {
                  }
  
                  state.wl_pointer = Some(pointer);
@@ -1245,7 +1354,7 @@ index 469eb44..118f6d0 100644
              }
          }
      }
-@@ -1834,13 +2282,16 @@ impl Dispatch<wl_seat::WlSeat, ()> for WaylandClientStatePtr {
+@@ -1834,13 +2297,16 @@ impl Dispatch<wl_seat::WlSeat, ()> for WaylandClientStatePtr {
  impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
      fn event(
          this: &mut Self,
@@ -1263,7 +1372,7 @@ index 469eb44..118f6d0 100644
          let mut state = client.borrow_mut();
          match event {
              wl_keyboard::Event::RepeatInfo { rate, delay } => {
-@@ -1882,30 +2333,62 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
+@@ -1882,30 +2348,62 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
  
                  this.handle_keyboard_layout_change();
              }
@@ -1340,7 +1449,7 @@ index 469eb44..118f6d0 100644
                      window.set_focused(false);
                  }
              }
-@@ -1955,8 +2438,22 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
+@@ -1955,8 +2453,22 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
                      return;
                  };
  
@@ -1364,7 +1473,7 @@ index 469eb44..118f6d0 100644
                  let keysym = keymap_state.key_get_one_sym(keycode);
  
                  match key_state {
-@@ -1975,6 +2472,18 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
+@@ -1975,6 +2487,18 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
                                      drop(state);
                                      focused_window.handle_ime(ImeInput::SetMarkedText(pre_edit));
                                      state = client.borrow_mut();
@@ -1383,7 +1492,7 @@ index 469eb44..118f6d0 100644
                                  }
  
                                  xkb::Status::Composed => {
-@@ -1991,13 +2500,41 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
+@@ -1991,13 +2515,41 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
                                      drop(state);
                                      if let Some(pre_edit) = pre_edit {
                                          focused_window.handle_ime(ImeInput::InsertText(pre_edit));
@@ -1426,7 +1535,7 @@ index 469eb44..118f6d0 100644
                                  }
                                  _ => {}
                              }
-@@ -2009,12 +2546,18 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
+@@ -2009,12 +2561,18 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
                              prefer_character_input: false,
                          });
  
@@ -1446,7 +1555,7 @@ index 469eb44..118f6d0 100644
                          state
                              .loop_handle
                              .insert_source(Timer::from_duration(state.repeat.delay), {
-@@ -2027,7 +2570,10 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
+@@ -2027,7 +2585,10 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
                                      let client = this.get_client();
                                      let state = client.borrow();
                                      let is_repeating = id == state.repeat.current_id
@@ -1458,7 +1567,7 @@ index 469eb44..118f6d0 100644
                                          && state.keyboard_focused_window.is_some();
  
                                      if !is_repeating || rate == 0 {
-@@ -2078,69 +2624,99 @@ impl Dispatch<zwp_text_input_v3::ZwpTextInputV3, ()> for WaylandClientStatePtr {
+@@ -2078,69 +2639,117 @@ impl Dispatch<zwp_text_input_v3::ZwpTextInputV3, ()> for WaylandClientStatePtr {
          _: &Connection,
          _: &QueueHandle<Self>,
      ) {
@@ -1490,14 +1599,29 @@ index 469eb44..118f6d0 100644
 -                    drop(state);
 -                    // IBus Intercepts keys like `a`, `b`, but those keys are needed for vim mode.
 -                    // We should only send ASCII characters to Zed, otherwise a user could remap a letter like `か` or `相`.
+-                    if commit_text.len() == 1 {
+-                        window.handle_input(PlatformInput::KeyDown(KeyDownEvent {
+-                            keystroke: Keystroke {
+-                                modifiers: Modifiers::default(),
+-                                key: commit_text.clone(),
+-                                key_char: Some(commit_text),
+-                            },
+-                            is_held: false,
+-                            prefer_character_input: false,
+-                        }));
+-                    } else {
+-                        window.handle_ime(ImeInput::InsertText(commit_text));
+-                    }
 +                let client = this.get_client();
 +                let mut state = client.borrow_mut();
 +                if !ime_owner_is_current(&state, &owner) {
 +                    return;
-+                }
+                 }
 +                state.pending_ime_batch.record_commit(text);
-+            }
-+            zwp_text_input_v3::Event::PreeditString { text, .. } => {
+             }
+             zwp_text_input_v3::Event::PreeditString { text, .. } => {
+-                state.composing = true;
+-                state.ime_pre_edit = text;
 +                let Some((owner, _)) = this.current_ime_window_for_proxy(&text_input_id) else {
 +                    return;
 +                };
@@ -1508,12 +1632,15 @@ index 469eb44..118f6d0 100644
 +                }
 +                state.composing = text.is_some();
 +                state.pending_ime_batch.record_preedit(text);
-+            }
-+            zwp_text_input_v3::Event::Done { serial } => {
+             }
+             zwp_text_input_v3::Event::Done { serial } => {
+-                let last_serial = state.serial_tracker.get(SerialKind::InputMethod);
+-                state.serial_tracker.update(SerialKind::InputMethod, serial);
+-                let Some(window) = state.keyboard_focused_window.clone() else {
 +                let Some((owner, window)) = this.current_ime_window_for_proxy(&text_input_id)
 +                else {
-+                    return;
-+                };
+                     return;
+                 };
 +                let (last_serial, batch) = {
 +                    let client = this.get_client();
 +                    let mut state = client.borrow_mut();
@@ -1528,46 +1655,52 @@ index 469eb44..118f6d0 100644
 +                };
 +                let cancel_composition = batch.should_cancel_composition();
 +                if let Some(Some(commit_text)) = batch.commit.as_ref() {
-+                    // IBus intercepts single ASCII keys that Zed may need for bindings.
-+                    // Non-ASCII text, and explicit empty commits, go through the input handler.
-                     if commit_text.len() == 1 {
-                         window.handle_input(PlatformInput::KeyDown(KeyDownEvent {
-                             keystroke: Keystroke {
-                                 modifiers: Modifiers::default(),
-                                 key: commit_text.clone(),
--                                key_char: Some(commit_text),
-+                                key_char: Some(commit_text.clone()),
-                             },
-                             is_held: false,
-                             prefer_character_input: false,
-                         }));
-                     } else {
--                        window.handle_ime(ImeInput::InsertText(commit_text));
-+                        window.handle_ime(ImeInput::InsertText(commit_text.clone()));
-                     }
-                 }
--            }
--            zwp_text_input_v3::Event::PreeditString { text, .. } => {
--                state.composing = true;
--                state.ime_pre_edit = text;
--            }
--            zwp_text_input_v3::Event::Done { serial } => {
--                let last_serial = state.serial_tracker.get(SerialKind::InputMethod);
--                state.serial_tracker.update(SerialKind::InputMethod, serial);
--                let Some(window) = state.keyboard_focused_window.clone() else {
--                    return;
-+
-+                let still_current = {
-+                    let client = this.get_client();
-+                    let state = client.borrow();
-+                    ime_owner_is_current(&state, &owner)
-                 };
-+                if !still_current {
-+                    return;
++                    let route = if commit_text.len() == 1 {
++                        single_byte_commit_route(window.prefers_direct_ime_commit_as_text())
++                    } else {
++                        SingleByteCommitRoute::TextInput
++                    };
++                    if route == SingleByteCommitRoute::Drop {
++                        return;
++                    }
++                    let still_current = {
++                        let client = this.get_client();
++                        let state = client.borrow();
++                        ime_owner_is_current(&state, &owner)
++                    };
++                    if !still_current {
++                        return;
++                    }
++                    match route {
++                        SingleByteCommitRoute::TextInput => {
++                            window.handle_ime(ImeInput::InsertText(commit_text.clone()));
++                        }
++                        SingleByteCommitRoute::KeyEvent => {
++                            window.handle_input(PlatformInput::KeyDown(KeyDownEvent {
++                                keystroke: Keystroke {
++                                    modifiers: Modifiers::default(),
++                                    key: commit_text.clone(),
++                                    key_char: Some(commit_text.clone()),
++                                },
++                                is_held: false,
++                                prefer_character_input: false,
++                            }));
++                        }
++                        SingleByteCommitRoute::Drop => unreachable!(),
++                    }
 +                }
  
 -                if let Some(text) = state.ime_pre_edit.take() {
 -                    drop(state);
++                let still_current = {
++                    let client = this.get_client();
++                    let state = client.borrow();
++                    ime_owner_is_current(&state, &owner)
++                };
++                if !still_current {
++                    return;
++                }
++
 +                if let Some(text) = batch.preedit {
                      window.handle_ime(ImeInput::SetMarkedText(text));
                      if let Some(area) = window.get_ime_area() {
@@ -1597,7 +1730,7 @@ index 469eb44..118f6d0 100644
                  }
              }
              _ => {}
-@@ -2178,6 +2754,9 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandClientStatePtr {
+@@ -2178,6 +2787,9 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandClientStatePtr {
          _: &QueueHandle<Self>,
      ) {
          let client = this.get_client();
@@ -1607,7 +1740,7 @@ index 469eb44..118f6d0 100644
          let mut state = client.borrow_mut();
  
          match event {
-@@ -2315,11 +2894,21 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandClientStatePtr {
+@@ -2315,11 +2927,21 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandClientStatePtr {
                      wl_pointer::ButtonState::Pressed => {
                          if let Some(window) = state.keyboard_focused_window.clone() {
                              if state.composing && state.text_input.is_some() {
@@ -1633,6 +1766,34 @@ index 469eb44..118f6d0 100644
                                  state = client.borrow_mut();
                              } else if let (Some(text), Some(compose)) =
                                  (state.pre_edit_text.take(), state.compose_state.as_mut())
+@@ -2980,6 +3602,27 @@ mod tests {
+ 
+     use super::*;
+ 
++    #[test]
++    fn single_byte_ime_commit_preserves_default_and_opted_in_routes() {
++        assert_eq!(
++            single_byte_commit_route(Some(false)),
++            SingleByteCommitRoute::KeyEvent
++        );
++        assert_eq!(
++            single_byte_commit_route(Some(true)),
++            SingleByteCommitRoute::TextInput
++        );
++        assert_eq!(single_byte_commit_route(None), SingleByteCommitRoute::Drop);
++    }
++
++    #[test]
++    fn composing_ascii_commit_uses_text_path_while_close_key_is_held() {
++        let close_key_is_pending = true;
++        let route = single_byte_commit_route(Some(true));
++        assert!(close_key_is_pending);
++        assert_eq!(route, SingleByteCommitRoute::TextInput);
++    }
++
+     #[derive(Clone)]
+     struct FakeDataOffer {
+         name: &'static str,
 diff --git a/crates/gpui_linux/src/linux/wayland/ime_fence.rs b/crates/gpui_linux/src/linux/wayland/ime_fence.rs
 new file mode 100644
 index 0000000..2ff173e
@@ -2479,7 +2640,7 @@ index 0000000..2ff173e
 +    }
 +}
 diff --git a/crates/gpui_linux/src/linux/wayland/window.rs b/crates/gpui_linux/src/linux/wayland/window.rs
-index a66547a..f353158 100644
+index a66547a..6477ed9 100644
 --- a/crates/gpui_linux/src/linux/wayland/window.rs
 +++ b/crates/gpui_linux/src/linux/wayland/window.rs
 @@ -30,6 +30,8 @@ use wayland_protocols::{
@@ -2543,7 +2704,7 @@ index a66547a..f353158 100644
                      state.pending_frame_callback = Some(callback);
                  }
                  state.surface.commit();
-@@ -1035,30 +1046,70 @@ impl WaylandWindowStatePtr {
+@@ -1035,30 +1046,106 @@ impl WaylandWindowStatePtr {
          self.schedule_frame();
      }
  
@@ -2572,6 +2733,42 @@ index a66547a..f353158 100644
 +        }
 +    }
 +
++    pub fn prefers_direct_ime_commit_as_text(&self) -> Option<bool> {
++        let (client, surface_id, active, latest_focus_generation) = {
++            let state = self.state.borrow();
++            (
++                state.client.clone(),
++                state.surface.id(),
++                state.active,
++                state.latest_focus_generation,
++            )
++        };
++        if !active || !client.has_keyboard_focus(&surface_id) {
++            return None;
++        }
++        let mut input_handler = self.state.borrow_mut().input_handler.take()?;
++        let Some((_, owner_generation)) = input_handler.focus_owner() else {
++            self.restore_input_handler_if_current(input_handler);
++            return None;
++        };
++        let owner_generation = Some(owner_generation);
++        if !focus_generation_matches(owner_generation, latest_focus_generation) {
++            self.restore_input_handler_if_current(input_handler);
++            return None;
++        }
++
++        let preference = input_handler.query_prefers_direct_ime_commit_as_text();
++        let generation_is_current = focus_generation_matches(
++            owner_generation,
++            self.state.borrow().latest_focus_generation,
++        );
++        let restored = self.restore_input_handler_if_current(input_handler);
++        if !generation_is_current || !restored {
++            return None;
++        }
++        preference
++    }
++
 +    fn update_ime_enabled(&self) {
 +        let (client, surface_id, active, latest_focus_generation) = {
 +            let state = self.state.borrow();
@@ -2598,14 +2795,14 @@ index a66547a..f353158 100644
 +        let Some(mut input_handler) = input_handler else {
 +            client.update_ime_owner(&surface_id, None, false);
 +            return;
-         };
--        if Some(ime_enabled) == client.ime_enabled() {
++        };
 +        let focus_owner = input_handler.focus_owner();
 +        let Some((_, owner_generation)) = focus_owner else {
 +            self.restore_input_handler_if_current(input_handler);
 +            client.update_ime_owner(&surface_id, None, false);
 +            return;
-+        };
+         };
+-        if Some(ime_enabled) == client.ime_enabled() {
 +        if !focus_generation_matches(Some(owner_generation), latest_focus_generation) {
 +            self.restore_input_handler_if_current(input_handler);
              return;
@@ -2630,7 +2827,7 @@ index a66547a..f353158 100644
      }
  
      pub fn handle_xdg_surface_event(&self, event: xdg_surface::Event) {
-@@ -1434,6 +1485,12 @@ impl WaylandWindowStatePtr {
+@@ -1434,6 +1521,12 @@ impl WaylandWindowStatePtr {
          if self.is_blocked() {
              return;
          }
@@ -2643,7 +2840,7 @@ index a66547a..f353158 100644
          let mut state = self.state.borrow_mut();
          if let Some(mut input_handler) = state.input_handler.take() {
              drop(state);
-@@ -1444,16 +1501,19 @@ impl WaylandWindowStatePtr {
+@@ -1444,16 +1537,19 @@ impl WaylandWindowStatePtr {
                  ImeInput::SetMarkedText(text) => {
                      input_handler.replace_and_mark_text_in_range(None, &text, None);
                  }
@@ -2672,7 +2869,7 @@ index a66547a..f353158 100644
          }
      }
  
-@@ -1463,7 +1523,7 @@ impl WaylandWindowStatePtr {
+@@ -1463,7 +1559,7 @@ impl WaylandWindowStatePtr {
          if let Some(mut input_handler) = state.input_handler.take() {
              drop(state);
              bounds = input_handler.ime_candidate_bounds();
@@ -2681,7 +2878,7 @@ index a66547a..f353158 100644
          }
          bounds
      }
-@@ -1551,7 +1611,7 @@ impl WaylandWindowStatePtr {
+@@ -1551,7 +1647,7 @@ impl WaylandWindowStatePtr {
              if let Some(mut input_handler) = state.input_handler.take() {
                  drop(state);
                  input_handler.replace_text_in_range(None, key_char);
@@ -2690,7 +2887,7 @@ index a66547a..f353158 100644
              }
          }
      }
-@@ -1772,6 +1832,23 @@ impl PlatformWindow for WaylandWindow {
+@@ -1772,6 +1868,23 @@ impl PlatformWindow for WaylandWindow {
          self.borrow_mut().input_handler = Some(input_handler);
      }
  
@@ -2714,7 +2911,7 @@ index a66547a..f353158 100644
      fn take_input_handler(&mut self) -> Option<PlatformInputHandler> {
          self.borrow_mut().input_handler.take()
      }
-@@ -1962,7 +2039,10 @@ impl PlatformWindow for WaylandWindow {
+@@ -1962,7 +2075,10 @@ impl PlatformWindow for WaylandWindow {
          // Surface state changed during this GPUI tick is included in this presentation.
          state.redraw_requested = false;
          if state.pending_frame_callback.is_none() {
@@ -2726,7 +2923,7 @@ index a66547a..f353158 100644
              state.pending_frame_callback = Some(callback);
          }
          if state.renderer.draw(scene) {
-@@ -2130,7 +2210,8 @@ impl PlatformWindow for WaylandWindow {
+@@ -2130,7 +2246,8 @@ impl PlatformWindow for WaylandWindow {
          if !state.active {
              return;
          }
@@ -2736,6 +2933,19 @@ index a66547a..f353158 100644
      }
  
      fn gpu_specs(&self) -> Option<GpuSpecs> {
+diff --git a/crates/zed/Cargo.toml b/crates/zed/Cargo.toml
+index 3a45078..0c9f524 100644
+--- a/crates/zed/Cargo.toml
++++ b/crates/zed/Cargo.toml
+@@ -74,6 +74,8 @@ agent_settings.workspace = true
+ agent_skills.workspace = true
+ agent_ui = { workspace = true, features = ["audio"] }
+ anyhow.workspace = true
++unicode-bidi.workspace = true
++unicode-segmentation.workspace = true
+ askpass.workspace = true
+ assets.workspace = true
+ audio.workspace = true
 diff --git a/crates/zed/build.rs b/crates/zed/build.rs
 index 92407a3..6d21938 100644
 --- a/crates/zed/build.rs
@@ -2758,18 +2968,46 @@ index 92407a3..6d21938 100644
      {
          // Add rpaths for libraries that webrtc-sys dlopens at runtime.
 diff --git a/crates/zed/src/zed.rs b/crates/zed/src/zed.rs
-index 4034efd..5c8c020 100644
+index 4034efd..8626559 100644
 --- a/crates/zed/src/zed.rs
 +++ b/crates/zed/src/zed.rs
-@@ -5,6 +5,7 @@ pub(crate) mod mac_only_instance;
+@@ -5,8 +5,13 @@ pub(crate) mod mac_only_instance;
  mod migrate;
  #[cfg(target_os = "macos")]
  pub(crate) mod move_to_applications;
 +mod native_island;
  mod open_listener;
  mod open_url_modal;
++#[cfg(target_os = "linux")]
++mod palette_protocol;
++#[cfg(target_os = "linux")]
++mod palette_view;
  mod quick_action_bar;
-@@ -599,6 +600,8 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
+ pub mod remote_debug;
+ pub mod telemetry_log;
+@@ -154,6 +159,9 @@ actions!(
+     ]
+ );
+ 
++#[cfg(target_os = "linux")]
++actions!(zed, [ToggleMzedPalette]);
++
+ actions!(
+     dev,
+     [
+@@ -191,6 +199,11 @@ actions!(
+ );
+ 
+ pub fn init(cx: &mut App) {
++    #[cfg(target_os = "linux")]
++    if std::env::var("MZED_NATIVE_PALETTE").as_deref() == Ok("1") {
++        cx.bind_keys([KeyBinding::new("ctrl-alt-shift-p", ToggleMzedPalette, None)]);
++    }
++
+     #[cfg(target_os = "macos")]
+     cx.on_action(|_: &Hide, cx| cx.hide());
+     #[cfg(target_os = "macos")]
+@@ -599,6 +612,8 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
              }
          });
  
@@ -2778,7 +3016,7 @@ index 4034efd..5c8c020 100644
          let search_button = cx.new(|_| search::search_status_button::SearchButton::new());
          let diagnostic_summary =
              cx.new(|cx| diagnostics::items::DiagnosticIndicator::new(workspace, cx));
-@@ -649,6 +652,9 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
+@@ -649,6 +664,9 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
              // Keep these last so they stay leftmost and can change without moving the other items.
              status_bar.add_right_item(vim_mode_indicator, window, cx);
              status_bar.add_right_item(pending_keystrokes_indicator, window, cx);
@@ -2788,3 +3026,18 @@ index 4034efd..5c8c020 100644
          });
  
          let panels_task = initialize_panels(window, cx);
+@@ -1414,6 +1432,14 @@ fn register_actions(
+ 
+     workspace.register_action(sidebar::dump_workspace_info);
+ 
++    #[cfg(target_os = "linux")]
++    workspace.register_action(|workspace, _: &ToggleMzedPalette, window, cx| {
++        let workspace_weak = cx.weak_entity();
++        workspace.toggle_modal(window, cx, move |window, cx| {
++            palette_view::PaletteView::new(workspace_weak, window, cx)
++        });
++    });
++
+     #[cfg(debug_assertions)]
+     workspace.register_action(|workspace, _: &ShowWorkspaceError, _, cx| {
+         struct DebugError;

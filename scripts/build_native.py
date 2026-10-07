@@ -36,10 +36,15 @@ def build(source, output, mode):
         raise ValueError("native/island.mbt is required")
     mzed_source_paths = [
         ROOT / "native/island.mbt",
+        ROOT / "native/island_view.rs",
+        ROOT / "native/protocol.rs",
         ROOT / "native/palette.mbt",
+        ROOT / "native/palette_protocol.rs",
+        ROOT / "native/palette_view.rs",
         ROOT / "native/bootstrap.c",
         ROOT / "native/mzed_palette_abi.h",
         ROOT / "scripts/build_native.py",
+        ROOT / "scripts/prepare_island.py",
     ]
     mzed_commit = subprocess.check_output(
         ['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True
