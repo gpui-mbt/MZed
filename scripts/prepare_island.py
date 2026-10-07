@@ -18,9 +18,11 @@ def prepare(source):
     destination.mkdir(exist_ok=False)
     shutil.copyfile(ROOT / 'native/island_view.rs', source / 'crates/zed/src/zed/native_island.rs')
     shutil.copyfile(ROOT / 'native/protocol.rs', destination / 'protocol.rs')
+    fence = source / 'crates/gpui_linux/src/linux/wayland/ime_fence.rs'
     provenance = {'upstream_commit': json.loads((ROOT / 'upstream.lock.json').read_text())['commit'],
         'patch_sha256': hashlib.sha256(patch.read_bytes()).hexdigest(),
         'license': 'GPL-3.0-or-later; retain upstream LICENSE-GPL and Apache component notices',
+        'derived_files': {'crates/gpui_linux/src/linux/wayland/ime_fence.rs': hashlib.sha256(fence.read_bytes()).hexdigest()},
         'files': {name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest()
                   for name in ['native/island_view.rs', 'native/protocol.rs', 'native/island.mbt']}}
     (source / 'mzed-derived.json').write_text(json.dumps(provenance, indent=2) + '\n')

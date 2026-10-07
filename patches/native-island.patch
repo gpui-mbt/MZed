@@ -1,5 +1,5 @@
 diff --git a/README.md b/README.md
-index 9f641fb3841909e9e1f6dbfb947f953c0a0c5ebf..24840eec031df7d6fe9fc3d10204e112d91c5d33 100644
+index 9f641fb..24840ee 100644
 --- a/README.md
 +++ b/README.md
 @@ -1,3 +1,6 @@
@@ -10,7 +10,7 @@ index 9f641fb3841909e9e1f6dbfb947f953c0a0c5ebf..24840eec031df7d6fe9fc3d10204e112
  
  [![Zed](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/zed-industries/zed/main/assets/badge/v0.json)](https://zed.dev)
 diff --git a/crates/gpui/src/input.rs b/crates/gpui/src/input.rs
-index 4167aa09905b09ab818f9d95b1646e71339eafbd..1dfe727944bac4f6a366785bfa2dc610cb02f689 100644
+index 4167aa0..1dfe727 100644
 --- a/crates/gpui/src/input.rs
 +++ b/crates/gpui/src/input.rs
 @@ -54,6 +54,14 @@ pub trait EntityInputHandler: 'static + Sized {
@@ -218,7 +218,7 @@ index 4167aa09905b09ab818f9d95b1646e71339eafbd..1dfe727944bac4f6a366785bfa2dc610
          focus_handle: FocusHandle,
          configuration: TextInputConfiguration,
 diff --git a/crates/gpui/src/platform.rs b/crates/gpui/src/platform.rs
-index c03653ed942186d7935f9f76036d6a1a49e83909..472344320603891e5a114ccff357e4d94cab7f2c 100644
+index c03653e..ccac54e 100644
 --- a/crates/gpui/src/platform.rs
 +++ b/crates/gpui/src/platform.rs
 @@ -37,9 +37,9 @@ pub(crate) type PlatformScreenCaptureFrame =
@@ -304,7 +304,24 @@ index c03653ed942186d7935f9f76036d6a1a49e83909..472344320603891e5a114ccff357e4d9
      #[cfg_attr(target_os = "windows", allow(dead_code))]
      pub fn unmark_text(&mut self) {
          self.cx
-@@ -1962,6 +2001,14 @@ pub trait InputHandler: 'static {
+@@ -1866,9 +1905,15 @@ impl PlatformInputHandler {
+ 
+     #[allow(dead_code)]
+     pub fn query_accepts_text_input(&mut self) -> bool {
++        self.try_query_accepts_text_input().unwrap_or(true)
++    }
++
++    /// Queries whether the associated input handler accepts text without treating a stale
++    /// or unavailable entity as an accepting owner.
++    pub fn try_query_accepts_text_input(&mut self) -> Option<bool> {
+         self.cx
+             .update(|window, cx| self.handler.accepts_text_input(window, cx))
+-            .unwrap_or(true)
++            .ok()
+     }
+ 
+     /// See [`InputHandler::prefers_ime_for_printable_keys`].
+@@ -1962,6 +2007,14 @@ pub trait InputHandler: 'static {
          cx: &mut App,
      );
  
@@ -320,7 +337,7 @@ index c03653ed942186d7935f9f76036d6a1a49e83909..472344320603891e5a114ccff357e4d9
      /// and mark the given text as part of an IME 'composing' state
      /// Corresponds to [setMarkedText(_:selectedRange:replacementRange:)](https://developer.apple.com/documentation/appkit/nstextinputclient/1438246-setmarkedtext)
 diff --git a/crates/gpui/src/platform/test/window.rs b/crates/gpui/src/platform/test/window.rs
-index 14fb8896b24a71cc47f1963c81aae0fc4f9f0828..1848e403d13e44c3c9ff7ca3132a1daa8ea01bd6 100644
+index 14fb889..1848e40 100644
 --- a/crates/gpui/src/platform/test/window.rs
 +++ b/crates/gpui/src/platform/test/window.rs
 @@ -49,6 +49,7 @@ pub(crate) struct TestWindowState {
@@ -365,7 +382,7 @@ index 14fb8896b24a71cc47f1963c81aae0fc4f9f0828..1848e403d13e44c3c9ff7ca3132a1daa
          self.0.lock().text_input_configurations.push(configuration);
      }
 diff --git a/crates/gpui/src/window.rs b/crates/gpui/src/window.rs
-index b1c9e115502a543111c61f71438ab04e27f47091..1d12517ef43a62ca1e1a58c0d19cde86991c2ec2 100644
+index b1c9e11..1d12517 100644
 --- a/crates/gpui/src/window.rs
 +++ b/crates/gpui/src/window.rs
 @@ -2307,6 +2307,8 @@ impl Window {
@@ -437,8 +454,2290 @@ index b1c9e115502a543111c61f71438ab04e27f47091..1d12517ef43a62ca1e1a58c0d19cde86
      }
  
      #[gpui::test]
+diff --git a/crates/gpui_linux/src/linux/wayland.rs b/crates/gpui_linux/src/linux/wayland.rs
+index cbc962b..b506a66 100644
+--- a/crates/gpui_linux/src/linux/wayland.rs
++++ b/crates/gpui_linux/src/linux/wayland.rs
+@@ -2,6 +2,7 @@ mod client;
+ mod clipboard;
+ mod cursor;
+ mod display;
++mod ime_fence;
+ mod popup;
+ mod serial;
+ mod window;
+diff --git a/crates/gpui_linux/src/linux/wayland/client.rs b/crates/gpui_linux/src/linux/wayland/client.rs
+index 469eb44..118f6d0 100644
+--- a/crates/gpui_linux/src/linux/wayland/client.rs
++++ b/crates/gpui_linux/src/linux/wayland/client.rs
+@@ -28,7 +28,8 @@ use wayland_client::protocol::wl_data_device_manager::DndAction;
+ use wayland_client::protocol::wl_data_offer::WlDataOffer;
+ use wayland_client::protocol::wl_pointer::AxisSource;
+ use wayland_client::protocol::{
+-    wl_data_device, wl_data_device_manager, wl_data_offer, wl_data_source, wl_output, wl_region,
++    wl_data_device, wl_data_device_manager, wl_data_offer, wl_data_source, wl_display, wl_output,
++    wl_region,
+ };
+ use wayland_client::{
+     Connection, Dispatch, Proxy, QueueHandle, delegate_noop,
+@@ -77,6 +78,11 @@ use xkbcommon::xkb::{self, KEYMAP_COMPILE_NO_FLAGS, Keycode};
+ 
+ use super::{
+     display::WaylandDisplay,
++    ime_fence::{
++        DeferredImeCancelGate, ImeEditBatch, ImeFenceAction, ImeOwner, ImeOwnerFence, ImeScope,
++        KeySequenceFence, decode_keyboard_enter_keys, is_current_v3_owner,
++        is_keyboard_focused_surface, wayland_key_to_xkb_keycode,
++    },
+     window::{ImeInput, WaylandWindowStatePtr},
+ };
+ 
+@@ -97,11 +103,12 @@ use crate::linux::{
+ };
+ use gpui::{
+     AnyWindowHandle, Bounds, Capslock, CursorStyle, DevicePixels, DisplayId, ExternalDragPayload,
+-    FileDragPaths, FileDropEvent, ForegroundExecutor, KeyDownEvent, KeyUpEvent, Keystroke,
++    FileDragPaths, FileDropEvent, FocusId, ForegroundExecutor, KeyDownEvent, KeyUpEvent, Keystroke,
+     Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent,
+     MouseUpEvent, NavigationDirection, Pixels, PlatformDisplay, PlatformInput,
+-    PlatformKeyboardLayout, PlatformWindow, Point, ScrollDelta, ScrollWheelEvent, SharedString,
+-    Size, TouchPhase, WindowButtonLayout, WindowKind, WindowParams, point, profiler, px, size,
++    PlatformInputHandler, PlatformKeyboardLayout, PlatformWindow, Point, ScrollDelta,
++    ScrollWheelEvent, SharedString, Size, TouchPhase, WindowButtonLayout, WindowKind, WindowParams,
++    point, profiler, px, size,
+ };
+ use gpui_wgpu::{CompositorGpuHint, GpuContext};
+ use wayland_protocols::wp::linux_dmabuf::zv1::client::{
+@@ -318,6 +325,7 @@ pub(crate) struct WaylandClientState {
+     pub gpu_context: GpuContext,
+     pub compositor_gpu: Option<CompositorGpuHint>,
+     wl_seat: wl_seat::WlSeat, // TODO: Multi seat support
++    wl_display: wl_display::WlDisplay,
+     wl_pointer: Option<wl_pointer::WlPointer>,
+     pinch_gesture: Option<zwp_pointer_gesture_pinch_v1::ZwpPointerGesturePinchV1>,
+     pinch_scale: f32,
+@@ -327,9 +335,13 @@ pub(crate) struct WaylandClientState {
+     primary_selection: Option<zwp_primary_selection_device_v1::ZwpPrimarySelectionDeviceV1>,
+     text_input: Option<zwp_text_input_v3::ZwpTextInputV3>,
+     pre_edit_text: Option<String>,
+-    ime_pre_edit: Option<String>,
++    pending_ime_batch: ImeEditBatch,
+     composing: bool,
++    ime_cancel_gate: DeferredImeCancelGate,
+     last_ime_cursor_rectangle: Option<ImeCursorRectangle>,
++    ime_candidate: Option<ImeOwner<FocusId, ObjectId>>,
++    ime_fence: ImeOwnerFence<FocusId, ObjectId>,
++    key_sequences: KeySequenceFence,
+     // Surface to Window mapping
+     windows: HashMap<ObjectId, WaylandWindowStatePtr>,
+     // Output to scale mapping
+@@ -356,6 +368,8 @@ pub(crate) struct WaylandClientState {
+     button_pressed: Option<MouseButton>,
+     mouse_focused_window: Option<WaylandWindowStatePtr>,
+     keyboard_focused_window: Option<WaylandWindowStatePtr>,
++    keyboard_focus_surface: Option<ObjectId>,
++    text_input_entered_surface: Option<ObjectId>,
+     loop_handle: LoopHandle<'static, WaylandClientStatePtr>,
+     cursor_style: Option<CursorStyle>,
+     cursor_hidden_window: Option<WaylandWindowStatePtr>,
+@@ -367,9 +381,18 @@ pub(crate) struct WaylandClientState {
+     startup_activation_token: Option<String>,
+     event_loop: Option<EventLoop<'static, WaylandClientStatePtr>>,
+     pub common: LinuxCommon,
+-    ime_enabled: Option<bool>,
+ }
+ 
++pub(super) enum WaylandCallbackData {
++    Frame(ObjectId),
++    ImeFence {
++        epoch: u64,
++        scope: ImeScope<ObjectId>,
++    },
++}
++
++type LiveImeOwner = ImeOwner<FocusId, ObjectId>;
++
+ struct DragState<DataOffer = wl_data_offer::WlDataOffer, Window = WaylandWindowStatePtr> {
+     data_offer: Option<DataOffer>,
+     window: Option<Window>,
+@@ -532,6 +555,47 @@ impl WaylandClientStatePtr {
+             .expect("The pointer should always be valid when dispatching in wayland")
+     }
+ 
++    pub fn defer_text_composition_cancel(&self, mut input_handler: PlatformInputHandler) {
++        let client = self.get_client();
++        let tracked = client.borrow_mut().ime_cancel_gate.begin();
++        if !tracked {
++            log::error!("Wayland deferred IME cancellation gate is fail-closed");
++        }
++        let client_state = self.clone();
++        let state = client.borrow();
++        if let Err(error) =
++            state
++                .loop_handle
++                .insert_source(Timer::from_duration(Duration::ZERO), move |_, _, _| {
++                    input_handler.cancel_text_composition();
++                    if tracked {
++                        client_state.finish_deferred_text_composition_cancel();
++                    }
++                    TimeoutAction::Drop
++                })
++        {
++            log::error!("Failed to defer Wayland text composition cancellation: {error}");
++        }
++    }
++
++    fn finish_deferred_text_composition_cancel(&self) {
++        let owner = {
++            let client = self.get_client();
++            let mut state = client.borrow_mut();
++            if !state.ime_cancel_gate.finish() || !state.ime_cancel_gate.allows_ime() {
++                return;
++            }
++            state
++                .ime_fence
++                .desired_owner()
++                .filter(|owner| ime_owner_is_current(&state, owner))
++                .cloned()
++        };
++        if let Some(owner) = owner {
++            self.enable_ime_for_owner(owner);
++        }
++    }
++
+     pub fn dispatch_scheduled_frames(&self) {
+         let Some(client) = self.0.upgrade() else {
+             return;
+@@ -620,52 +684,284 @@ impl WaylandClientStatePtr {
+             Some(PendingActivation::Window(window));
+     }
+ 
+-    pub fn enable_ime(&self) {
++    pub fn has_keyboard_focus(&self, surface_id: &ObjectId) -> bool {
+         let client = self.get_client();
+-        let mut state = client.borrow_mut();
+-        state.ime_enabled = Some(true);
+-        state.last_ime_cursor_rectangle = None;
+-        let Some(text_input) = state.text_input.take() else {
+-            return;
++        let state = client.borrow();
++        is_keyboard_focused_surface(surface_id, state.keyboard_focus_surface.as_ref())
++    }
++
++    pub fn can_accept_ime_edit(&self) -> bool {
++        self.get_client().borrow().ime_cancel_gate.allows_ime()
++    }
++
++    pub fn update_ime_owner(
++        &self,
++        surface_id: &ObjectId,
++        focus_owner: Option<(FocusId, u64)>,
++        accepts_text_input: bool,
++    ) {
++        let action = {
++            let client = self.get_client();
++            let mut state = client.borrow_mut();
++            if !is_keyboard_focused_surface(surface_id, state.keyboard_focus_surface.as_ref()) {
++                return;
++            }
++
++            let candidate = if accepts_text_input {
++                focus_owner.and_then(|(focus_id, focus_generation)| {
++                    Some(ImeOwner {
++                        focus_id,
++                        focus_generation,
++                        seat_id: state.wl_seat.id(),
++                        surface_id: surface_id.clone(),
++                        text_input_id: state.text_input.as_ref()?.id(),
++                    })
++                })
++            } else {
++                None
++            };
++            state.ime_candidate = candidate.clone();
++            if let Some(owner) = candidate {
++                if state.text_input_entered_surface.as_ref() == Some(&owner.surface_id) {
++                    state.ime_fence.set_owner(Some(owner))
++                } else {
++                    state.ime_fence.set_owner(None)
++                }
++            } else {
++                state.ime_fence.set_owner(None)
++            }
++        };
++        self.apply_ime_fence_action(action);
++    }
++
++    pub fn invalidate_surface_ime_owner(&self, surface_id: &ObjectId) {
++        let (action, window) = {
++            let client = self.get_client();
++            let mut state = client.borrow_mut();
++            if !is_keyboard_focused_surface(surface_id, state.keyboard_focus_surface.as_ref()) {
++                return;
++            }
++
++            invalidate_keyboard_owner_input(&mut state);
++            let action = state.ime_fence.invalidate();
++            (action, state.keyboard_focused_window.clone())
++        };
++        self.apply_ime_fence_action(action);
++        if let Some(window) = window {
++            window.defer_cancel_text_composition();
++        }
++    }
++
++    fn rearm_ime_owner(&self, owner: LiveImeOwner) {
++        let action = {
++            let client = self.get_client();
++            let mut state = client.borrow_mut();
++            if state.ime_candidate.as_ref() != Some(&owner)
++                || !is_keyboard_focused_surface(
++                    &owner.surface_id,
++                    state.keyboard_focus_surface.as_ref(),
++                )
++                || state.text_input_entered_surface.as_ref() != Some(&owner.surface_id)
++                || state.wl_seat.id() != owner.seat_id
++                || state.text_input.as_ref().map(Proxy::id) != Some(owner.text_input_id.clone())
++            {
++                return;
++            }
++            state.ime_fence.rearm(owner)
++        };
++        self.apply_ime_fence_action(action);
++    }
++
++    fn apply_ime_fence_action(&self, action: ImeFenceAction<FocusId, ObjectId>) {
++        match action {
++            ImeFenceAction::Noop => {}
++            ImeFenceAction::Enable(owner) => self.enable_ime_for_owner(owner),
++            ImeFenceAction::DisableAndSync { epoch, scope } => {
++                let client = self.get_client();
++                let mut state = client.borrow_mut();
++                if state.wl_seat.id() != scope.seat_id
++                    || state.text_input.as_ref().map(Proxy::id) != Some(scope.text_input_id.clone())
++                {
++                    return;
++                }
++                if let Some(text_input) = &state.text_input {
++                    text_input.disable();
++                    text_input.commit();
++                }
++                state.last_ime_cursor_rectangle = None;
++                let display = state.wl_display.clone();
++                let qh = state.globals.qh.clone();
++                display.sync(&qh, WaylandCallbackData::ImeFence { epoch, scope });
++            }
++            ImeFenceAction::FailClosed => {
++                let client = self.get_client();
++                let mut state = client.borrow_mut();
++                if let Some(text_input) = &state.text_input {
++                    text_input.disable();
++                    text_input.commit();
++                }
++                state.last_ime_cursor_rectangle = None;
++                state.composing = false;
++                state.pending_ime_batch = ImeEditBatch::default();
++            }
++        }
++    }
++
++    fn enable_ime_for_owner(&self, owner: LiveImeOwner) {
++        let (text_input, window) = {
++            let client = self.get_client();
++            let state = client.borrow();
++            if !state.ime_cancel_gate.allows_ime() || !ime_owner_is_current(&state, &owner) {
++                return;
++            }
++            let Some(text_input) = state.text_input.clone() else {
++                return;
++            };
++            let Some(window) = state.keyboard_focused_window.clone() else {
++                return;
++            };
++            (text_input, window)
+         };
+ 
++        let cursor_rectangle = window.get_ime_area().map(ImeCursorRectangle::from);
++        let client = self.get_client();
++        let mut state = client.borrow_mut();
++        if !state.ime_cancel_gate.allows_ime()
++            || !ime_owner_is_current(&state, &owner)
++            || state.text_input.as_ref().map(Proxy::id) != Some(owner.text_input_id.clone())
++        {
++            return;
++        }
+         text_input.enable();
+         text_input.set_content_type(ContentHint::None, ContentPurpose::Normal);
+-        let mut cursor_rectangle = None;
+-        if let Some(window) = state.keyboard_focused_window.clone() {
+-            drop(state);
+-            if let Some(area) = window.get_ime_area() {
+-                let area = ImeCursorRectangle::from(area);
+-                set_ime_cursor_rectangle(&text_input, area);
+-                cursor_rectangle = Some(area);
+-            }
+-            state = client.borrow_mut();
++        if let Some(area) = cursor_rectangle {
++            set_ime_cursor_rectangle(&text_input, area);
+         }
+         text_input.commit();
+         state.last_ime_cursor_rectangle = cursor_rectangle;
+-        state.text_input = Some(text_input);
+     }
+ 
+-    pub fn disable_ime(&self) {
+-        let client = self.get_client();
+-        let mut state = client.borrow_mut();
+-        state.ime_enabled = Some(false);
+-        state.composing = false;
+-        if let Some(text_input) = &state.text_input {
+-            text_input.disable();
+-            text_input.commit();
++    fn handle_text_input_enter(
++        &self,
++        text_input: &zwp_text_input_v3::ZwpTextInputV3,
++        surface: &wl_surface::WlSurface,
++    ) {
++        let action = {
++            let client = self.get_client();
++            let mut state = client.borrow_mut();
++            if state.text_input.as_ref().map(Proxy::id) != Some(text_input.id()) {
++                return;
++            }
++            let surface_id = surface.id();
++            if !state.windows.contains_key(&surface_id) {
++                return;
++            }
++
++            state.text_input_entered_surface = Some(surface_id.clone());
++            let owner = state.ime_candidate.clone().filter(|owner| {
++                state.keyboard_focus_surface.as_ref() == Some(&surface_id)
++                    && owner.surface_id == surface_id
++                    && owner.seat_id == state.wl_seat.id()
++                    && owner.text_input_id == text_input.id()
++            });
++            if let Some(owner) = owner {
++                state.ime_fence.set_owner(Some(owner))
++            } else {
++                state.ime_fence.set_owner(None)
++            }
++        };
++        self.apply_ime_fence_action(action);
++    }
++
++    fn handle_text_input_leave(
++        &self,
++        text_input: &zwp_text_input_v3::ZwpTextInputV3,
++        surface: &wl_surface::WlSurface,
++    ) {
++        let (action, window) = {
++            let client = self.get_client();
++            let mut state = client.borrow_mut();
++            let surface_id = surface.id();
++            if state.text_input.as_ref().map(Proxy::id) != Some(text_input.id())
++                || state.text_input_entered_surface.as_ref() != Some(&surface_id)
++            {
++                return;
++            }
++            state.text_input_entered_surface = None;
++            state.pending_ime_batch = ImeEditBatch::default();
++            state.composing = false;
++            let window = state
++                .keyboard_focus_surface
++                .as_ref()
++                .filter(|focused| **focused == surface_id)
++                .and_then(|_| state.keyboard_focused_window.clone());
++            (state.ime_fence.invalidate(), window)
++        };
++        self.apply_ime_fence_action(action);
++        if let Some(window) = window {
++            window.handle_ime(ImeInput::CancelComposition);
+         }
+     }
+ 
+-    pub fn ime_enabled(&self) -> Option<bool> {
++    fn complete_ime_fence(&self, epoch: u64, scope: ImeScope<ObjectId>) {
++        let action = {
++            let client = self.get_client();
++            let mut state = client.borrow_mut();
++            let candidate_is_current = state.wl_seat.id() == scope.seat_id
++                && state.text_input.as_ref().map(Proxy::id) == Some(scope.text_input_id.clone())
++                && state.keyboard_focus_surface.as_ref() == Some(&scope.surface_id)
++                && state.text_input_entered_surface.as_ref() == Some(&scope.surface_id);
++            let current_owner = if candidate_is_current {
++                state
++                    .ime_candidate
++                    .as_ref()
++                    .filter(|owner| {
++                        owner.seat_id == scope.seat_id
++                            && owner.surface_id == scope.surface_id
++                            && owner.text_input_id == scope.text_input_id
++                    })
++                    .cloned()
++            } else {
++                None
++            };
++            state.ime_fence.complete_sync(epoch, &scope, current_owner)
++        };
++        self.apply_ime_fence_action(action);
++    }
++
++    fn current_ime_window_for_proxy(
++        &self,
++        text_input_id: &ObjectId,
++    ) -> Option<(LiveImeOwner, WaylandWindowStatePtr)> {
+         let client = self.get_client();
+-        client.borrow().ime_enabled
++        let state = client.borrow();
++        let owner = state.ime_fence.desired_owner()?.clone();
++        if !state.ime_cancel_gate.allows_ime()
++            || !state.ime_fence.is_enabled_for(&owner)
++            || state.text_input.as_ref().map(Proxy::id).as_ref() != Some(text_input_id)
++            || !is_current_v3_owner(
++                text_input_id,
++                &owner.text_input_id,
++                state.keyboard_focus_surface.as_ref(),
++                state.text_input_entered_surface.as_ref(),
++                state.ime_candidate.as_ref(),
++                &owner,
++            )
++        {
++            return None;
++        }
++        Some((owner, state.keyboard_focused_window.clone()?))
+     }
+ 
+-    pub fn update_ime_position(&self, bounds: Bounds<Pixels>) {
++    pub fn update_ime_position(&self, surface_id: &ObjectId, bounds: Bounds<Pixels>) {
+         let client = self.get_client();
+         let mut state = client.borrow_mut();
+-        if state.pre_edit_text.is_some() {
++        if !is_keyboard_focused_surface(surface_id, state.keyboard_focus_surface.as_ref())
++            || !state.ime_cancel_gate.allows_ime()
++            || !state.ime_fence.desired_owner().is_some_and(|owner| {
++                owner.surface_id == *surface_id && ime_owner_is_current(&state, owner)
++            })
++        {
+             return;
+         }
+         let Some(text_input) = state.text_input.clone() else {
+@@ -704,6 +1000,7 @@ impl WaylandClientStatePtr {
+     }
+ 
+     pub fn drop_window(&self, surface_id: &ObjectId) {
++        self.retire_surface_ime_owner(surface_id);
+         let client = self.get_client();
+         let mut state = client.borrow_mut();
+         let closed_window = state.windows.remove(surface_id).unwrap();
+@@ -723,6 +1020,35 @@ impl WaylandClientStatePtr {
+             state.cursor_hidden_window = Some(window);
+         }
+     }
++
++    /// Stop routing keyboard and IME input to a surface before its native object is destroyed.
++    pub fn retire_surface_ime_owner(&self, surface_id: &ObjectId) {
++        let (action, focused_window) = {
++            let client = self.get_client();
++            let mut state = client.borrow_mut();
++            if !is_keyboard_focused_surface(surface_id, state.keyboard_focus_surface.as_ref()) {
++                return;
++            }
++
++            state.keyboard_focus_surface = None;
++            if state.text_input_entered_surface.as_ref() == Some(surface_id) {
++                state.text_input_entered_surface = None;
++            }
++            invalidate_keyboard_owner_input(&mut state);
++            let focused_window = state.keyboard_focused_window.take().filter(|focused| {
++                state
++                    .windows
++                    .get(surface_id)
++                    .is_some_and(|registered| registered.ptr_eq(focused))
++            });
++            (state.ime_fence.invalidate(), focused_window)
++        };
++
++        self.apply_ime_fence_action(action);
++        if let Some(window) = focused_window {
++            window.defer_cancel_text_composition();
++        }
++    }
+ }
+ 
+ impl WaylandClientState {
+@@ -990,6 +1316,7 @@ impl WaylandClient {
+             gpu_context,
+             compositor_gpu,
+             wl_seat: seat,
++            wl_display: conn.display(),
+             wl_pointer: None,
+             wl_keyboard: None,
+             pinch_gesture: None,
+@@ -999,9 +1326,13 @@ impl WaylandClient {
+             primary_selection,
+             text_input: None,
+             pre_edit_text: None,
+-            ime_pre_edit: None,
++            pending_ime_batch: ImeEditBatch::default(),
+             composing: false,
++            ime_cancel_gate: DeferredImeCancelGate::default(),
+             last_ime_cursor_rectangle: None,
++            ime_candidate: None,
++            ime_fence: ImeOwnerFence::default(),
++            key_sequences: KeySequenceFence::default(),
+             outputs: HashMap::default(),
+             in_progress_outputs,
+             wl_outputs,
+@@ -1047,6 +1378,8 @@ impl WaylandClient {
+             button_pressed: None,
+             mouse_focused_window: None,
+             keyboard_focused_window: None,
++            keyboard_focus_surface: None,
++            text_input_entered_surface: None,
+             loop_handle: handle.clone(),
+             enter_token: None,
+             cursor_style: None,
+@@ -1058,7 +1391,6 @@ impl WaylandClient {
+             pending_activation: None,
+             startup_activation_token,
+             event_loop: Some(event_loop),
+-            ime_enabled: None,
+         }));
+ 
+         WaylandSource::new(conn, event_queue)
+@@ -1470,12 +1802,7 @@ impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for WaylandClientStat
+                 version,
+             } => match &interface[..] {
+                 "wl_seat" => {
+-                    if let Some(wl_pointer) = state.wl_pointer.take() {
+-                        wl_pointer.release();
+-                    }
+-                    if let Some(wl_keyboard) = state.wl_keyboard.take() {
+-                        wl_keyboard.release();
+-                    }
++                    let unfocused_window = retire_current_seat_input(&mut state);
+                     state.wl_seat.release();
+                     state.wl_seat = registry.bind::<wl_seat::WlSeat, _, _>(
+                         name,
+@@ -1483,6 +1810,9 @@ impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for WaylandClientStat
+                         qh,
+                         (),
+                     );
++                    drop(state);
++                    finish_retired_seat_window(unfocused_window);
++                    return;
+                 }
+                 "wl_output" => {
+                     let output = registry.bind::<wl_output::WlOutput, _, _>(
+@@ -1500,7 +1830,7 @@ impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for WaylandClientStat
+                 _ => {}
+             },
+             wl_registry::Event::GlobalRemove { name: _ } => {
+-                // TODO: handle global removal
++                // Seat global hot-unplug is outside this single-seat profile.
+             }
+             _ => {}
+         }
+@@ -1528,24 +1858,29 @@ delegate_noop!(WaylandClientStatePtr: ignore org_kde_kwin_blur::OrgKdeKwinBlur);
+ delegate_noop!(WaylandClientStatePtr: ignore wp_viewporter::WpViewporter);
+ delegate_noop!(WaylandClientStatePtr: ignore wp_viewport::WpViewport);
+ 
+-impl Dispatch<WlCallback, ObjectId> for WaylandClientStatePtr {
++impl Dispatch<WlCallback, WaylandCallbackData> for WaylandClientStatePtr {
+     fn event(
+         state: &mut WaylandClientStatePtr,
+         _: &wl_callback::WlCallback,
+         event: wl_callback::Event,
+-        surface_id: &ObjectId,
++        callback_data: &WaylandCallbackData,
+         _: &Connection,
+         _: &QueueHandle<Self>,
+     ) {
+-        let client = state.get_client();
+-        let mut state = client.borrow_mut();
+-        let Some(window) = get_window(&mut state, surface_id) else {
++        if !matches!(event, wl_callback::Event::Done { .. }) {
+             return;
+-        };
+-        drop(state);
+-
+-        if let wl_callback::Event::Done { .. } = event {
+-            window.frame_callback_fired();
++        }
++        match callback_data {
++            WaylandCallbackData::Frame(surface_id) => {
++                let client = state.get_client();
++                let window = get_window(&mut client.borrow_mut(), surface_id);
++                if let Some(window) = window {
++                    window.frame_callback_fired();
++                }
++            }
++            WaylandCallbackData::ImeFence { epoch, scope } => {
++                state.complete_ime_fence(*epoch, scope.clone());
++            }
+         }
+     }
+ }
+@@ -1557,6 +1892,88 @@ pub(crate) fn get_window(
+     state.windows.get(surface_id).cloned()
+ }
+ 
++fn ime_owner_is_current(state: &WaylandClientState, owner: &LiveImeOwner) -> bool {
++    let Some(text_input) = state.text_input.as_ref() else {
++        return false;
++    };
++    let live_proxy_id = text_input.id();
++    state.ime_fence.is_enabled_for(owner)
++        && state.wl_seat.id() == owner.seat_id
++        && is_current_v3_owner(
++            &owner.text_input_id,
++            &live_proxy_id,
++            state.keyboard_focus_surface.as_ref(),
++            state.text_input_entered_surface.as_ref(),
++            state.ime_candidate.as_ref(),
++            owner,
++        )
++}
++
++fn key_sequence_owner_is_current(
++    state: &WaylandClientState,
++    window: &WaylandWindowStatePtr,
++    generation: u64,
++    keycode: u32,
++) -> bool {
++    state
++        .keyboard_focused_window
++        .as_ref()
++        .is_some_and(|focused| focused.ptr_eq(window))
++        && state.key_sequences.accepts_repeat(generation, keycode)
++}
++
++fn invalidate_keyboard_owner_input(state: &mut WaylandClientState) {
++    state.ime_candidate = None;
++    state.pre_edit_text = None;
++    state.pending_ime_batch = ImeEditBatch::default();
++    state.composing = false;
++    if let Some(compose) = state.compose_state.as_mut() {
++        compose.reset();
++    }
++    state.repeat.current_id = state.repeat.current_id.saturating_add(1);
++    state.repeat.current_keycode = None;
++    state.key_sequences.invalidate_owner();
++}
++
++fn retire_current_seat_input(state: &mut WaylandClientState) -> Option<WaylandWindowStatePtr> {
++    let unfocused_window = state.keyboard_focused_window.take();
++    state.restore_cursor_after_hide();
++    if let Some(cursor_shape_device) = state.cursor_shape_device.take() {
++        cursor_shape_device.destroy();
++    }
++    if let Some(pinch_gesture) = state.pinch_gesture.take() {
++        pinch_gesture.destroy();
++    }
++    if let Some(wl_pointer) = state.wl_pointer.take() {
++        wl_pointer.release();
++    }
++    if let Some(wl_keyboard) = state.wl_keyboard.take() {
++        wl_keyboard.release();
++    }
++    if let Some(text_input) = state.text_input.take() {
++        text_input.disable();
++        text_input.commit();
++        text_input.destroy();
++    }
++    state.keyboard_focus_surface = None;
++    state.text_input_entered_surface = None;
++    state.keyboard_focused_window = None;
++    state.mouse_focused_window = None;
++    state.button_pressed = None;
++    state.enter_token = None;
++    state.last_ime_cursor_rectangle = None;
++    invalidate_keyboard_owner_input(state);
++    state.ime_fence.proxy_removed();
++    unfocused_window
++}
++
++fn finish_retired_seat_window(window: Option<WaylandWindowStatePtr>) {
++    if let Some(window) = window {
++        window.defer_cancel_text_composition();
++        window.set_focused(false);
++    }
++}
++
+ impl Dispatch<wl_surface::WlSurface, ()> for WaylandClientStatePtr {
+     fn event(
+         this: &mut Self,
+@@ -1768,28 +2185,38 @@ impl Dispatch<xdg_activation_token_v1::XdgActivationTokenV1, ()> for WaylandClie
+ 
+ impl Dispatch<wl_seat::WlSeat, ()> for WaylandClientStatePtr {
+     fn event(
+-        state: &mut Self,
++        this: &mut Self,
+         seat: &wl_seat::WlSeat,
+         event: wl_seat::Event,
+         _: &(),
+         _: &Connection,
+         qh: &QueueHandle<Self>,
+     ) {
++        let client = this.get_client();
++        if client.borrow().wl_seat.id() != seat.id() {
++            return;
++        }
+         if let wl_seat::Event::Capabilities {
+             capabilities: WEnum::Value(capabilities),
+         } = event
+         {
+-            let client = state.get_client();
+             let mut state = client.borrow_mut();
++            let unfocused_window;
+             if capabilities.contains(wl_seat::Capability::Keyboard) {
+                 let keyboard = seat.get_keyboard(qh, ());
+ 
+                 if let Some(text_input) = state.text_input.take() {
++                    text_input.disable();
++                    text_input.commit();
+                     text_input.destroy();
+-                    state.ime_pre_edit = None;
+-                    state.composing = false;
+                 }
+ 
++                unfocused_window = state.keyboard_focused_window.take();
++                state.keyboard_focus_surface = None;
++                state.text_input_entered_surface = None;
++                invalidate_keyboard_owner_input(&mut state);
++                state.ime_fence.proxy_removed();
++
+                 state.text_input = state
+                     .globals
+                     .text_input_manager
+@@ -1801,6 +2228,20 @@ impl Dispatch<wl_seat::WlSeat, ()> for WaylandClientStatePtr {
+                 }
+ 
+                 state.wl_keyboard = Some(keyboard);
++            } else {
++                unfocused_window = state.keyboard_focused_window.take();
++                state.keyboard_focus_surface = None;
++                state.text_input_entered_surface = None;
++                invalidate_keyboard_owner_input(&mut state);
++                state.ime_fence.proxy_removed();
++                if let Some(text_input) = state.text_input.take() {
++                    text_input.disable();
++                    text_input.commit();
++                    text_input.destroy();
++                }
++                if let Some(keyboard) = state.wl_keyboard.take() {
++                    keyboard.release();
++                }
+             }
+             if capabilities.contains(wl_seat::Capability::Pointer) {
+                 let pointer = seat.get_pointer(qh, ());
+@@ -1826,6 +2267,13 @@ impl Dispatch<wl_seat::WlSeat, ()> for WaylandClientStatePtr {
+                 }
+ 
+                 state.wl_pointer = Some(pointer);
++            } else if let Some(pointer) = state.wl_pointer.take() {
++                pointer.release();
++            }
++            drop(state);
++            if let Some(window) = unfocused_window {
++                window.defer_cancel_text_composition();
++                window.set_focused(false);
+             }
+         }
+     }
+@@ -1834,13 +2282,16 @@ impl Dispatch<wl_seat::WlSeat, ()> for WaylandClientStatePtr {
+ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
+     fn event(
+         this: &mut Self,
+-        _: &wl_keyboard::WlKeyboard,
++        keyboard: &wl_keyboard::WlKeyboard,
+         event: wl_keyboard::Event,
+         _: &(),
+         _: &Connection,
+         _: &QueueHandle<Self>,
+     ) {
+         let client = this.get_client();
++        if client.borrow().wl_keyboard.as_ref().map(Proxy::id) != Some(keyboard.id()) {
++            return;
++        }
+         let mut state = client.borrow_mut();
+         match event {
+             wl_keyboard::Event::RepeatInfo { rate, delay } => {
+@@ -1882,30 +2333,62 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
+ 
+                 this.handle_keyboard_layout_change();
+             }
+-            wl_keyboard::Event::Enter { surface, .. } => {
+-                state.keyboard_focused_window = get_window(&mut state, &surface.id());
++            wl_keyboard::Event::Enter { surface, keys, .. } => {
++                let surface_id = surface.id();
++                let old_window = state.keyboard_focused_window.clone();
++                let new_window = get_window(&mut state, &surface_id);
++                invalidate_keyboard_owner_input(&mut state);
++                let action = state.ime_fence.invalidate();
++                state.keyboard_focus_surface = Some(surface_id.clone());
++                if state.text_input_entered_surface.as_ref() != Some(&surface_id) {
++                    state.text_input_entered_surface = None;
++                }
++                let keys = decode_keyboard_enter_keys(&keys, MIN_KEYCODE);
++                let reconciled = if let Some(keys) = keys {
++                    state.key_sequences.reconcile_keyboard_enter(keys)
++                } else {
++                    state.key_sequences.fail_closed();
++                    false
++                };
++                if !reconciled {
++                    log::error!("Wayland keyboard enter exceeded the bounded held-key limit");
++                }
++                state.keyboard_focused_window = new_window.clone();
+                 state.enter_token = Some(());
++                drop(state);
+ 
+-                if let Some(window) = state.keyboard_focused_window.clone() {
+-                    drop(state);
++                this.apply_ime_fence_action(action);
++                if let Some(old_window) =
++                    old_window.filter(|old| new_window.as_ref().is_none_or(|new| !old.ptr_eq(new)))
++                {
++                    old_window.defer_cancel_text_composition();
++                    old_window.set_focused(false);
++                }
++
++                if let Some(window) = new_window {
++                    window.defer_cancel_text_composition();
+                     window.set_focused(true);
+                 }
+             }
+             wl_keyboard::Event::Leave { surface, .. } => {
+-                let keyboard_focused_window = get_window(&mut state, &surface.id());
+-                state.keyboard_focused_window = None;
++                let surface_id = surface.id();
++                if state.keyboard_focus_surface.as_ref() != Some(&surface_id) {
++                    return;
++                }
++                let keyboard_focused_window = state.keyboard_focused_window.take();
++                state.keyboard_focus_surface = None;
++                if state.text_input_entered_surface.as_ref() == Some(&surface_id) {
++                    state.text_input_entered_surface = None;
++                }
++                invalidate_keyboard_owner_input(&mut state);
++                let action = state.ime_fence.invalidate();
+                 state.enter_token.take();
+-                // Prevent keyboard events from repeating after opening e.g. a file chooser and closing it quickly
+-                state.repeat.current_id += 1;
+                 state.restore_cursor_after_hide();
++                drop(state);
++                this.apply_ime_fence_action(action);
+ 
+                 if let Some(window) = keyboard_focused_window {
+-                    if let Some(ref mut compose) = state.compose_state {
+-                        compose.reset();
+-                    }
+-                    state.pre_edit_text.take();
+-                    drop(state);
+-                    window.handle_ime(ImeInput::DeleteText);
++                    window.defer_cancel_text_composition();
+                     window.set_focused(false);
+                 }
+             }
+@@ -1955,8 +2438,22 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
+                     return;
+                 };
+ 
++                let Some(xkb_keycode) = wayland_key_to_xkb_keycode(key, MIN_KEYCODE) else {
++                    return;
++                };
++                match key_state {
++                    wl_keyboard::KeyState::Pressed if !state.key_sequences.key_down(key) => {
++                        return;
++                    }
++                    wl_keyboard::KeyState::Released if !state.key_sequences.key_up(key) => {
++                        return;
++                    }
++                    _ => {}
++                }
++                let key_sequence_generation = state.key_sequences.generation();
++
+                 let keymap_state = state.keymap_state.as_ref().unwrap();
+-                let keycode = Keycode::from(key + MIN_KEYCODE);
++                let keycode = Keycode::from(xkb_keycode);
+                 let keysym = keymap_state.key_get_one_sym(keycode);
+ 
+                 match key_state {
+@@ -1975,6 +2472,18 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
+                                     drop(state);
+                                     focused_window.handle_ime(ImeInput::SetMarkedText(pre_edit));
+                                     state = client.borrow_mut();
++                                    if !key_sequence_owner_is_current(
++                                        &state,
++                                        &focused_window,
++                                        key_sequence_generation,
++                                        key,
++                                    ) {
++                                        compose.reset();
++                                        if state.compose_state.is_none() {
++                                            state.compose_state = Some(compose);
++                                        }
++                                        return;
++                                    }
+                                 }
+ 
+                                 xkb::Status::Composed => {
+@@ -1991,13 +2500,41 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
+                                     drop(state);
+                                     if let Some(pre_edit) = pre_edit {
+                                         focused_window.handle_ime(ImeInput::InsertText(pre_edit));
++                                        state = client.borrow_mut();
++                                        if !key_sequence_owner_is_current(
++                                            &state,
++                                            &focused_window,
++                                            key_sequence_generation,
++                                            key,
++                                        ) {
++                                            compose.reset();
++                                            if state.compose_state.is_none() {
++                                                state.compose_state = Some(compose);
++                                            }
++                                            return;
++                                        }
++                                    } else {
++                                        state = client.borrow_mut();
+                                     }
+                                     if let Some(current_key) = new_pre_edit {
++                                        drop(state);
+                                         focused_window
+                                             .handle_ime(ImeInput::SetMarkedText(current_key));
++                                        state = client.borrow_mut();
++                                        if !key_sequence_owner_is_current(
++                                            &state,
++                                            &focused_window,
++                                            key_sequence_generation,
++                                            key,
++                                        ) {
++                                            compose.reset();
++                                            if state.compose_state.is_none() {
++                                                state.compose_state = Some(compose);
++                                            }
++                                            return;
++                                        }
+                                     }
+                                     compose.feed(keysym);
+-                                    state = client.borrow_mut();
+                                 }
+                                 _ => {}
+                             }
+@@ -2009,12 +2546,18 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
+                             prefer_character_input: false,
+                         });
+ 
+-                        state.repeat.current_id += 1;
++                        let Some(next_repeat_id) = state.repeat.current_id.checked_add(1) else {
++                            state.key_sequences.invalidate_owner();
++                            state.repeat.current_keycode = None;
++                            return;
++                        };
++                        state.repeat.current_id = next_repeat_id;
+                         state.repeat.current_keycode = Some(keycode);
+ 
+                         let rate = state.repeat.characters_per_second;
+                         let repeat_interval = Duration::from_secs(1) / rate.max(1);
+                         let id = state.repeat.current_id;
++                        let sequence_generation = state.key_sequences.generation();
+                         state
+                             .loop_handle
+                             .insert_source(Timer::from_duration(state.repeat.delay), {
+@@ -2027,7 +2570,10 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
+                                     let client = this.get_client();
+                                     let state = client.borrow();
+                                     let is_repeating = id == state.repeat.current_id
+-                                        && state.repeat.current_keycode.is_some()
++                                        && state.repeat.current_keycode == Some(keycode)
++                                        && state
++                                            .key_sequences
++                                            .accepts_repeat(sequence_generation, key)
+                                         && state.keyboard_focused_window.is_some();
+ 
+                                     if !is_repeating || rate == 0 {
+@@ -2078,69 +2624,99 @@ impl Dispatch<zwp_text_input_v3::ZwpTextInputV3, ()> for WaylandClientStatePtr {
+         _: &Connection,
+         _: &QueueHandle<Self>,
+     ) {
+-        let client = this.get_client();
+-        let mut state = client.borrow_mut();
++        let text_input_id = text_input.id();
+         match event {
+-            zwp_text_input_v3::Event::Enter { .. } => {
+-                drop(state);
+-                this.enable_ime();
++            zwp_text_input_v3::Event::Enter { surface } => {
++                this.handle_text_input_enter(text_input, &surface);
+             }
+-            zwp_text_input_v3::Event::Leave { .. } => {
+-                drop(state);
+-                this.disable_ime();
++            zwp_text_input_v3::Event::Leave { surface } => {
++                this.handle_text_input_leave(text_input, &surface);
+             }
+             zwp_text_input_v3::Event::CommitString { text } => {
+-                state.composing = false;
+-                let Some(window) = state.keyboard_focused_window.clone() else {
++                let Some((owner, _window)) = this.current_ime_window_for_proxy(&text_input_id)
++                else {
+                     return;
+                 };
+-
+-                if let Some(commit_text) = text {
+-                    drop(state);
+-                    // IBus Intercepts keys like `a`, `b`, but those keys are needed for vim mode.
+-                    // We should only send ASCII characters to Zed, otherwise a user could remap a letter like `か` or `相`.
++                let client = this.get_client();
++                let mut state = client.borrow_mut();
++                if !ime_owner_is_current(&state, &owner) {
++                    return;
++                }
++                state.pending_ime_batch.record_commit(text);
++            }
++            zwp_text_input_v3::Event::PreeditString { text, .. } => {
++                let Some((owner, _)) = this.current_ime_window_for_proxy(&text_input_id) else {
++                    return;
++                };
++                let client = this.get_client();
++                let mut state = client.borrow_mut();
++                if !ime_owner_is_current(&state, &owner) {
++                    return;
++                }
++                state.composing = text.is_some();
++                state.pending_ime_batch.record_preedit(text);
++            }
++            zwp_text_input_v3::Event::Done { serial } => {
++                let Some((owner, window)) = this.current_ime_window_for_proxy(&text_input_id)
++                else {
++                    return;
++                };
++                let (last_serial, batch) = {
++                    let client = this.get_client();
++                    let mut state = client.borrow_mut();
++                    if !ime_owner_is_current(&state, &owner) {
++                        return;
++                    }
++                    let last_serial = state.serial_tracker.get(SerialKind::InputMethod);
++                    state.serial_tracker.update(SerialKind::InputMethod, serial);
++                    let batch = std::mem::take(&mut state.pending_ime_batch);
++                    state.composing = batch.preedit.is_some();
++                    (last_serial, batch)
++                };
++                let cancel_composition = batch.should_cancel_composition();
++                if let Some(Some(commit_text)) = batch.commit.as_ref() {
++                    // IBus intercepts single ASCII keys that Zed may need for bindings.
++                    // Non-ASCII text, and explicit empty commits, go through the input handler.
+                     if commit_text.len() == 1 {
+                         window.handle_input(PlatformInput::KeyDown(KeyDownEvent {
+                             keystroke: Keystroke {
+                                 modifiers: Modifiers::default(),
+                                 key: commit_text.clone(),
+-                                key_char: Some(commit_text),
++                                key_char: Some(commit_text.clone()),
+                             },
+                             is_held: false,
+                             prefer_character_input: false,
+                         }));
+                     } else {
+-                        window.handle_ime(ImeInput::InsertText(commit_text));
++                        window.handle_ime(ImeInput::InsertText(commit_text.clone()));
+                     }
+                 }
+-            }
+-            zwp_text_input_v3::Event::PreeditString { text, .. } => {
+-                state.composing = true;
+-                state.ime_pre_edit = text;
+-            }
+-            zwp_text_input_v3::Event::Done { serial } => {
+-                let last_serial = state.serial_tracker.get(SerialKind::InputMethod);
+-                state.serial_tracker.update(SerialKind::InputMethod, serial);
+-                let Some(window) = state.keyboard_focused_window.clone() else {
+-                    return;
++
++                let still_current = {
++                    let client = this.get_client();
++                    let state = client.borrow();
++                    ime_owner_is_current(&state, &owner)
+                 };
++                if !still_current {
++                    return;
++                }
+ 
+-                if let Some(text) = state.ime_pre_edit.take() {
+-                    drop(state);
++                if let Some(text) = batch.preedit {
+                     window.handle_ime(ImeInput::SetMarkedText(text));
+                     if let Some(area) = window.get_ime_area() {
++                        let client = this.get_client();
+                         let mut state = client.borrow_mut();
+-                        set_ime_cursor_rectangle_after_done(
+-                            text_input,
+-                            &mut state.last_ime_cursor_rectangle,
+-                            area,
+-                            last_serial.as_raw() == serial,
+-                        );
++                        if ime_owner_is_current(&state, &owner) {
++                            set_ime_cursor_rectangle_after_done(
++                                text_input,
++                                &mut state.last_ime_cursor_rectangle,
++                                area,
++                                last_serial.as_raw() == serial,
++                            );
++                        }
+                     }
+-                } else {
+-                    state.composing = false;
+-                    drop(state);
+-                    window.handle_ime(ImeInput::DeleteText);
++                } else if cancel_composition {
++                    window.handle_ime(ImeInput::CancelComposition);
+                 }
+             }
+             _ => {}
+@@ -2178,6 +2754,9 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandClientStatePtr {
+         _: &QueueHandle<Self>,
+     ) {
+         let client = this.get_client();
++        if client.borrow().wl_pointer.as_ref().map(Proxy::id) != Some(wl_pointer.id()) {
++            return;
++        }
+         let mut state = client.borrow_mut();
+ 
+         match event {
+@@ -2315,11 +2894,21 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandClientStatePtr {
+                     wl_pointer::ButtonState::Pressed => {
+                         if let Some(window) = state.keyboard_focused_window.clone() {
+                             if state.composing && state.text_input.is_some() {
++                                let owner = state
++                                    .ime_fence
++                                    .desired_owner()
++                                    .cloned()
++                                    .filter(|owner| ime_owner_is_current(&state, owner));
++                                state.composing = false;
++                                state.pending_ime_batch = ImeEditBatch::default();
+                                 drop(state);
+-                                // text_input_v3 don't have something like a reset function
+-                                this.disable_ime();
+-                                this.enable_ime();
+-                                window.handle_ime(ImeInput::UnmarkText);
++                                // A click without a committed string cancels the preedit and
++                                // preserves the original replacement selection. Re-arm only
++                                // after a sync fence for this exact input session.
++                                window.handle_ime(ImeInput::CancelComposition);
++                                if let Some(owner) = owner {
++                                    this.rearm_ime_owner(owner);
++                                }
+                                 state = client.borrow_mut();
+                             } else if let (Some(text), Some(compose)) =
+                                 (state.pre_edit_text.take(), state.compose_state.as_mut())
+diff --git a/crates/gpui_linux/src/linux/wayland/ime_fence.rs b/crates/gpui_linux/src/linux/wayland/ime_fence.rs
+new file mode 100644
+index 0000000..2ff173e
+--- /dev/null
++++ b/crates/gpui_linux/src/linux/wayland/ime_fence.rs
+@@ -0,0 +1,839 @@
++use std::collections::HashSet;
++
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub(super) struct ImeOwner<F, I> {
++    pub focus_id: F,
++    pub focus_generation: u64,
++    pub seat_id: I,
++    pub surface_id: I,
++    pub text_input_id: I,
++}
++
++impl<F: Clone, I: Clone> ImeOwner<F, I> {
++    fn scope(&self) -> ImeScope<I> {
++        ImeScope {
++            seat_id: self.seat_id.clone(),
++            surface_id: self.surface_id.clone(),
++            text_input_id: self.text_input_id.clone(),
++        }
++    }
++}
++
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub(super) struct ImeScope<I> {
++    pub seat_id: I,
++    pub surface_id: I,
++    pub text_input_id: I,
++}
++
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub(super) enum ImeFenceAction<F, I> {
++    Noop,
++    Enable(ImeOwner<F, I>),
++    DisableAndSync { epoch: u64, scope: ImeScope<I> },
++    FailClosed,
++}
++
++#[derive(Clone, Debug, PartialEq, Eq)]
++enum ImeFencePhase<F, I> {
++    Initial,
++    Disabled,
++    Enabled(ImeOwner<F, I>),
++    WaitingForSync {
++        epoch: u64,
++        scope: ImeScope<I>,
++        desired: Option<ImeOwner<F, I>>,
++    },
++    FailClosed,
++}
++
++pub(super) struct ImeOwnerFence<F, I> {
++    epoch: u64,
++    phase: ImeFencePhase<F, I>,
++}
++
++impl<F, I> Default for ImeOwnerFence<F, I> {
++    fn default() -> Self {
++        Self {
++            epoch: 0,
++            phase: ImeFencePhase::Initial,
++        }
++    }
++}
++
++impl<F: Clone + PartialEq, I: Clone + PartialEq> ImeOwnerFence<F, I> {
++    pub fn set_owner(&mut self, owner: Option<ImeOwner<F, I>>) -> ImeFenceAction<F, I> {
++        match self.phase.clone() {
++            ImeFencePhase::FailClosed => ImeFenceAction::Noop,
++            ImeFencePhase::Initial | ImeFencePhase::Disabled => {
++                if let Some(owner) = owner {
++                    self.phase = ImeFencePhase::Enabled(owner.clone());
++                    ImeFenceAction::Enable(owner)
++                } else {
++                    self.phase = ImeFencePhase::Disabled;
++                    ImeFenceAction::Noop
++                }
++            }
++            ImeFencePhase::Enabled(current) => {
++                if owner.as_ref() == Some(&current) {
++                    ImeFenceAction::Noop
++                } else if let Some(owner) = owner {
++                    self.begin_fence(owner.scope(), Some(owner))
++                } else {
++                    self.begin_fence(current.scope(), None)
++                }
++            }
++            ImeFencePhase::WaitingForSync { scope, .. } => {
++                if owner.as_ref().is_some_and(|owner| owner.scope() != scope) {
++                    let owner = owner.unwrap();
++                    self.begin_fence(owner.scope(), Some(owner))
++                } else {
++                    if let ImeFencePhase::WaitingForSync { desired, .. } = &mut self.phase {
++                        *desired = owner;
++                    }
++                    ImeFenceAction::Noop
++                }
++            }
++        }
++    }
++
++    pub fn invalidate(&mut self) -> ImeFenceAction<F, I> {
++        match self.phase.clone() {
++            ImeFencePhase::Initial | ImeFencePhase::Disabled | ImeFencePhase::FailClosed => {
++                ImeFenceAction::Noop
++            }
++            ImeFencePhase::Enabled(owner) => self.begin_fence(owner.scope(), None),
++            ImeFencePhase::WaitingForSync { scope, .. } => self.begin_fence(scope, None),
++        }
++    }
++
++    pub fn rearm(&mut self, owner: ImeOwner<F, I>) -> ImeFenceAction<F, I> {
++        self.begin_fence(owner.scope(), Some(owner))
++    }
++
++    pub fn proxy_recreated(&mut self, scope: ImeScope<I>) -> ImeFenceAction<F, I> {
++        self.begin_fence(scope, None)
++    }
++
++    pub fn proxy_removed(&mut self) -> ImeFenceAction<F, I> {
++        if matches!(self.phase, ImeFencePhase::FailClosed) {
++            return ImeFenceAction::Noop;
++        }
++        let Some(epoch) = self.epoch.checked_add(1) else {
++            self.phase = ImeFencePhase::FailClosed;
++            return ImeFenceAction::FailClosed;
++        };
++        self.epoch = epoch;
++        self.phase = ImeFencePhase::Disabled;
++        ImeFenceAction::Noop
++    }
++
++    pub fn complete_sync(
++        &mut self,
++        epoch: u64,
++        callback_scope: &ImeScope<I>,
++        current_owner: Option<ImeOwner<F, I>>,
++    ) -> ImeFenceAction<F, I> {
++        let ImeFencePhase::WaitingForSync {
++            epoch: pending_epoch,
++            scope,
++            desired,
++        } = self.phase.clone()
++        else {
++            return ImeFenceAction::Noop;
++        };
++
++        if pending_epoch != epoch || scope != *callback_scope {
++            return ImeFenceAction::Noop;
++        }
++
++        self.phase = ImeFencePhase::Disabled;
++        if desired.is_some() && desired == current_owner {
++            let owner = desired.unwrap();
++            self.phase = ImeFencePhase::Enabled(owner.clone());
++            ImeFenceAction::Enable(owner)
++        } else {
++            ImeFenceAction::Noop
++        }
++    }
++
++    pub fn is_enabled_for(&self, owner: &ImeOwner<F, I>) -> bool {
++        matches!(&self.phase, ImeFencePhase::Enabled(active) if active == owner)
++    }
++
++    pub fn desired_owner(&self) -> Option<&ImeOwner<F, I>> {
++        match &self.phase {
++            ImeFencePhase::Enabled(owner) => Some(owner),
++            ImeFencePhase::WaitingForSync { desired, .. } => desired.as_ref(),
++            ImeFencePhase::Initial | ImeFencePhase::Disabled | ImeFencePhase::FailClosed => None,
++        }
++    }
++
++    fn begin_fence(
++        &mut self,
++        scope: ImeScope<I>,
++        desired: Option<ImeOwner<F, I>>,
++    ) -> ImeFenceAction<F, I> {
++        let Some(epoch) = self.epoch.checked_add(1) else {
++            self.phase = ImeFencePhase::FailClosed;
++            return ImeFenceAction::FailClosed;
++        };
++        self.epoch = epoch;
++        self.phase = ImeFencePhase::WaitingForSync {
++            epoch,
++            scope: scope.clone(),
++            desired,
++        };
++        ImeFenceAction::DisableAndSync { epoch, scope }
++    }
++}
++
++pub(super) fn is_current_v3_owner<F: PartialEq, I: PartialEq>(
++    event_proxy: &I,
++    live_proxy: &I,
++    active_surface: Option<&I>,
++    entered_surface: Option<&I>,
++    current_owner: Option<&ImeOwner<F, I>>,
++    enabled_owner: &ImeOwner<F, I>,
++) -> bool {
++    event_proxy == live_proxy
++        && active_surface == Some(&enabled_owner.surface_id)
++        && entered_surface == Some(&enabled_owner.surface_id)
++        && current_owner == Some(enabled_owner)
++        && &enabled_owner.text_input_id == live_proxy
++}
++
++pub(super) fn is_keyboard_focused_surface<I: PartialEq>(
++    window_surface: &I,
++    keyboard_surface: Option<&I>,
++) -> bool {
++    keyboard_surface == Some(window_surface)
++}
++
++#[derive(Default)]
++pub(super) struct KeySequenceFence {
++    generation: u64,
++    fail_closed: bool,
++    pressed: HashSet<u32>,
++    quarantined_releases: HashSet<u32>,
++}
++
++// This is a bounded backend resource policy, not a Wayland keycode range.
++const MAX_TRACKED_KEY_SEQUENCES: usize = 256;
++
++pub(super) fn wayland_key_to_xkb_keycode(key: u32, offset: u32) -> Option<u32> {
++    let keycode = key.checked_add(offset)?;
++    (keycode != u32::MAX).then_some(keycode)
++}
++
++pub(super) fn decode_keyboard_enter_keys(bytes: &[u8], offset: u32) -> Option<Vec<u32>> {
++    if bytes.len() % std::mem::size_of::<u32>() != 0
++        || bytes.len() / std::mem::size_of::<u32>() > MAX_TRACKED_KEY_SEQUENCES
++    {
++        return None;
++    }
++
++    bytes
++        .chunks_exact(4)
++        .map(|chunk| {
++            let key = u32::from_ne_bytes(chunk.try_into().ok()?);
++            wayland_key_to_xkb_keycode(key, offset)?;
++            Some(key)
++        })
++        .collect()
++}
++
++pub(super) fn focus_generation_matches(
++    owner_generation: Option<u64>,
++    current_generation: Option<u64>,
++) -> bool {
++    owner_generation.is_some() && owner_generation == current_generation
++}
++
++pub(super) fn try_restore_input_handler<T>(
++    slot: &mut Option<T>,
++    value: T,
++    owner_generation: Option<u64>,
++    current_generation: Option<u64>,
++) -> Result<(), T> {
++    if owner_generation != current_generation || slot.is_some() {
++        return Err(value);
++    }
++    *slot = Some(value);
++    Ok(())
++}
++
++#[derive(Default)]
++pub(super) struct DeferredImeCancelGate {
++    pending: usize,
++    fail_closed: bool,
++}
++
++impl DeferredImeCancelGate {
++    pub fn begin(&mut self) -> bool {
++        if self.fail_closed {
++            return false;
++        }
++        let Some(pending) = self.pending.checked_add(1) else {
++            self.fail_closed = true;
++            return false;
++        };
++        self.pending = pending;
++        true
++    }
++
++    pub fn finish(&mut self) -> bool {
++        if self.fail_closed || self.pending == 0 {
++            self.fail_closed = true;
++            return false;
++        }
++        self.pending -= 1;
++        self.pending == 0
++    }
++
++    pub fn allows_ime(&self) -> bool {
++        !self.fail_closed && self.pending == 0
++    }
++}
++
++#[derive(Default, Debug, PartialEq, Eq)]
++pub(super) struct ImeEditBatch {
++    pub commit: Option<Option<String>>,
++    pub preedit: Option<String>,
++}
++
++impl ImeEditBatch {
++    pub fn record_commit(&mut self, text: Option<String>) {
++        self.commit = Some(text);
++    }
++
++    pub fn record_preedit(&mut self, text: Option<String>) {
++        self.preedit = text;
++    }
++
++    pub fn has_commit_text(&self) -> bool {
++        matches!(self.commit.as_ref(), Some(Some(_)))
++    }
++
++    pub fn should_cancel_composition(&self) -> bool {
++        self.preedit.is_none() && !self.has_commit_text()
++    }
++}
++
++impl KeySequenceFence {
++    pub fn generation(&self) -> u64 {
++        self.generation
++    }
++
++    pub fn fail_closed(&mut self) {
++        self.fail_closed = true;
++        self.quarantined_releases
++            .extend(self.pressed.iter().copied());
++    }
++
++    pub fn key_down(&mut self, keycode: u32) -> bool {
++        if self.fail_closed
++            || self.pressed.contains(&keycode)
++            || self.quarantined_releases.contains(&keycode)
++        {
++            return false;
++        }
++        if self.pressed.len() >= MAX_TRACKED_KEY_SEQUENCES {
++            self.fail_closed = true;
++            self.quarantined_releases
++                .extend(self.pressed.iter().copied());
++            return false;
++        }
++        self.pressed.insert(keycode);
++        true
++    }
++
++    pub fn reconcile_keyboard_enter(
++        &mut self,
++        held_keycodes: impl IntoIterator<Item = u32>,
++    ) -> bool {
++        if self.fail_closed {
++            return false;
++        }
++        let Some(generation) = self.generation.checked_add(1) else {
++            self.fail_closed = true;
++            self.quarantined_releases
++                .extend(self.pressed.iter().copied());
++            return false;
++        };
++        self.generation = generation;
++        self.pressed.clear();
++        self.quarantined_releases.clear();
++
++        for keycode in held_keycodes {
++            if self.pressed.contains(&keycode) {
++                continue;
++            }
++            if self.pressed.len() >= MAX_TRACKED_KEY_SEQUENCES {
++                self.fail_closed = true;
++                self.quarantined_releases
++                    .extend(self.pressed.iter().copied());
++                return false;
++            }
++            self.pressed.insert(keycode);
++            self.quarantined_releases.insert(keycode);
++        }
++        true
++    }
++
++    pub fn quarantine_key(&mut self, keycode: u32) -> bool {
++        if self.fail_closed {
++            return false;
++        }
++        if !self.pressed.contains(&keycode) {
++            if self.pressed.len() >= MAX_TRACKED_KEY_SEQUENCES {
++                self.fail_closed = true;
++                self.quarantined_releases
++                    .extend(self.pressed.iter().copied());
++                return false;
++            }
++            self.pressed.insert(keycode);
++        }
++        self.quarantined_releases.insert(keycode);
++        true
++    }
++
++    pub fn key_up(&mut self, keycode: u32) -> bool {
++        if self.fail_closed || !self.pressed.remove(&keycode) {
++            return false;
++        }
++        !self.quarantined_releases.remove(&keycode)
++    }
++
++    pub fn invalidate_owner(&mut self) -> bool {
++        if self.fail_closed {
++            return false;
++        }
++        let Some(generation) = self.generation.checked_add(1) else {
++            self.fail_closed = true;
++            self.quarantined_releases
++                .extend(self.pressed.iter().copied());
++            return false;
++        };
++        self.generation = generation;
++        self.quarantined_releases
++            .extend(self.pressed.iter().copied());
++        true
++    }
++
++    pub fn accepts_repeat(&self, generation: u64, keycode: u32) -> bool {
++        !self.fail_closed
++            && generation == self.generation
++            && self.pressed.contains(&keycode)
++            && !self.quarantined_releases.contains(&keycode)
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn keyboard_enter_decodes_packed_u32_keycodes_before_xkb_offset() {
++        let bytes = [300_u32.to_ne_bytes(), 44_u32.to_ne_bytes()].concat();
++        assert_eq!(decode_keyboard_enter_keys(&bytes, 8), Some(vec![300, 44]));
++    }
++
++    #[test]
++    fn keyboard_enter_and_key_events_track_the_same_raw_code_domain() {
++        let bytes = 30_u32.to_ne_bytes();
++        let held = decode_keyboard_enter_keys(&bytes, 8).unwrap();
++        let mut keys = KeySequenceFence::default();
++        assert!(keys.reconcile_keyboard_enter(held));
++        assert!(!keys.key_up(30));
++        assert!(keys.key_down(38));
++    }
++
++    #[test]
++    fn malformed_or_oversized_keyboard_enter_key_lists_fail_closed() {
++        assert_eq!(decode_keyboard_enter_keys(&[1, 2, 3], 8), None);
++        assert_eq!(decode_keyboard_enter_keys(&vec![0; 257 * 4], 8), None);
++        assert_eq!(decode_keyboard_enter_keys(&u32::MAX.to_ne_bytes(), 8), None);
++    }
++
++    #[test]
++    fn malformed_keyboard_enter_latches_the_key_sequence_fence_closed() {
++        let mut keys = KeySequenceFence::default();
++        assert!(keys.key_down(30));
++        assert_eq!(decode_keyboard_enter_keys(&[1, 2, 3], 8), None);
++        keys.fail_closed();
++        assert!(!keys.key_down(31));
++        assert!(!keys.key_up(30));
++        assert!(!keys.accepts_repeat(keys.generation(), 30));
++    }
++
++    #[test]
++    fn focus_generation_change_rejects_a_taken_old_handler() {
++        let captured_generation = Some(12);
++        assert!(focus_generation_matches(captured_generation, Some(12)));
++        assert!(!focus_generation_matches(captured_generation, Some(13)));
++        assert!(!focus_generation_matches(None, Some(13)));
++    }
++
++    #[test]
++    fn reentrant_old_handler_is_not_restored_after_focus_generation_changes() {
++        let mut slot = None;
++        assert_eq!(
++            try_restore_input_handler(&mut slot, "stale handler", Some(12), Some(13)),
++            Err("stale handler")
++        );
++        assert_eq!(slot, None);
++
++        assert_eq!(
++            try_restore_input_handler(&mut slot, "current handler", Some(13), Some(13)),
++            Ok(())
++        );
++        assert_eq!(slot, Some("current handler"));
++    }
++
++    #[test]
++    fn reentrant_new_handler_is_not_overwritten_by_a_taken_old_handler() {
++        let mut slot = Some("new focus handler");
++        assert_eq!(
++            try_restore_input_handler(&mut slot, "same-generation handler", Some(13), Some(13)),
++            Err("same-generation handler")
++        );
++        assert_eq!(slot, Some("new focus handler"));
++    }
++
++    #[test]
++    fn deferred_cancel_gate_blocks_ime_until_every_cancel_finishes() {
++        let mut gate = DeferredImeCancelGate::default();
++        assert!(gate.allows_ime());
++        assert!(gate.begin());
++        assert!(gate.begin());
++        assert!(!gate.allows_ime());
++        assert!(!gate.finish());
++        assert!(!gate.allows_ime());
++        assert!(gate.finish());
++        assert!(gate.allows_ime());
++        assert!(!gate.finish());
++        assert!(!gate.allows_ime());
++    }
++
++    #[test]
++    fn v3_batch_keeps_commit_and_preedit_independent_of_event_order() {
++        let mut commit_first = ImeEditBatch::default();
++        commit_first.record_commit(Some("committed".to_owned()));
++        commit_first.record_preedit(Some("preview".to_owned()));
++
++        let mut preedit_first = ImeEditBatch::default();
++        preedit_first.record_preedit(Some("preview".to_owned()));
++        preedit_first.record_commit(Some("committed".to_owned()));
++
++        assert_eq!(commit_first, preedit_first);
++        assert_eq!(commit_first.commit, Some(Some("committed".to_owned())));
++        assert_eq!(commit_first.preedit.as_deref(), Some("preview"));
++    }
++
++    #[test]
++    fn v3_batch_distinguishes_empty_commit_from_absent_commit() {
++        let mut explicit_empty = ImeEditBatch::default();
++        explicit_empty.record_commit(Some(String::new()));
++        assert_eq!(explicit_empty.commit, Some(Some(String::new())));
++        assert!(explicit_empty.has_commit_text());
++        assert!(!explicit_empty.should_cancel_composition());
++
++        let absent = ImeEditBatch::default();
++        assert_eq!(absent.commit, None);
++        assert_eq!(absent.preedit, None);
++        assert!(!absent.has_commit_text());
++        assert!(absent.should_cancel_composition());
++    }
++
++    fn owner(
++        focus_id: u32,
++        generation: u64,
++        seat: u32,
++        surface: u32,
++        proxy: u32,
++    ) -> ImeOwner<u32, u32> {
++        ImeOwner {
++            focus_id,
++            focus_generation: generation,
++            seat_id: seat,
++            surface_id: surface,
++            text_input_id: proxy,
++        }
++    }
++
++    #[test]
++    fn owner_change_disables_until_matching_sync_then_enables_latest_owner() {
++        let mut fence = ImeOwnerFence::default();
++        let first = owner(1, 1, 7, 10, 20);
++        let second = owner(2, 2, 7, 10, 20);
++        assert_eq!(
++            fence.set_owner(Some(first.clone())),
++            ImeFenceAction::Enable(first)
++        );
++
++        let action = fence.set_owner(Some(second.clone()));
++        let ImeFenceAction::DisableAndSync { epoch, scope } = action else {
++            panic!("owner switch must disable and fence old events")
++        };
++        assert_eq!(scope.surface_id, second.surface_id);
++        assert!(!fence.is_enabled_for(&second));
++        assert_eq!(
++            fence.complete_sync(epoch.saturating_sub(1), &scope, Some(second.clone())),
++            ImeFenceAction::Noop
++        );
++        let wrong_scope = ImeScope {
++            seat_id: scope.seat_id,
++            surface_id: scope.surface_id + 1,
++            text_input_id: scope.text_input_id,
++        };
++        assert_eq!(
++            fence.complete_sync(epoch, &wrong_scope, Some(second.clone())),
++            ImeFenceAction::Noop
++        );
++        assert_eq!(
++            fence.complete_sync(epoch, &scope, Some(second.clone())),
++            ImeFenceAction::Enable(second.clone())
++        );
++        assert!(fence.is_enabled_for(&second));
++    }
++
++    #[test]
++    fn stale_proxy_and_surface_events_fail_closed() {
++        let active = owner(3, 9, 7, 10, 20);
++        assert!(is_current_v3_owner(
++            &20,
++            &20,
++            Some(&10),
++            Some(&10),
++            Some(&active),
++            &active
++        ));
++        assert!(!is_current_v3_owner(
++            &21,
++            &20,
++            Some(&10),
++            Some(&10),
++            Some(&active),
++            &active
++        ));
++        assert!(!is_current_v3_owner(
++            &20,
++            &20,
++            Some(&11),
++            Some(&10),
++            Some(&active),
++            &active
++        ));
++        assert!(!is_current_v3_owner(
++            &20,
++            &20,
++            Some(&10),
++            Some(&11),
++            Some(&active),
++            &active
++        ));
++        let new_owner = owner(4, 10, 7, 10, 20);
++        assert!(!is_current_v3_owner(
++            &20,
++            &20,
++            Some(&10),
++            Some(&10),
++            Some(&new_owner),
++            &active
++        ));
++    }
++
++    #[test]
++    fn background_surface_invalidation_does_not_touch_keyboard_owner() {
++        assert!(!is_keyboard_focused_surface(&11, Some(&10)));
++        assert!(is_keyboard_focused_surface(&10, Some(&10)));
++        assert!(!is_keyboard_focused_surface(&10, None));
++    }
++
++    #[test]
++    fn rearm_requires_a_new_barrier_and_old_sync_cannot_enable_new_proxy() {
++        let mut fence = ImeOwnerFence::default();
++        let active_owner = owner(1, 1, 7, 10, 20);
++        assert_eq!(
++            fence.set_owner(Some(active_owner.clone())),
++            ImeFenceAction::Enable(active_owner.clone())
++        );
++        let ImeFenceAction::DisableAndSync {
++            epoch: old_epoch,
++            scope: old_scope,
++        } = fence.rearm(active_owner.clone())
++        else {
++            panic!("same-owner rearm must fence pending old-owner batches")
++        };
++        let new_proxy_owner = owner(1, 1, 7, 10, 21);
++        let ImeFenceAction::DisableAndSync {
++            epoch: new_epoch,
++            scope,
++        } = fence.proxy_recreated(ImeScope {
++            seat_id: new_proxy_owner.seat_id,
++            surface_id: new_proxy_owner.surface_id,
++            text_input_id: new_proxy_owner.text_input_id,
++        })
++        else {
++            panic!("proxy recreation needs a fresh fence")
++        };
++        assert!(new_epoch > old_epoch);
++        assert_eq!(scope.text_input_id, new_proxy_owner.text_input_id);
++        assert_eq!(
++            fence.complete_sync(old_epoch, &old_scope, Some(new_proxy_owner.clone())),
++            ImeFenceAction::Noop
++        );
++        assert!(!fence.is_enabled_for(&new_proxy_owner));
++    }
++
++    #[test]
++    fn removing_proxy_invalidates_old_barrier_without_resetting_epoch() {
++        let mut fence = ImeOwnerFence::default();
++        let active_owner = owner(1, 1, 7, 10, 20);
++        assert_eq!(
++            fence.set_owner(Some(active_owner.clone())),
++            ImeFenceAction::Enable(active_owner.clone())
++        );
++        let ImeFenceAction::DisableAndSync {
++            epoch: old_epoch,
++            scope: old_scope,
++        } = fence.rearm(active_owner.clone())
++        else {
++            panic!("rearm must create a pending old-proxy barrier")
++        };
++        assert_eq!(fence.proxy_removed(), ImeFenceAction::Noop);
++        let new_owner = owner(2, 2, 7, 10, 21);
++        assert_eq!(
++            fence.set_owner(Some(new_owner.clone())),
++            ImeFenceAction::Enable(new_owner.clone())
++        );
++        assert_eq!(
++            fence.complete_sync(old_epoch, &old_scope, Some(active_owner)),
++            ImeFenceAction::Noop
++        );
++        assert!(fence.is_enabled_for(&new_owner));
++    }
++
++    #[test]
++    fn held_key_release_and_repeat_are_quarantined_after_owner_change() {
++        let mut keys = KeySequenceFence::default();
++        assert!(keys.key_down(30));
++        let old_generation = keys.generation();
++        assert!(keys.accepts_repeat(old_generation, 30));
++        assert!(keys.invalidate_owner());
++        assert!(!keys.accepts_repeat(old_generation, 30));
++        assert!(!keys.key_down(30));
++        assert!(!keys.key_up(30));
++        assert!(keys.key_down(31));
++        let new_generation = keys.generation();
++        assert!(keys.accepts_repeat(new_generation, 31));
++        assert!(keys.key_up(31));
++    }
++
++    #[test]
++    fn xkb_compose_callback_handoff_rejects_the_old_key_owner() {
++        let mut keys = KeySequenceFence::default();
++        assert!(keys.key_down(42));
++        let captured_generation = keys.generation();
++        assert!(keys.accepts_repeat(captured_generation, 42));
++
++        assert!(keys.invalidate_owner());
++        assert!(!keys.accepts_repeat(captured_generation, 42));
++        assert!(keys.key_down(43));
++        assert!(keys.accepts_repeat(keys.generation(), 43));
++    }
++
++    #[test]
++    fn orphan_and_duplicate_key_releases_are_rejected() {
++        let mut keys = KeySequenceFence::default();
++        assert!(!keys.key_up(30));
++        assert!(keys.key_down(30));
++        assert!(keys.key_up(30));
++        assert!(!keys.key_up(30));
++    }
++
++    #[test]
++    fn duplicate_key_down_is_rejected_while_current_timer_repeat_remains_valid() {
++        let mut keys = KeySequenceFence::default();
++        assert!(keys.key_down(30));
++        let generation = keys.generation();
++        assert!(!keys.key_down(30));
++        assert!(keys.accepts_repeat(generation, 30));
++    }
++
++    #[test]
++    fn keyboard_enter_replaces_stale_keys_with_authoritative_quarantined_set() {
++        let mut keys = KeySequenceFence::default();
++        assert!(keys.key_down(30));
++        let old_generation = keys.generation();
++        assert!(keys.invalidate_owner());
++        assert!(keys.reconcile_keyboard_enter([31]));
++        let new_generation = keys.generation();
++        assert!(new_generation > old_generation);
++        assert!(!keys.accepts_repeat(old_generation, 31));
++        assert!(!keys.key_up(30));
++        assert!(!keys.key_down(31));
++        assert!(!keys.key_up(31));
++        assert!(keys.key_down(31));
++        assert!(keys.key_up(31));
++        assert!(keys.key_down(30));
++        assert!(keys.key_up(30));
++    }
++
++    #[test]
++    fn key_sequence_storage_is_bounded_without_assuming_a_protocol_keycode_maximum() {
++        let mut keys = KeySequenceFence::default();
++        for keycode in 0..MAX_TRACKED_KEY_SEQUENCES as u32 {
++            assert!(keys.key_down(keycode));
++        }
++        assert_eq!(keys.pressed.len(), MAX_TRACKED_KEY_SEQUENCES);
++        assert!(!keys.key_down(u32::MAX));
++        assert!(keys.fail_closed);
++        assert!(!keys.key_up(0));
++        assert!(!keys.key_down(0));
++        assert!(keys.pressed.len() <= MAX_TRACKED_KEY_SEQUENCES);
++    }
++
++    #[test]
++    fn keycode_translation_checks_offset_overflow_and_invalid_sentinel() {
++        assert_eq!(wayland_key_to_xkb_keycode(30, 8), Some(38));
++        assert_eq!(
++            wayland_key_to_xkb_keycode(u32::MAX - 9, 8),
++            Some(u32::MAX - 1)
++        );
++        assert_eq!(wayland_key_to_xkb_keycode(u32::MAX - 8, 8), None);
++        assert_eq!(wayland_key_to_xkb_keycode(u32::MAX, 8), None);
++    }
++
++    #[test]
++    fn key_sequence_generation_exhaustion_latches_closed() {
++        let mut keys = KeySequenceFence::default();
++        assert!(keys.key_down(30));
++        keys.generation = u64::MAX;
++        assert!(!keys.invalidate_owner());
++        assert!(!keys.accepts_repeat(u64::MAX, 30));
++        assert!(!keys.key_down(31));
++        assert!(!keys.key_up(30));
++        assert_eq!(keys.pressed.len(), 1);
++    }
++
++    #[test]
++    fn keys_held_at_keyboard_enter_are_quarantined() {
++        let mut keys = KeySequenceFence::default();
++        assert!(keys.quarantine_key(30));
++        assert!(!keys.key_down(30));
++        assert!(!keys.key_up(30));
++        assert!(keys.key_down(31));
++        assert!(keys.key_up(31));
++    }
++
++    #[test]
++    fn generation_exhaustion_latches_fail_closed() {
++        let mut fence = ImeOwnerFence::default();
++        fence.epoch = u64::MAX;
++        let owner = owner(1, 1, 7, 10, 20);
++        assert_eq!(fence.rearm(owner.clone()), ImeFenceAction::FailClosed);
++        assert_eq!(fence.set_owner(Some(owner)), ImeFenceAction::Noop);
++    }
++}
+diff --git a/crates/gpui_linux/src/linux/wayland/window.rs b/crates/gpui_linux/src/linux/wayland/window.rs
+index a66547a..f353158 100644
+--- a/crates/gpui_linux/src/linux/wayland/window.rs
++++ b/crates/gpui_linux/src/linux/wayland/window.rs
+@@ -30,6 +30,8 @@ use wayland_protocols::{
+ use wayland_protocols_plasma::blur::client::org_kde_kwin_blur;
+ use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1;
+ 
++use super::client::WaylandCallbackData;
++use super::ime_fence::{focus_generation_matches, try_restore_input_handler};
+ use crate::linux::wayland::{display::WaylandDisplay, serial::SerialKind};
+ use crate::linux::{Globals, Output, WaylandClientStatePtr, get_window};
+ use gpui::{
+@@ -114,6 +116,7 @@ pub struct WaylandWindowState {
+     bounds: Bounds<Pixels>,
+     scale: f32,
+     input_handler: Option<PlatformInputHandler>,
++    latest_focus_generation: Option<u64>,
+     decorations: WindowDecorations,
+     background_appearance: WindowBackgroundAppearance,
+     fullscreen: bool,
+@@ -613,6 +616,7 @@ impl WaylandWindowState {
+             bounds: options.bounds,
+             scale: 1.0,
+             input_handler: None,
++            latest_focus_generation: None,
+             decorations: WindowDecorations::Client,
+             background_appearance: WindowBackgroundAppearance::Opaque,
+             fullscreen: false,
+@@ -750,16 +754,20 @@ pub(crate) struct WaylandWindow(pub WaylandWindowStatePtr);
+ pub enum ImeInput {
+     InsertText(String),
+     SetMarkedText(String),
+-    UnmarkText,
+-    DeleteText,
++    CancelComposition,
+ }
+ 
+ impl Drop for WaylandWindow {
+     fn drop(&mut self) {
+         self.0.frame_loop.set(FrameLoop::Parked);
+ 
++        let (client, surface_id) = {
++            let state = self.0.state.borrow();
++            (state.client.clone(), state.surface.id())
++        };
++        client.retire_surface_ime_owner(&surface_id);
++
+         let mut state = self.0.state.borrow_mut();
+-        let surface_id = state.surface.id();
+ 
+         if let Some(parent) = state.parent.as_ref() {
+             parent.state.borrow_mut().children.remove(&surface_id);
+@@ -962,7 +970,10 @@ impl WaylandWindowStatePtr {
+                 && state.presentation == PresentationState::RetryAfterPresent
+             {
+                 if state.pending_frame_callback.is_none() {
+-                    let callback = state.surface.frame(&state.globals.qh, state.surface.id());
++                    let callback = state.surface.frame(
++                        &state.globals.qh,
++                        WaylandCallbackData::Frame(state.surface.id()),
++                    );
+                     state.pending_frame_callback = Some(callback);
+                 }
+                 state.surface.commit();
+@@ -1035,30 +1046,70 @@ impl WaylandWindowStatePtr {
+         self.schedule_frame();
+     }
+ 
+-    fn update_ime_enabled(&self) {
++    fn restore_input_handler_if_current(&self, input_handler: PlatformInputHandler) -> bool {
+         let mut state = self.state.borrow_mut();
+-        if !state.active {
++        let owner_generation = input_handler
++            .focus_owner()
++            .map(|(_, generation)| generation);
++        let current_generation = state.latest_focus_generation;
++        match try_restore_input_handler(
++            &mut state.input_handler,
++            input_handler,
++            owner_generation,
++            current_generation,
++        ) {
++            Ok(()) => true,
++            Err(input_handler) if owner_generation != current_generation => {
++                let client = state.client.clone();
++                drop(state);
++                client.defer_text_composition_cancel(input_handler);
++                false
++            }
++            Err(_input_handler) => false,
++        }
++    }
++
++    fn update_ime_enabled(&self) {
++        let (client, surface_id, active, latest_focus_generation) = {
++            let state = self.state.borrow();
++            (
++                state.client.clone(),
++                state.surface.id(),
++                state.active,
++                state.latest_focus_generation,
++            )
++        };
++        if !active || !client.has_keyboard_focus(&surface_id) {
+             return;
+         }
+-        let client = state.client.clone();
+-        let ime_enabled = if let Some(mut input_handler) = state.input_handler.take() {
+-            drop(state);
+-            let accepts_text_input = input_handler.query_accepts_text_input();
+-            self.state.borrow_mut().input_handler = Some(input_handler);
+-            accepts_text_input
+-        } else {
+-            drop(state);
+-            false
++        let input_handler = self.state.borrow_mut().input_handler.take();
++        let Some(mut input_handler) = input_handler else {
++            client.update_ime_owner(&surface_id, None, false);
++            return;
+         };
+-        if Some(ime_enabled) == client.ime_enabled() {
++        let focus_owner = input_handler.focus_owner();
++        let Some((_, owner_generation)) = focus_owner else {
++            self.restore_input_handler_if_current(input_handler);
++            client.update_ime_owner(&surface_id, None, false);
++            return;
++        };
++        if !focus_generation_matches(Some(owner_generation), latest_focus_generation) {
++            self.restore_input_handler_if_current(input_handler);
+             return;
+         }
+ 
+-        if ime_enabled {
+-            client.enable_ime();
+-        } else {
+-            client.disable_ime();
++        let accepts_text_input = input_handler
++            .try_query_accepts_text_input()
++            .unwrap_or(false);
++        let generation_is_current = focus_generation_matches(
++            Some(owner_generation),
++            self.state.borrow().latest_focus_generation,
++        );
++        let restored = self.restore_input_handler_if_current(input_handler);
++        if !generation_is_current || !restored {
++            return;
+         }
++        client.update_ime_owner(&surface_id, focus_owner, accepts_text_input);
+     }
+ 
+     pub fn handle_xdg_surface_event(&self, event: xdg_surface::Event) {
+@@ -1434,6 +1485,12 @@ impl WaylandWindowStatePtr {
+         if self.is_blocked() {
+             return;
+         }
++        if matches!(&ime, ImeInput::SetMarkedText(_) | ImeInput::InsertText(_)) {
++            let client = self.state.borrow().client.clone();
++            if !client.can_accept_ime_edit() {
++                return;
++            }
++        }
+         let mut state = self.state.borrow_mut();
+         if let Some(mut input_handler) = state.input_handler.take() {
+             drop(state);
+@@ -1444,16 +1501,19 @@ impl WaylandWindowStatePtr {
+                 ImeInput::SetMarkedText(text) => {
+                     input_handler.replace_and_mark_text_in_range(None, &text, None);
+                 }
+-                ImeInput::UnmarkText => {
+-                    input_handler.unmark_text();
+-                }
+-                ImeInput::DeleteText => {
+-                    if let Some(marked) = input_handler.marked_text_range() {
+-                        input_handler.replace_text_in_range(Some(marked), "");
+-                    }
+-                }
++                ImeInput::CancelComposition => input_handler.cancel_text_composition(),
+             }
+-            self.state.borrow_mut().input_handler = Some(input_handler);
++            self.restore_input_handler_if_current(input_handler);
++        }
++    }
++
++    pub fn defer_cancel_text_composition(&self) {
++        let (client, input_handler) = {
++            let mut state = self.state.borrow_mut();
++            (state.client.clone(), state.input_handler.take())
++        };
++        if let Some(input_handler) = input_handler {
++            client.defer_text_composition_cancel(input_handler);
+         }
+     }
+ 
+@@ -1463,7 +1523,7 @@ impl WaylandWindowStatePtr {
+         if let Some(mut input_handler) = state.input_handler.take() {
+             drop(state);
+             bounds = input_handler.ime_candidate_bounds();
+-            self.state.borrow_mut().input_handler = Some(input_handler);
++            self.restore_input_handler_if_current(input_handler);
+         }
+         bounds
+     }
+@@ -1551,7 +1611,7 @@ impl WaylandWindowStatePtr {
+             if let Some(mut input_handler) = state.input_handler.take() {
+                 drop(state);
+                 input_handler.replace_text_in_range(None, key_char);
+-                self.state.borrow_mut().input_handler = Some(input_handler);
++                self.restore_input_handler_if_current(input_handler);
+             }
+         }
+     }
+@@ -1772,6 +1832,23 @@ impl PlatformWindow for WaylandWindow {
+         self.borrow_mut().input_handler = Some(input_handler);
+     }
+ 
++    fn invalidate_text_input_owner(&self, _focus_generation: u64) {
++        let (client, surface_id, input_handler) = {
++            let mut state = self.borrow_mut();
++            state.latest_focus_generation = Some(_focus_generation);
++            (
++                state.client.clone(),
++                state.surface.id(),
++                state.input_handler.take(),
++            )
++        };
++        let has_keyboard_focus = client.has_keyboard_focus(&surface_id);
++        client.invalidate_surface_ime_owner(&surface_id);
++        if has_keyboard_focus && let Some(input_handler) = input_handler {
++            client.defer_text_composition_cancel(input_handler);
++        }
++    }
++
+     fn take_input_handler(&mut self) -> Option<PlatformInputHandler> {
+         self.borrow_mut().input_handler.take()
+     }
+@@ -1962,7 +2039,10 @@ impl PlatformWindow for WaylandWindow {
+         // Surface state changed during this GPUI tick is included in this presentation.
+         state.redraw_requested = false;
+         if state.pending_frame_callback.is_none() {
+-            let callback = state.surface.frame(&state.globals.qh, state.surface.id());
++            let callback = state.surface.frame(
++                &state.globals.qh,
++                WaylandCallbackData::Frame(state.surface.id()),
++            );
+             state.pending_frame_callback = Some(callback);
+         }
+         if state.renderer.draw(scene) {
+@@ -2130,7 +2210,8 @@ impl PlatformWindow for WaylandWindow {
+         if !state.active {
+             return;
+         }
+-        state.client.update_ime_position(bounds);
++        let surface_id = state.surface.id();
++        state.client.update_ime_position(&surface_id, bounds);
+     }
+ 
+     fn gpu_specs(&self) -> Option<GpuSpecs> {
 diff --git a/crates/zed/build.rs b/crates/zed/build.rs
-index 92407a37911324338fe756b2ad040d1d7a085938..6d21938e055b9aa31b542fc48dc29dae3e37e07a 100644
+index 92407a3..6d21938 100644
 --- a/crates/zed/build.rs
 +++ b/crates/zed/build.rs
 @@ -2,6 +2,16 @@
@@ -459,17 +2758,17 @@ index 92407a37911324338fe756b2ad040d1d7a085938..6d21938e055b9aa31b542fc48dc29dae
      {
          // Add rpaths for libraries that webrtc-sys dlopens at runtime.
 diff --git a/crates/zed/src/zed.rs b/crates/zed/src/zed.rs
-index 4034efd8998f51eed91ace30449a04e36d9ac2f9..ec2c7fd2aabaed30be35cba482329b8d641e0296 100644
+index 4034efd..5c8c020 100644
 --- a/crates/zed/src/zed.rs
 +++ b/crates/zed/src/zed.rs
-@@ -3,6 +3,7 @@ pub mod edit_prediction_registry;
- #[cfg(target_os = "macos")]
- pub(crate) mod mac_only_instance;
+@@ -5,6 +5,7 @@ pub(crate) mod mac_only_instance;
  mod migrate;
-+mod native_island;
  #[cfg(target_os = "macos")]
  pub(crate) mod move_to_applications;
++mod native_island;
  mod open_listener;
+ mod open_url_modal;
+ mod quick_action_bar;
 @@ -599,6 +600,8 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
              }
          });
