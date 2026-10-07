@@ -7,11 +7,13 @@ from pathlib import Path
 import shutil
 import subprocess
 from baseline import ROOT, verify_source
+from check_palette_shortcut import ensure_no_default_linux_collision
 
 
 def prepare(source):
     verify_source(source)
     patch = ROOT / 'patches/native-island.patch'
+    palette_shortcut = ensure_no_default_linux_collision(source, patch.read_text())
     subprocess.run(['git', '-C', str(source), 'apply', '--check', str(patch)], check=True)
     subprocess.run(['git', '-C', str(source), 'apply', str(patch)], check=True)
     destination = source / 'crates/zed/src/zed/native_island'
@@ -24,6 +26,7 @@ def prepare(source):
     fence = source / 'crates/gpui_linux/src/linux/wayland/ime_fence.rs'
     provenance = {'upstream_commit': json.loads((ROOT / 'upstream.lock.json').read_text())['commit'],
         'patch_sha256': hashlib.sha256(patch.read_bytes()).hexdigest(),
+        'palette_shortcut': palette_shortcut,
         'license': 'GPL-3.0-or-later; retain upstream LICENSE-GPL and Apache component notices',
         'derived_files': {
             'crates/gpui_linux/src/linux/wayland/ime_fence.rs': hashlib.sha256(fence.read_bytes()).hexdigest(),

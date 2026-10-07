@@ -2968,10 +2968,14 @@ index 92407a3..6d21938 100644
      {
          // Add rpaths for libraries that webrtc-sys dlopens at runtime.
 diff --git a/crates/zed/src/zed.rs b/crates/zed/src/zed.rs
-index 4034efd..8626559 100644
+index 4034efd..83a7b6e 100644
 --- a/crates/zed/src/zed.rs
 +++ b/crates/zed/src/zed.rs
-@@ -5,8 +5,13 @@ pub(crate) mod mac_only_instance;
+@@ -1,19 +1,24 @@
+ mod app_menus;
+ pub mod edit_prediction_registry;
+ #[cfg(target_os = "macos")]
+ pub(crate) mod mac_only_instance;
  mod migrate;
  #[cfg(target_os = "macos")]
  pub(crate) mod move_to_applications;
@@ -2985,7 +2989,21 @@ index 4034efd..8626559 100644
  mod quick_action_bar;
  pub mod remote_debug;
  pub mod telemetry_log;
-@@ -154,6 +159,9 @@ actions!(
+ #[cfg(all(target_os = "macos", feature = "visual-tests"))]
+ pub mod visual_tests;
+ #[cfg(target_os = "windows")]
+ pub(crate) mod windows_only_instance;
+ 
+ use agent_settings::{UserAgentsMdState, init_user_agents_md};
+ use agent_ui::AgentDiffToolbar;
+@@ -147,20 +152,23 @@ actions!(
+         ToggleFullScreen,
+         /// Zooms the window.
+         Zoom,
+         /// Triggers a test panic for debugging.
+         TestPanic,
+         /// Triggers a hard crash for debugging.
+         TestCrash,
      ]
  );
  
@@ -2995,19 +3013,49 @@ index 4034efd..8626559 100644
  actions!(
      dev,
      [
-@@ -191,6 +199,11 @@ actions!(
- );
+         /// Opens a prompt to enter a URL to open.
+         OpenUrlPrompt,
+         /// Dumps the current accessibility tree (the last update sent to the
+         /// platform adapter) to a new buffer as JSON, for debugging what is
+         /// exposed to assistive technology.
+         DumpAccessibilityTree,
+         /// Copies the current accessibility tree to the clipboard as JSON,
+@@ -326,20 +334,27 @@ pub fn init(cx: &mut App) {
+                 window,
+                 cx,
+             );
+         });
+     })
+     .on_action(|_: &About, cx| {
+         open_about_window(cx);
+     });
+ }
  
- pub fn init(cx: &mut App) {
-+    #[cfg(target_os = "linux")]
++#[cfg(target_os = "linux")]
++fn bind_mzed_palette_key(cx: &mut App) {
 +    if std::env::var("MZED_NATIVE_PALETTE").as_deref() == Ok("1") {
-+        cx.bind_keys([KeyBinding::new("ctrl-alt-shift-p", ToggleMzedPalette, None)]);
++        cx.bind_keys([KeyBinding::new("ctrl-alt-shift-z", ToggleMzedPalette, None)]);
 +    }
++}
 +
+ fn bind_on_window_closed(cx: &mut App) -> Option<gpui::Subscription> {
      #[cfg(target_os = "macos")]
-     cx.on_action(|_: &Hide, cx| cx.hide());
-     #[cfg(target_os = "macos")]
-@@ -599,6 +612,8 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
+     {
+         WorkspaceSettings::get_global(cx)
+             .on_last_window_closed
+             .is_quit_app()
+             .then(|| {
+                 cx.on_window_closed(|cx, _window_id| {
+                     if cx.windows().is_empty() {
+                         cx.quit();
+@@ -592,20 +607,22 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
+                 workspace.project().clone(),
+                 cx,
+             )
+         });
+         workspace.register_action({
+             move |_, _: &edit_prediction_ui::ToggleMenu, window, cx| {
+                 edit_prediction_menu_handle.toggle(window, cx);
              }
          });
  
@@ -3016,7 +3064,21 @@ index 4034efd..8626559 100644
          let search_button = cx.new(|_| search::search_status_button::SearchButton::new());
          let diagnostic_summary =
              cx.new(|cx| diagnostics::items::DiagnosticIndicator::new(workspace, cx));
-@@ -649,6 +664,9 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
+         let active_file_name = cx.new(|_| workspace::active_file_name::ActiveFileName::new());
+         let activity_indicator = activity_indicator::ActivityIndicator::new(workspace, window, cx);
+         let active_buffer_encoding =
+             cx.new(|_| encoding_selector::ActiveBufferEncoding::new(workspace));
+         let active_buffer_language =
+             cx.new(|_| language_selector::ActiveBufferLanguage::new(workspace));
+         let active_toolchain_language =
+@@ -642,20 +659,23 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
+             status_bar.add_right_item(edit_prediction_ui, window, cx);
+             status_bar.add_right_item(active_buffer_encoding, window, cx);
+             status_bar.add_right_item(active_buffer_language, window, cx);
+             status_bar.add_right_item(active_toolchain_language, window, cx);
+             status_bar.add_right_item(line_ending_indicator, window, cx);
+             status_bar.add_right_item(cursor_position, window, cx);
+             status_bar.add_right_item(image_info, window, cx);
              // Keep these last so they stay leftmost and can change without moving the other items.
              status_bar.add_right_item(vim_mode_indicator, window, cx);
              status_bar.add_right_item(pending_keystrokes_indicator, window, cx);
@@ -3026,7 +3088,21 @@ index 4034efd..8626559 100644
          });
  
          let panels_task = initialize_panels(window, cx);
-@@ -1414,6 +1432,14 @@ fn register_actions(
+         workspace.set_panels_task(panels_task);
+         register_actions(app_state.clone(), workspace, window, cx);
+ 
+         if !workspace.has_active_modal(window, cx) {
+             workspace.focus_handle(cx).focus(window, cx);
+         }
+     })
+@@ -1407,20 +1427,28 @@ fn register_actions(
+ 
+                     anyhow::Ok(())
+                 })
+                 .detach_and_log_err(cx);
+             }
+         });
+     }
  
      workspace.register_action(sidebar::dump_workspace_info);
  
@@ -3041,6 +3117,61 @@ index 4034efd..8626559 100644
      #[cfg(debug_assertions)]
      workspace.register_action(|workspace, _: &ShowWorkspaceError, _, cx| {
          struct DebugError;
+         struct SecondDebugError;
+ 
+         impl WorkspaceError for DebugError {
+             fn primary_message(&self) -> SharedString {
+                 SharedString::new_static(
+                     "Error: Prepare rename via rust-analyzer failed: No references found at position",
+                 )
+@@ -2340,20 +2368,22 @@ fn reload_keymaps(cx: &mut App, mut user_key_bindings: Vec<KeyBinding>) {
+         "New Window",
+         workspace::NewWindow,
+     )]);
+     // todo: nicer api here?
+     keymap_editor::KeymapEventChannel::trigger_keymap_changed(cx);
+ }
+ 
+ pub fn load_default_keymap(cx: &mut App) {
+     let base_keymap = *BaseKeymap::get_global(cx);
+     if base_keymap == BaseKeymap::None {
++        #[cfg(target_os = "linux")]
++        bind_mzed_palette_key(cx);
+         return;
+     }
+ 
+     cx.bind_keys(filter_disabled_ai_bindings(
+         KeymapFile::load_asset(DEFAULT_KEYMAP_PATH, Some(KeybindSource::Default), cx).unwrap(),
+         cx,
+     ));
+ 
+     if let Some(asset_path) = base_keymap.asset_path() {
+         cx.bind_keys(filter_disabled_ai_bindings(
+@@ -2370,20 +2400,24 @@ pub fn load_default_keymap(cx: &mut App) {
+     }
+ 
+     cx.bind_keys(
+         KeymapFile::load_asset(
+             SPECIFIC_OVERRIDES_KEYMAP_PATH,
+             Some(KeybindSource::Default),
+             cx,
+         )
+         .unwrap(),
+     );
++
++    // Reapply after defaults; reload_keymaps adds user bindings afterward.
++    #[cfg(target_os = "linux")]
++    bind_mzed_palette_key(cx);
+ }
+ 
+ /// Namespaces of actions that are part of an AI feature. When the user opts out
+ /// of AI via the `disable_ai` setting, bindings to these actions are dropped so
+ /// that lower-precedence editor defaults (e.g. `editor::NewlineBelow` for
+ /// `ctrl-enter`) can fire instead of being shadowed by an action whose handler
+ /// silently no-ops.
+ const AI_ACTION_NAMESPACES: &[&str] = &[
+     "acp::",
+     "agent::",
 diff --git a/crates/zed/src/zed/native_island.rs b/crates/zed/src/zed/native_island.rs
 new file mode 100644
 index 0000000..38e7fe3
