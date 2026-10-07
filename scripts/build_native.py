@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Build the one-process copied-scene ABI from pinned portable gpui.mbt sources."""
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -18,6 +19,10 @@ def run(argv):
     subprocess.run(list(map(str, argv)), check=True)
 
 
+def file_sha256(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
 def build(source, output, mode):
     actual = subprocess.check_output(['git', '-C', str(source), 'rev-parse', 'HEAD'], text=True).strip()
     if actual != GPUI_COMMIT:
@@ -29,6 +34,25 @@ def build(source, output, mode):
         raise ValueError('preserve modified gpui.mbt; use a fresh checkout')
     if not (ROOT / "native/island.mbt").is_file():
         raise ValueError("native/island.mbt is required")
+    mzed_source_paths = [
+        ROOT / "native/island.mbt",
+        ROOT / "native/palette.mbt",
+        ROOT / "native/bootstrap.c",
+        ROOT / "native/mzed_palette_abi.h",
+        ROOT / "scripts/build_native.py",
+    ]
+    mzed_commit = subprocess.check_output(
+        ['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True
+    ).strip()
+    mzed_dirty = bool(
+        subprocess.check_output(
+            ['git', '-C', str(ROOT), 'status', '--porcelain'], text=True
+        ).strip()
+    )
+    mzed_source_sha256 = {
+        str(path.relative_to(ROOT)): file_sha256(path)
+        for path in mzed_source_paths
+    }
     output.mkdir(parents=True, exist_ok=False)
     home = Path(os.environ.get('MOON_HOME', str(Path.home() / '.moon')))
     compiler = home / 'bin/moonc'
@@ -39,6 +63,7 @@ def build(source, output, mode):
     if core_version != COMPILER:
         raise ValueError('MoonBit core does not match pinned version')
     core = home / 'lib/core/_build/native/release/bundle'
+    core_utf8 = core / 'encoding/utf8'
     packages = [
         ('primitives', 'primitives', []),
         ('layout', 'layout', ['primitives']),
@@ -79,7 +104,9 @@ def build(source, output, mode):
     argv = [compiler, 'build-package', ROOT / 'native/island.mbt', ROOT / 'native/palette.mbt',
             '-pkg', 'mzed/native_island',
             '-pkg-type', 'foreign_library', '-target', 'native', '-std-path', core,
-            '-i', str(core / 'prelude/prelude.mi') + ':prelude', '-o', output / 'island.core']
+            '-i', str(core / 'prelude/prelude.mi') + ':prelude',
+            '-i', str(core_utf8 / 'utf8.mi') + ':utf8', '-w', '@a',
+            '-o', output / 'island.core']
     for package, artifact, _ in packages:
         argv += ['-i', str(output / (artifact + '.mi')) + ':' + package.split('/')[-1]]
     run(argv)
@@ -99,9 +126,18 @@ def build(source, output, mode):
         run(['cc', *flags, '-c', unit, '-o', obj])
         objects.append(obj)
     run(['ar', 'crs', output / 'libmzed_native.a', *objects])
-    (output / 'build.json').write_text(json.dumps({'schema': 1, 'gpui_commit': actual,
+    (output / 'build.json').write_text(json.dumps({
+        'schema': 2,
+        'gpui_commit': actual,
         'gpui_tree': actual_tree,
-        'compiler': version, 'core_version': core_version, 'mode': mode, 'native_library': str(output / 'libmzed_native.a')}, indent=2) + '\n')
+        'mzed_commit': mzed_commit,
+        'mzed_dirty': mzed_dirty,
+        'mzed_source_sha256': mzed_source_sha256,
+        'compiler': version,
+        'core_version': core_version,
+        'mode': mode,
+        'native_library': str(output / 'libmzed_native.a'),
+    }, indent=2) + '\n')
 
 
 if __name__ == '__main__':
