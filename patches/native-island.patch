@@ -1,5 +1,5 @@
 diff --git a/README.md b/README.md
-index 9f641fb..24840ee 100644
+index 9f641fb3841909e9e1f6dbfb947f953c0a0c5ebf..24840eec031df7d6fe9fc3d10204e112d91c5d33 100644
 --- a/README.md
 +++ b/README.md
 @@ -1,3 +1,6 @@
@@ -9,8 +9,436 @@ index 9f641fb..24840ee 100644
  # Zed
  
  [![Zed](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/zed-industries/zed/main/assets/badge/v0.json)](https://zed.dev)
+diff --git a/crates/gpui/src/input.rs b/crates/gpui/src/input.rs
+index 4167aa09905b09ab818f9d95b1646e71339eafbd..1dfe727944bac4f6a366785bfa2dc610cb02f689 100644
+--- a/crates/gpui/src/input.rs
++++ b/crates/gpui/src/input.rs
+@@ -54,6 +54,14 @@ pub trait EntityInputHandler: 'static + Sized {
+         cx: &mut Context<Self>,
+     );
+ 
++    /// Cancels the current marked-text transaction without committing its preview.
++    /// The default preserves the historical platform behavior of deleting the marked range.
++    fn cancel_text_composition(&mut self, window: &mut Window, cx: &mut Context<Self>) {
++        if let Some(marked_range) = self.marked_text_range(window, cx) {
++            self.replace_text_in_range(Some(marked_range), "", window, cx);
++        }
++    }
++
+     /// See [`InputHandler::replace_and_mark_text_in_range`] for details
+     fn replace_and_mark_text_in_range(
+         &mut self,
+@@ -183,6 +191,11 @@ impl<V: EntityInputHandler> InputHandler for ElementInputHandler<V> {
+         });
+     }
+ 
++    fn cancel_text_composition(&mut self, window: &mut Window, cx: &mut App) {
++        self.view
++            .update(cx, |view, cx| view.cancel_text_composition(window, cx));
++    }
++
+     fn replace_and_mark_text_in_range(
+         &mut self,
+         range_utf16: Option<Range<usize>>,
+@@ -287,10 +300,14 @@ impl<V: EntityInputHandler> InputHandler for ElementInputHandler<V> {
+ mod tests {
+     use super::*;
+     use crate::{
+-        AnyWindowHandle, AppContext as _, FocusHandle, InteractiveElement as _, IntoElement,
+-        ParentElement as _, Render, Styled as _, TestAppContext, TextInputAction,
++        AnyWindowHandle, AppContext as _, FocusHandle, InputHandler, InteractiveElement as _,
++        IntoElement, ParentElement as _, Render, Styled as _, TestAppContext, TextInputAction,
+         TextInputStateChange, canvas, div,
+     };
++    use std::{
++        cell::{Cell, RefCell},
++        rc::Rc,
++    };
+ 
+     #[gpui::test]
+     fn text_input_configuration_and_focus_state_are_forwarded_on_change(cx: &mut TestAppContext) {
+@@ -381,6 +398,159 @@ mod tests {
+         );
+     }
+ 
++    #[derive(Clone, Default)]
++    struct CancellationProbe {
++        replacements: Rc<RefCell<Vec<(Option<Range<usize>>, String)>>>,
++        unmarks: Rc<Cell<usize>>,
++        cancellations: Rc<Cell<usize>>,
++    }
++
++    struct DefaultCancellationView(CancellationProbe);
++    struct CustomCancellationView(CancellationProbe);
++
++    impl Render for DefaultCancellationView {
++        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
++            div().size_full()
++        }
++    }
++
++    impl Render for CustomCancellationView {
++        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
++            div().size_full()
++        }
++    }
++
++    macro_rules! optional_cancel_override {
++        () => {};
++        (record_cancellation) => {
++            fn cancel_text_composition(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
++                self.0.cancellations.set(self.0.cancellations.get() + 1);
++            }
++        };
++    }
++
++    macro_rules! impl_cancellation_probe_view {
++        ($view:ty $(, $cancel_override:ident)?) => {
++            impl EntityInputHandler for $view {
++                fn text_for_range(
++                    &mut self,
++                    _: Range<usize>,
++                    _: &mut Option<Range<usize>>,
++                    _: &mut Window,
++                    _: &mut Context<Self>,
++                ) -> Option<String> {
++                    None
++                }
++
++                fn selected_text_range(
++                    &mut self,
++                    _: bool,
++                    _: &mut Window,
++                    _: &mut Context<Self>,
++                ) -> Option<UTF16Selection> {
++                    None
++                }
++
++                fn marked_text_range(
++                    &self,
++                    _: &mut Window,
++                    _: &mut Context<Self>,
++                ) -> Option<Range<usize>> {
++                    Some(4..7)
++                }
++
++                fn unmark_text(&mut self, _: &mut Window, _: &mut Context<Self>) {
++                    self.0.unmarks.set(self.0.unmarks.get() + 1);
++                }
++
++                fn replace_text_in_range(
++                    &mut self,
++                    range: Option<Range<usize>>,
++                    text: &str,
++                    _: &mut Window,
++                    _: &mut Context<Self>,
++                ) {
++                    self.0.replacements.borrow_mut().push((range, text.to_owned()));
++                }
++
++                optional_cancel_override!($($cancel_override)?);
++
++                fn replace_and_mark_text_in_range(
++                    &mut self,
++                    _: Option<Range<usize>>,
++                    _: &str,
++                    _: Option<Range<usize>>,
++                    _: &mut Window,
++                    _: &mut Context<Self>,
++                ) {
++                }
++
++                fn bounds_for_range(
++                    &mut self,
++                    _: Range<usize>,
++                    _: Bounds<Pixels>,
++                    _: &mut Window,
++                    _: &mut Context<Self>,
++                ) -> Option<Bounds<Pixels>> {
++                    None
++                }
++
++                fn character_index_for_point(
++                    &mut self,
++                    _: crate::Point<Pixels>,
++                    _: &mut Window,
++                    _: &mut Context<Self>,
++                ) -> Option<usize> {
++                    None
++                }
++            }
++        };
++    }
++
++    impl_cancellation_probe_view!(DefaultCancellationView);
++    impl_cancellation_probe_view!(CustomCancellationView, record_cancellation);
++
++    #[gpui::test]
++    fn default_entity_cancel_deletes_only_the_marked_range(cx: &mut TestAppContext) {
++        let probe = CancellationProbe::default();
++        let window = cx.add_window({
++            let probe = probe.clone();
++            move |_, _| DefaultCancellationView(probe)
++        });
++        let view = window.root(cx).unwrap();
++        cx.update_window(AnyWindowHandle::from(window), |_, window, cx| {
++            let mut handler = ElementInputHandler::new(Bounds::default(), view);
++            handler.cancel_text_composition(window, cx);
++        })
++        .unwrap();
++
++        assert_eq!(
++            probe.replacements.borrow().as_slice(),
++            &[(Some(4..7), String::new())]
++        );
++        assert_eq!(probe.unmarks.get(), 0);
++        assert_eq!(probe.cancellations.get(), 0);
++    }
++
++    #[gpui::test]
++    fn entity_cancel_override_is_forwarded_without_replace_or_unmark(cx: &mut TestAppContext) {
++        let probe = CancellationProbe::default();
++        let window = cx.add_window({
++            let probe = probe.clone();
++            move |_, _| CustomCancellationView(probe)
++        });
++        let view = window.root(cx).unwrap();
++        cx.update_window(AnyWindowHandle::from(window), |_, window, cx| {
++            let mut handler = ElementInputHandler::new(Bounds::default(), view);
++            handler.cancel_text_composition(window, cx);
++        })
++        .unwrap();
++
++        assert_eq!(probe.cancellations.get(), 1);
++        assert!(probe.replacements.borrow().is_empty());
++        assert_eq!(probe.unmarks.get(), 0);
++    }
++
+     struct ConfigurationTestView {
+         focus_handle: FocusHandle,
+         configuration: TextInputConfiguration,
+diff --git a/crates/gpui/src/platform.rs b/crates/gpui/src/platform.rs
+index c03653ed942186d7935f9f76036d6a1a49e83909..472344320603891e5a114ccff357e4d94cab7f2c 100644
+--- a/crates/gpui/src/platform.rs
++++ b/crates/gpui/src/platform.rs
+@@ -37,9 +37,9 @@ pub(crate) type PlatformScreenCaptureFrame =
+ 
+ use crate::{
+     Action, AnyWindowHandle, App, AsyncWindowContext, BackgroundExecutor, Bounds,
+-    DEFAULT_WINDOW_SIZE, DevicePixels, DispatchEventResult, Edges, ExternalDragPayload, Font,
+-    FontId, FontMetrics, FontRun, ForegroundExecutor, GlyphId, GpuSpecs, Hsla, ImageSource, Keymap,
+-    LineLayout, MissingGlyphSink, Pixels, PlatformGestures, PlatformInput, Point, Priority,
++    DEFAULT_WINDOW_SIZE, DevicePixels, DispatchEventResult, Edges, ExternalDragPayload, FocusId,
++    Font, FontId, FontMetrics, FontRun, ForegroundExecutor, GlyphId, GpuSpecs, Hsla, ImageSource,
++    Keymap, LineLayout, MissingGlyphSink, Pixels, PlatformGestures, PlatformInput, Point, Priority,
+     RenderGlyphParams, RenderImage, RenderImageParams, RenderSvgParams, Scene, ShapedGlyph,
+     ShapedRun, SharedString, Size, SvgRenderer, SystemWindowTab, Task, Window, WindowControlArea,
+     hash, point, px, size,
+@@ -911,6 +911,11 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
+     fn capslock(&self) -> Capslock;
+     fn set_input_handler(&mut self, input_handler: PlatformInputHandler);
+     fn take_input_handler(&mut self) -> Option<PlatformInputHandler>;
++    /// Immediately invalidates the current text-input owner when GPUI focus changes.
++    /// Backends with asynchronous IME protocols should quarantine native events until
++    /// the old owner has been fenced. The next rendered input handler carries the
++    /// matching focus generation and may then acquire the session.
++    fn invalidate_text_input_owner(&self, _focus_generation: u64) {}
+     /// Apply the focused text region's [`TextInputConfiguration`] to the
+     /// platform's text input session (e.g. attributes of the hidden editable
+     /// element on web). Called only when the configuration changes, because
+@@ -1666,6 +1671,7 @@ impl From<TileId> for etagere::AllocId {
+ pub struct PlatformInputHandler {
+     cx: AsyncWindowContext,
+     handler: Box<dyn InputHandler>,
++    focus_owner: Option<(FocusId, u64)>,
+ }
+ 
+ #[expect(missing_docs)]
+@@ -1677,8 +1683,34 @@ pub struct PlatformInputHandler {
+     allow(dead_code)
+ )]
+ impl PlatformInputHandler {
++    /// Constructs a handler not associated with a GPUI focus owner.
++    /// Kept for callers that provide platform handlers outside a rendered focused element.
+     pub fn new(cx: AsyncWindowContext, handler: Box<dyn InputHandler>) -> Self {
+-        Self { cx, handler }
++        Self {
++            cx,
++            handler,
++            focus_owner: None,
++        }
++    }
++
++    /// Constructs a handler tied to the focus identity and acquisition generation
++    /// captured while rendering the focused element.
++    pub fn new_for_focus(
++        cx: AsyncWindowContext,
++        handler: Box<dyn InputHandler>,
++        focus_id: FocusId,
++        focus_generation: u64,
++    ) -> Self {
++        Self {
++            cx,
++            handler,
++            focus_owner: Some((focus_id, focus_generation)),
++        }
++    }
++
++    /// Returns the GPUI focus owner captured for this rendered input handler.
++    pub fn focus_owner(&self) -> Option<(FocusId, u64)> {
++        self.focus_owner
+     }
+ 
+     pub fn selected_text_range(&mut self, ignore_disabled_input: bool) -> Option<UTF16Selection> {
+@@ -1745,6 +1777,13 @@ impl PlatformInputHandler {
+             .ok();
+     }
+ 
++    /// Cancels the active marked-text transaction without committing its preview.
++    pub fn cancel_text_composition(&mut self) {
++        self.cx
++            .update(|window, cx| self.handler.cancel_text_composition(window, cx))
++            .ok();
++    }
++
+     #[cfg_attr(target_os = "windows", allow(dead_code))]
+     pub fn unmark_text(&mut self) {
+         self.cx
+@@ -1962,6 +2001,14 @@ pub trait InputHandler: 'static {
+         cx: &mut App,
+     );
+ 
++    /// Cancels the current marked-text transaction without committing its preview.
++    /// The default preserves the historical platform behavior of deleting the marked range.
++    fn cancel_text_composition(&mut self, window: &mut Window, cx: &mut App) {
++        if let Some(marked_range) = self.marked_text_range(window, cx) {
++            self.replace_text_in_range(Some(marked_range), "", window, cx);
++        }
++    }
++
+     /// Replace the text in the given document range with the given text,
+     /// and mark the given text as part of an IME 'composing' state
+     /// Corresponds to [setMarkedText(_:selectedRange:replacementRange:)](https://developer.apple.com/documentation/appkit/nstextinputclient/1438246-setmarkedtext)
+diff --git a/crates/gpui/src/platform/test/window.rs b/crates/gpui/src/platform/test/window.rs
+index 14fb8896b24a71cc47f1963c81aae0fc4f9f0828..1848e403d13e44c3c9ff7ca3132a1daa8ea01bd6 100644
+--- a/crates/gpui/src/platform/test/window.rs
++++ b/crates/gpui/src/platform/test/window.rs
+@@ -49,6 +49,7 @@ pub(crate) struct TestWindowState {
+     frame_scheduled: bool,
+     frame_callback_pending: bool,
+     input_handler: Option<PlatformInputHandler>,
++    text_input_owner_invalidations: Vec<u64>,
+     text_input_configurations: Vec<TextInputConfiguration>,
+     text_input_state_changes: Vec<TextInputStateChange>,
+     is_fullscreen: bool,
+@@ -80,6 +81,10 @@ impl HasDisplayHandle for TestWindow {
+ }
+ 
+ impl TestWindow {
++    pub fn text_input_owner_invalidations(&self) -> Vec<u64> {
++        self.0.lock().text_input_owner_invalidations.clone()
++    }
++
+     pub(crate) fn new(
+         handle: AnyWindowHandle,
+         params: WindowParams,
+@@ -122,6 +127,7 @@ impl TestWindow {
+             frame_scheduled: false,
+             frame_callback_pending: false,
+             input_handler: None,
++            text_input_owner_invalidations: Vec::new(),
+             text_input_configurations: Vec::new(),
+             text_input_state_changes: Vec::new(),
+             is_fullscreen: false,
+@@ -370,6 +376,13 @@ impl PlatformWindow for TestWindow {
+         self.0.lock().input_handler.take()
+     }
+ 
++    fn invalidate_text_input_owner(&self, focus_generation: u64) {
++        self.0
++            .lock()
++            .text_input_owner_invalidations
++            .push(focus_generation);
++    }
++
+     fn set_text_input_configuration(&mut self, configuration: TextInputConfiguration) {
+         self.0.lock().text_input_configurations.push(configuration);
+     }
+diff --git a/crates/gpui/src/window.rs b/crates/gpui/src/window.rs
+index b1c9e115502a543111c61f71438ab04e27f47091..1d12517ef43a62ca1e1a58c0d19cde86991c2ec2 100644
+--- a/crates/gpui/src/window.rs
++++ b/crates/gpui/src/window.rs
+@@ -2307,6 +2307,8 @@ impl Window {
+         self.focus = Some(handle.id);
+         self.focus_generation = self.focus_generation.wrapping_add(1);
+         self.clear_pending_keystrokes(cx);
++        self.platform_window
++            .invalidate_text_input_owner(self.focus_generation);
+ 
+         self.refresh();
+     }
+@@ -2319,10 +2321,15 @@ impl Window {
+             return;
+         }
+ 
+-        if self.focus.is_some() {
++        let had_focus = self.focus.is_some();
++        if had_focus {
+             self.focus_generation = self.focus_generation.wrapping_add(1);
+         }
+         self.focus = None;
++        if had_focus {
++            self.platform_window
++                .invalidate_text_input_owner(self.focus_generation);
++        }
+         self.refresh();
+     }
+ 
+@@ -5214,7 +5221,12 @@ impl Window {
+             let cx = self.to_async(cx);
+             self.next_frame
+                 .input_handlers
+-                .push(Some(PlatformInputHandler::new(cx, Box::new(input_handler))));
++                .push(Some(PlatformInputHandler::new_for_focus(
++                    cx,
++                    Box::new(input_handler),
++                    focus_handle.id,
++                    self.focus_generation,
++                )));
+         }
+     }
+ 
+@@ -8564,6 +8576,9 @@ mod tests {
+             .update(cx, |_, window, _| window.activate_window())
+             .unwrap();
+         cx.executor().run_until_parked();
++        let platform_window = cx.test_window(window.into());
++        window.update(cx, |_, window, cx| window.blur(cx)).unwrap();
++        assert!(platform_window.text_input_owner_invalidations().is_empty());
+ 
+         window
+             .update(cx, |this, window, cx| {
+@@ -8579,6 +8594,18 @@ mod tests {
+             })
+             .unwrap();
+         assert_eq!(b_focus_count.get(), 1);
++        assert_eq!(platform_window.text_input_owner_invalidations(), [1, 2]);
++
++        window
++            .update(cx, |this, window, cx| {
++                let b = this.b.clone();
++                window.focus(&b, cx);
++            })
++            .unwrap();
++        assert_eq!(platform_window.text_input_owner_invalidations(), [1, 2]);
++
++        window.update(cx, |_, window, cx| window.blur(cx)).unwrap();
++        assert_eq!(platform_window.text_input_owner_invalidations(), [1, 2, 3]);
+     }
+ 
+     #[gpui::test]
 diff --git a/crates/zed/build.rs b/crates/zed/build.rs
-index 92407a3..6d21938 100644
+index 92407a37911324338fe756b2ad040d1d7a085938..6d21938e055b9aa31b542fc48dc29dae3e37e07a 100644
 --- a/crates/zed/build.rs
 +++ b/crates/zed/build.rs
 @@ -2,6 +2,16 @@
@@ -31,7 +459,7 @@ index 92407a3..6d21938 100644
      {
          // Add rpaths for libraries that webrtc-sys dlopens at runtime.
 diff --git a/crates/zed/src/zed.rs b/crates/zed/src/zed.rs
-index 4034efd..ec2c7fd 100644
+index 4034efd8998f51eed91ace30449a04e36d9ac2f9..ec2c7fd2aabaed30be35cba482329b8d641e0296 100644
 --- a/crates/zed/src/zed.rs
 +++ b/crates/zed/src/zed.rs
 @@ -3,6 +3,7 @@ pub mod edit_prediction_registry;
