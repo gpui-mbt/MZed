@@ -18,3 +18,7 @@ cc -std=gnu11 -Wall -Wextra -Werror -I "$root/native" \
   "$root/tests/native_palette_host_lifecycle.c" "$out/libmzed_native.a" \
   -o "$out/palette-host-lifecycle-tests"
 "$out/palette-host-lifecycle-tests"
+cc -std=gnu11 -Wall -Wextra -Werror -I "$root/native" \
+  "$root/tests/native_palette_field_height.c" "$out/libmzed_native.a" \
+  -o "$out/palette-field-height-tests"
+"$out/palette-field-height-tests"

@@ -3041,3 +3041,3231 @@ index 4034efd..8626559 100644
      #[cfg(debug_assertions)]
      workspace.register_action(|workspace, _: &ShowWorkspaceError, _, cx| {
          struct DebugError;
+diff --git a/crates/zed/src/zed/native_island.rs b/crates/zed/src/zed/native_island.rs
+new file mode 100644
+index 0000000..38e7fe3
+--- /dev/null
++++ b/crates/zed/src/zed/native_island.rs
+@@ -0,0 +1,387 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// This integration is applied only to the pinned, derived Zed application.
++mod protocol;
++pub(crate) use protocol::claim_runtime_owner;
++
++use gpui::{
++    App, Bounds, ClickEvent, ContentMask, Context, DispatchPhase, FocusHandle, Hitbox,
++    HitboxBehavior, HitboxId, InteractiveElement, IntoElement, MouseButton, MouseDownEvent,
++    MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Render, ScrollWheelEvent,
++    StatefulInteractiveElement, Styled, Subscription, WeakEntity, Window, canvas, div, fill, px,
++    rgb, size,
++};
++use protocol::{Native, Press, Scene};
++use workspace::{HideStatusItem, ItemHandle, StatusItemView};
++
++pub struct NativeIsland {
++    native: Option<Native>,
++    press: Press,
++    capture: Option<HitboxId>,
++    editor_focus: Option<FocusHandle>,
++    prior_focus: Option<FocusHandle>,
++    press_focus_subscription: Option<Subscription>,
++    _subscriptions: Vec<Subscription>,
++}
++
++struct Frame {
++    bounds: Bounds<Pixels>,
++    clipped: Bounds<Pixels>,
++    hitbox: Hitbox,
++    scene: Option<Scene>,
++}
++
++impl NativeIsland {
++    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
++        let native = match Native::new(120, 18) {
++            Ok(native) => Some(native),
++            Err(error) => {
++                log::error!("MZed island create failed: {error}");
++                None
++            }
++        };
++        let subscriptions = vec![
++            cx.on_release_in(window, |this, window, _cx| this.cancel(window)),
++            cx.observe_window_activation(window, |this, window, _cx| {
++                if !window.is_window_active() {
++                    this.cancel(window);
++                    this.press.abandon();
++                }
++            }),
++            cx.observe_window_visibility(window, |this, visibility, window, _cx| {
++                if !visibility.is_visible() {
++                    this.cancel(window);
++                    this.press.abandon();
++                }
++            }),
++        ];
++        log::info!("MZed island mounted: gpui.mbt bf965ae, copied scene v1");
++        Self {
++            native,
++            press: Press::default(),
++            capture: None,
++            editor_focus: None,
++            prior_focus: None,
++            press_focus_subscription: None,
++            _subscriptions: subscriptions,
++        }
++    }
++
++    fn release_capture(&mut self, window: &mut Window) {
++        if self.capture.is_some() && window.captured_hitbox() == self.capture {
++            window.release_pointer();
++        }
++        self.capture = None;
++    }
++
++    fn cancel(&mut self, window: &mut Window) {
++        self.press.cancel();
++        self.prior_focus = None;
++        self.press_focus_subscription = None;
++        self.release_capture(window);
++    }
++
++    fn restore_focus(&mut self, window: &mut Window, cx: &mut App) {
++        if window.is_window_active() {
++            if let Some(focus) = self
++                .prior_focus
++                .take()
++                .or_else(|| self.editor_focus.clone())
++            {
++                focus.focus(window, cx);
++            }
++        }
++    }
++
++    fn toggle(&mut self, window: &mut Window, cx: &mut Context<Self>) {
++        self.cancel(window);
++        if self.native.take().is_some() {
++            log::info!("MZed island disabled and native instance destroyed");
++        } else {
++            match Native::new(120, 18) {
++                Ok(native) => {
++                    self.native = Some(native);
++                    log::info!("MZed island remounted");
++                }
++                Err(error) => log::error!("MZed island remount failed: {error}"),
++            }
++        }
++        self.restore_focus(window, cx);
++        cx.notify();
++    }
++
++    fn prepare(&mut self, bounds: Bounds<Pixels>, window: &mut Window) -> Frame {
++        let clipped = bounds.intersect(&window.content_mask().bounds);
++        let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
++        if self.press.owned() {
++            if self.capture.is_some() && window.captured_hitbox() == self.capture {
++                window.capture_pointer(hitbox.id);
++                self.capture = Some(hitbox.id);
++            } else {
++                self.press.cancel();
++            }
++        }
++        let width = f32::from(bounds.size.width).floor() as i32;
++        let height = f32::from(bounds.size.height).floor() as i32;
++        let visible = clipped.size.width > px(0.)
++            && clipped.size.height > px(0.)
++            && (1..=4096).contains(&width)
++            && (1..=4096).contains(&height);
++        let scene = if visible {
++            if let Some(native) = self.native.as_mut() {
++                match native.resize(width, height) {
++                    Ok(()) => Some(native.scene()),
++                    Err(error) => {
++                        log::error!("MZed island scene failed: {error}; disabling");
++                        self.native = None;
++                        self.cancel(window);
++                        None
++                    }
++                }
++            } else {
++                None
++            }
++        } else {
++            self.cancel(window);
++            None
++        };
++        Frame {
++            bounds,
++            clipped,
++            hitbox,
++            scene,
++        }
++    }
++
++    fn with_view(
++        weak: &WeakEntity<Self>,
++        cx: &mut App,
++        update: impl FnOnce(&mut Self, &mut Context<Self>),
++    ) {
++        if let Err(error) = weak.update(cx, update) {
++            log::debug!("MZed island callback after view release: {error}");
++        }
++    }
++
++    fn paint(frame: Frame, weak: WeakEntity<Self>, window: &mut Window, _cx: &mut App) {
++        if let Some(scene) = frame.scene {
++            window.with_content_mask(
++                Some(ContentMask {
++                    bounds: frame.bounds,
++                }),
++                |window| {
++                    window.paint_quad(fill(
++                        Bounds::new(
++                            frame.bounds.origin,
++                            size(px(scene.width as f32), px(scene.height as f32)),
++                        ),
++                        rgb(scene.rgb),
++                    ));
++                },
++            );
++        }
++        let Frame {
++            clipped, hitbox, ..
++        } = frame;
++        let scroll_hitbox = hitbox.clone();
++        window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
++            if phase == DispatchPhase::Bubble
++                && scroll_hitbox.should_handle_scroll(window)
++                && clipped.size.width > px(0.)
++                && clipped.size.height > px(0.)
++                && clipped.contains(&event.position)
++            {
++                window.prevent_default();
++                cx.stop_propagation();
++            }
++        });
++        let down_view = weak.clone();
++        window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
++            if phase == DispatchPhase::Capture {
++                Self::with_view(&down_view, cx, |this, _cx| {
++                    if this.press.owned() {
++                        this.cancel(window);
++                        this.press.abandon();
++                    }
++                });
++                return;
++            }
++            if phase != DispatchPhase::Bubble
++                || !hitbox.is_hovered(window)
++                || clipped.size.width <= px(0.)
++                || clipped.size.height <= px(0.)
++                || !clipped.contains(&event.position)
++            {
++                return;
++            }
++            window.prevent_default();
++            cx.stop_propagation();
++            if event.button != MouseButton::Left || event.modifiers.modified() {
++                return;
++            }
++            Self::with_view(&down_view, cx, |this, cx| {
++                if let Some(native) = &this.native {
++                    if this.press.begin(native.generation) {
++                        this.prior_focus = window.focused(cx);
++                        this.press_focus_subscription = this.prior_focus.as_ref().map(|focus| {
++                            cx.on_blur(focus, window, |this, window, _cx| this.cancel(window))
++                        });
++                        window.capture_pointer(hitbox.id);
++                        this.capture = Some(hitbox.id);
++                        window.prevent_default();
++                        cx.stop_propagation();
++                        // Force a redraw while down so ownership cannot rely on a frame-local hitbox.
++                        cx.notify();
++                    }
++                }
++            });
++        });
++        let move_view = weak.clone();
++        window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
++            if phase != DispatchPhase::Capture {
++                return;
++            }
++            Self::with_view(&move_view, cx, |this, cx| {
++                if this.press.owned() {
++                    if window.captured_hitbox() != this.capture {
++                        this.cancel(window);
++                        this.press.abandon();
++                        return;
++                    }
++                    if event.pressed_button != Some(MouseButton::Left) {
++                        this.cancel(window);
++                        this.press.abandon();
++                        return;
++                    }
++                    if event.modifiers.modified() {
++                        this.press.cancel();
++                    }
++                    window.prevent_default();
++                    cx.stop_propagation();
++                }
++            });
++        });
++        window.on_mouse_event(move |event: &MouseUpEvent, phase, window, cx| {
++            if phase != DispatchPhase::Capture {
++                return;
++            }
++            Self::with_view(&weak, cx, |this, cx| {
++                if !this.press.owned() {
++                    return;
++                }
++                if window.captured_hitbox() != this.capture {
++                    this.cancel(window);
++                    this.press.abandon();
++                    return;
++                }
++                let generation = this.native.as_ref().map(|native| native.generation);
++                let accept = this.press.finish(
++                    generation,
++                    this.capture.is_some()
++                        && event.button == MouseButton::Left
++                        && !event.modifiers.modified()
++                        && window.is_window_active()
++                        && clipped.size.width > px(0.)
++                        && clipped.size.height > px(0.)
++                        && clipped.contains(&event.position),
++                );
++                this.release_capture(window);
++                window.prevent_default();
++                cx.stop_propagation();
++                if accept {
++                    if let Some(native) = this.native.as_mut() {
++                        match native.increment() {
++                            Ok(()) => log::info!("MZed island counter={}", native.scene().counter),
++                            Err(error) => {
++                                log::error!("MZed island dispatch failed: {error}; disabling");
++                                this.native = None;
++                            }
++                        }
++                    }
++                }
++                this.press_focus_subscription = None;
++                if let Some(focus) = this.prior_focus.take() {
++                    if window.is_window_active() {
++                        focus.focus(window, cx);
++                    }
++                }
++                cx.notify();
++            });
++        });
++    }
++}
++
++impl Render for NativeIsland {
++    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
++        let prepare_view = cx.weak_entity();
++        let paint_view = cx.weak_entity();
++        let label = self
++            .native
++            .as_ref()
++            .map(|native| format!("MB {}", native.scene().counter))
++            .unwrap_or_else(|| "MB off".to_owned());
++        div()
++            .flex()
++            .items_center()
++            .flex_shrink_0()
++            .child(
++                div()
++                    .id("mzed-island-toggle")
++                    .w(px(36.))
++                    .h(px(18.))
++                    .child("M")
++                    .on_any_mouse_down(|_, window, cx| {
++                        window.prevent_default();
++                        cx.stop_propagation();
++                    })
++                    .on_click(cx.listener(|this, event, window, cx| {
++                        if let ClickEvent::Mouse(event) = event {
++                            if event.down.button == MouseButton::Left
++                                && event.up.button == MouseButton::Left
++                                && !event.down.modifiers.modified()
++                                && !event.up.modifiers.modified()
++                            {
++                                this.toggle(window, cx);
++                                cx.stop_propagation();
++                            }
++                        }
++                    })),
++            )
++            .child(
++                canvas(
++                    move |bounds, window, cx| match prepare_view
++                        .update(cx, |this, _cx| this.prepare(bounds, window))
++                    {
++                        Ok(frame) => Some(frame),
++                        Err(error) => {
++                            log::debug!("MZed island prepaint after release: {error}");
++                            None
++                        }
++                    },
++                    move |_, frame, window, cx| {
++                        if let Some(frame) = frame {
++                            Self::paint(frame, paint_view, window, cx);
++                        }
++                    },
++                )
++                .w(px(120.))
++                .h(px(18.)),
++            )
++            .child(div().w(px(56.)).child(label))
++    }
++}
++
++impl StatusItemView for NativeIsland {
++    fn set_active_pane_item(
++        &mut self,
++        active_pane_item: Option<&dyn ItemHandle>,
++        window: &mut Window,
++        cx: &mut Context<Self>,
++    ) {
++        self.cancel(window);
++        self.editor_focus = active_pane_item.map(|item| item.item_focus_handle(cx));
++        self.prior_focus = None;
++    }
++    fn hide_setting(&self, _cx: &App) -> Option<HideStatusItem> {
++        None
++    }
++}
+diff --git a/crates/zed/src/zed/native_island/protocol.rs b/crates/zed/src/zed/native_island/protocol.rs
+new file mode 100644
+index 0000000..44405c7
+--- /dev/null
++++ b/crates/zed/src/zed/native_island/protocol.rs
+@@ -0,0 +1,332 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++use std::{
++    cell::RefCell,
++    marker::PhantomData,
++    rc::Rc,
++    sync::OnceLock,
++    thread::{self, ThreadId},
++};
++
++mod ffi {
++    unsafe extern "C" {
++        pub fn mzed_native_v1_init(version: i32) -> i32;
++        pub fn mzed_native_v1_create(slot: i32, generation: i32, width: i32, height: i32) -> i32;
++        pub fn mzed_native_v1_dispatch(
++            slot: i32,
++            generation: i32,
++            request: i32,
++            opcode: i32,
++            a: i32,
++            b: i32,
++        ) -> i32;
++        pub fn mzed_native_v1_snapshot(slot: i32, generation: i32, request: i32, field: i32)
++        -> i32;
++        pub fn mzed_native_v1_destroy(slot: i32, generation: i32) -> i32;
++    }
++}
++
++static OWNER: OnceLock<ThreadId> = OnceLock::new();
++thread_local! { static SLOTS: RefCell<[(bool, i32); 4]> = const { RefCell::new([(false, 0); 4]) }; }
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub struct Scene {
++    pub counter: i32,
++    pub width: i32,
++    pub height: i32,
++    pub rgb: u32,
++}
++
++pub struct Native {
++    slot: i32,
++    pub generation: i32,
++    request: i32,
++    scene: Scene,
++    _owner_thread: PhantomData<Rc<()>>,
++}
++
++fn success(status: i32) -> Result<(), i32> {
++    if status == 0 { Ok(()) } else { Err(status) }
++}
++
++impl Native {
++    pub fn new(width: i32, height: i32) -> Result<Self, i32> {
++        claim_runtime_owner()?;
++        // The process owner is fixed before the first call; the facade is !Send/!Sync.
++        success(unsafe { ffi::mzed_native_v1_init(1) })?;
++        let (slot, generation) = SLOTS.with(|slots| {
++            let mut slots = slots.borrow_mut();
++            let (index, state) = slots
++                .iter_mut()
++                .enumerate()
++                .find(|(_, state)| !state.0 && state.1 < 1_000_000)
++                .ok_or(-21)?;
++            state.0 = true;
++            state.1 += 1;
++            Ok::<_, i32>((index as i32, state.1))
++        })?;
++        let status = unsafe { ffi::mzed_native_v1_create(slot, generation, width, height) };
++        if status != 0 {
++            SLOTS.with(|slots| slots.borrow_mut()[slot as usize].0 = false);
++            return Err(status);
++        }
++        let mut native = Self {
++            slot,
++            generation,
++            request: 0,
++            scene: Scene {
++                counter: 0,
++                width,
++                height,
++                rgb: 0,
++            },
++            _owner_thread: PhantomData,
++        };
++        native.scene = native.copy_scene()?;
++        Ok(native)
++    }
++
++    pub fn scene(&self) -> Scene {
++        self.scene
++    }
++
++    fn copy_scene(&self) -> Result<Scene, i32> {
++        let mut fields = [0_i32; 14];
++        for (field, value) in fields.iter_mut().enumerate() {
++            *value = unsafe {
++                ffi::mzed_native_v1_snapshot(self.slot, self.generation, self.request, field as i32)
++            };
++            if *value < 0 {
++                return Err(*value);
++            }
++        }
++        if fields[..4] != [1, self.slot, self.generation, self.request]
++            || fields[4] > 65535
++            || fields[5..8] != [1, 0, 0]
++            || !(1..=4096).contains(&fields[8])
++            || !(1..=4096).contains(&fields[9])
++            || fields[10..13].iter().any(|value| *value > 255)
++            || fields[13] != 255
++        {
++            return Err(-22);
++        }
++        Ok(Scene {
++            counter: fields[4],
++            width: fields[8],
++            height: fields[9],
++            rgb: ((fields[10] as u32) << 16) | ((fields[11] as u32) << 8) | fields[12] as u32,
++        })
++    }
++
++    fn dispatch(&mut self, opcode: i32, a: i32, b: i32) -> Result<(), i32> {
++        let request = self
++            .request
++            .checked_add(1)
++            .filter(|value| *value <= 1_000_000)
++            .ok_or(-7)?;
++        success(unsafe {
++            ffi::mzed_native_v1_dispatch(self.slot, self.generation, request, opcode, a, b)
++        })?;
++        self.request = request;
++        self.scene = self.copy_scene()?;
++        Ok(())
++    }
++
++    pub fn increment(&mut self) -> Result<(), i32> {
++        self.dispatch(1, 1, 0)
++    }
++
++    pub fn resize(&mut self, width: i32, height: i32) -> Result<(), i32> {
++        if self.scene.width == width && self.scene.height == height {
++            return Ok(());
++        }
++        self.dispatch(2, width, height)
++    }
++}
++
++/// Enforce one process-wide MoonBit runtime owner across every native facade.
++/// Each facade is independently !Send/!Sync, but separate first-use checks
++/// would still permit two threads to race the shared runtime initialization.
++pub(crate) fn claim_runtime_owner() -> Result<(), i32> {
++    let owner = OWNER.get_or_init(|| thread::current().id());
++    if *owner == thread::current().id() {
++        Ok(())
++    } else {
++        Err(-20)
++    }
++}
++
++impl Drop for Native {
++    fn drop(&mut self) {
++        let status = unsafe { ffi::mzed_native_v1_destroy(self.slot, self.generation) };
++        if status != 0 {
++            eprintln!("MZed native destroy rejected: {status}");
++        }
++        SLOTS.with(|slots| slots.borrow_mut()[self.slot as usize].0 = false);
++    }
++}
++
++#[derive(Default)]
++pub struct Press {
++    generation: Option<i32>,
++    canceled: bool,
++}
++impl Press {
++    pub fn begin(&mut self, generation: i32) -> bool {
++        if self.generation.is_some() && !self.canceled {
++            return false;
++        }
++        self.generation = Some(generation);
++        self.canceled = false;
++        true
++    }
++    pub fn owned(&self) -> bool {
++        self.generation.is_some()
++    }
++    pub fn cancel(&mut self) {
++        self.canceled = true;
++    }
++    pub fn abandon(&mut self) {
++        self.generation = None;
++        self.canceled = false;
++    }
++    pub fn finish(&mut self, generation: Option<i32>, valid_release: bool) -> bool {
++        let owned = self.generation.take();
++        let accept = owned.is_some() && owned == generation && !self.canceled && valid_release;
++        self.canceled = false;
++        accept
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn native_scene_and_lifecycle() {
++        unsafe {
++            assert_eq!(ffi::mzed_native_v1_create(0, 1, 120, 18), -1);
++            assert_eq!(ffi::mzed_native_v1_init(2), -2);
++            assert_eq!(ffi::mzed_native_v1_dispatch(0, 1, 1, 1, 1, 0), -1);
++            assert_eq!(ffi::mzed_native_v1_snapshot(0, 1, 0, 0), -1);
++            assert_eq!(ffi::mzed_native_v1_destroy(0, 1), -1);
++        }
++        let mut native = Native::new(120, 18).expect("pinned native image");
++        for slot in [i32::MIN, -1, 4, i32::MAX] {
++            assert_eq!(unsafe { ffi::mzed_native_v1_create(slot, 1, 1, 1) }, -3);
++        }
++        for generation in [i32::MIN, -1, 0, 1_000_001, i32::MAX] {
++            assert_eq!(
++                unsafe { ffi::mzed_native_v1_create(0, generation, 1, 1) },
++                -4
++            );
++        }
++        let original = native.scene();
++        assert_eq!(
++            original,
++            Scene {
++                counter: 0,
++                width: 120,
++                height: 18,
++                rgb: 0x2860a0
++            }
++        );
++        native.increment().expect("increment");
++        assert_eq!(native.scene().rgb, 0xc860a0);
++        assert_eq!(native.scene().counter, 1);
++        native.resize(240, 36).expect("resize");
++        assert_eq!(native.scene().width, 240);
++        assert_eq!(native.scene().counter, 1);
++        assert_eq!(original.width, 120);
++        assert_eq!(original.counter, 0);
++        let generation = native.generation;
++        let slot = native.slot;
++        let request = native.request;
++        for bad in [i32::MIN, -1, 0, request, request + 2, 1_000_001, i32::MAX] {
++            assert_eq!(
++                unsafe { ffi::mzed_native_v1_dispatch(slot, generation, bad, 1, 1, 0) },
++                -7
++            );
++        }
++        for bad in [i32::MIN, -1, 0, 4097, i32::MAX] {
++            assert_eq!(native.resize(bad, 18), Err(-9));
++        }
++        assert_eq!(native.scene().counter, 1);
++        assert_eq!(
++            unsafe { ffi::mzed_native_v1_snapshot(slot, generation, request - 1, 0) },
++            -7
++        );
++        assert_eq!(
++            unsafe { ffi::mzed_native_v1_snapshot(slot, generation, request, 14) },
++            -10
++        );
++        assert_eq!(
++            unsafe { ffi::mzed_native_v1_dispatch(slot, generation, request + 1, 99, 0, 0) },
++            -8
++        );
++        assert_eq!(
++            unsafe { ffi::mzed_native_v1_dispatch(slot, generation, request + 1, 1, 2, 0) },
++            -9
++        );
++        assert_eq!(native.copy_scene(), Ok(native.scene()));
++        drop(native);
++        assert_eq!(
++            unsafe { ffi::mzed_native_v1_snapshot(slot, generation, request, 0) },
++            -6
++        );
++        let remounted = Native::new(120, 18).expect("remount");
++        assert_eq!(remounted.slot, slot);
++        assert!(remounted.generation > generation);
++        assert_eq!(
++            unsafe { ffi::mzed_native_v1_dispatch(slot, generation, 1, 1, 1, 0) },
++            -5
++        );
++        assert_eq!(remounted.scene(), original);
++        drop(remounted);
++        let mut live = Vec::new();
++        for _ in 0..4 {
++            live.push(Native::new(1, 1).expect("bounded slot"));
++        }
++        assert!(matches!(Native::new(1, 1), Err(-21)));
++        live[0].increment().expect("independent slot mutation");
++        assert_eq!(live[0].scene().counter, 1);
++        assert!(live[1..].iter().all(|native| native.scene().counter == 0));
++        drop(live);
++        // Declared test budget: 1,000 mount/dispatch/copy/destroy cycles, <=4 live slots.
++        for index in 0..1000 {
++            let mut native = Native::new(120, 18).expect("bounded churn");
++            native.increment().expect("bounded dispatch");
++            assert_eq!(native.scene().counter, 1, "cycle {index}");
++        }
++        assert!(matches!(
++            std::thread::spawn(|| matches!(Native::new(1, 1), Err(-20))).join(),
++            Ok(true)
++        ));
++    }
++
++    #[test]
++    fn press_owns_one_sequence_and_rejects_stale_or_canceled_release() {
++        let mut press = Press::default();
++        assert!(!press.finish(Some(1), true));
++        assert!(press.begin(1));
++        assert!(!press.begin(1));
++        assert!(press.owned());
++        assert!(press.finish(Some(1), true));
++        assert!(!press.finish(Some(1), true));
++        assert!(press.begin(1));
++        assert!(!press.finish(Some(1), false));
++        assert!(press.begin(1));
++        assert!(!press.finish(Some(2), true));
++        assert!(press.begin(2));
++        press.cancel();
++        assert!(!press.finish(None, true));
++        assert!(press.begin(3));
++        press.cancel();
++        assert!(press.begin(4));
++        assert!(press.finish(Some(4), true));
++        assert!(press.begin(5));
++        press.cancel();
++        press.abandon();
++        assert!(!press.owned());
++        assert!(!press.finish(Some(5), true));
++    }
++}
+diff --git a/crates/zed/src/zed/palette_protocol.rs b/crates/zed/src/zed/palette_protocol.rs
+new file mode 100644
+index 0000000..08db8b1
+--- /dev/null
++++ b/crates/zed/src/zed/palette_protocol.rs
+@@ -0,0 +1,887 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++//! Copied-value facade for the shared MoonBit command palette.
++//!
++//! No MoonBit-managed address or Rust/OS handle crosses this boundary. Every
++//! input is copied by the native ABI before returning, and every output is a
++//! bounded byte/double record copied into Rust-owned values.
++
++use std::{cell::RefCell, marker::PhantomData, rc::Rc};
++
++mod ffi {
++    unsafe extern "C" {
++        pub fn mzed_native_palette_v1_init(version: i32) -> i32;
++        pub fn mzed_native_palette_v1_open(
++            slot: i32,
++            generation: i32,
++            commands: *const u8,
++            commands_length: i32,
++            metrics_ints: *const i32,
++            metrics_ints_length: i32,
++            metrics_doubles: *const f64,
++            metrics_doubles_length: i32,
++            bounds_width: f64,
++            bounds_height: f64,
++            font_size: f64,
++        ) -> i32;
++        pub fn mzed_native_palette_v1_input(
++            slot: i32,
++            generation: i32,
++            epoch: i32,
++            request: i32,
++            kind: i32,
++            key: i32,
++            modifier_bits: i32,
++            repeat: i32,
++            text: *const u8,
++            text_length: i32,
++        ) -> i32;
++        pub fn mzed_native_palette_v1_replace(
++            slot: i32,
++            generation: i32,
++            epoch: i32,
++            request: i32,
++            range_present: i32,
++            range_start: i32,
++            range_end: i32,
++            text: *const u8,
++            text_length: i32,
++        ) -> i32;
++        pub fn mzed_native_palette_v1_mark(
++            slot: i32,
++            generation: i32,
++            epoch: i32,
++            request: i32,
++            range_present: i32,
++            range_start: i32,
++            range_end: i32,
++            selection_present: i32,
++            selection_start: i32,
++            selection_end: i32,
++            text: *const u8,
++            text_length: i32,
++        ) -> i32;
++        pub fn mzed_native_palette_v1_cancel_composition(
++            slot: i32,
++            generation: i32,
++            epoch: i32,
++            request: i32,
++        ) -> i32;
++        pub fn mzed_native_palette_v1_unmark_composition(
++            slot: i32,
++            generation: i32,
++            epoch: i32,
++            request: i32,
++        ) -> i32;
++        pub fn mzed_native_palette_v1_pending_text(
++            slot: i32,
++            generation: i32,
++            epoch: i32,
++            request: i32,
++            out: *mut u8,
++            capacity: i32,
++        ) -> i32;
++        pub fn mzed_native_palette_v1_stage_layout(
++            slot: i32,
++            generation: i32,
++            epoch: i32,
++            request: i32,
++            expected_revision: i32,
++            metrics_ints: *const i32,
++            metrics_ints_length: i32,
++            metrics_doubles: *const f64,
++            metrics_doubles_length: i32,
++        ) -> i32;
++        pub fn mzed_native_palette_v1_continue(
++            slot: i32,
++            generation: i32,
++            epoch: i32,
++            request: i32,
++            expected_revision: i32,
++        ) -> i32;
++        pub fn mzed_native_palette_v1_snapshot(
++            slot: i32,
++            generation: i32,
++            out: *mut u8,
++            capacity: i32,
++        ) -> i32;
++        pub fn mzed_native_palette_v1_geometry(
++            slot: i32,
++            generation: i32,
++            out: *mut f64,
++            capacity: i32,
++        ) -> i32;
++        pub fn mzed_native_palette_v1_resize(
++            slot: i32,
++            generation: i32,
++            epoch: i32,
++            request: i32,
++            width: f64,
++            height: f64,
++        ) -> i32;
++        pub fn mzed_native_palette_v1_finish_close(slot: i32, generation: i32, epoch: i32) -> i32;
++        pub fn mzed_native_palette_v1_abort_pending(
++            slot: i32,
++            generation: i32,
++            epoch: i32,
++            request: i32,
++        ) -> i32;
++        pub fn mzed_native_palette_v1_destroy(slot: i32, generation: i32) -> i32;
++    }
++}
++
++thread_local! {
++    static SLOTS: RefCell<[(bool, i32); 4]> = const { RefCell::new([(false, 0); 4]) };
++}
++
++pub const PALETTE_MAX_TEXT_BYTES: usize = 4096;
++pub const PALETTE_MAX_SNAPSHOT_BYTES: usize = 16_384;
++pub const PALETTE_MAX_QUERY_BYTES: usize = 256;
++pub const PALETTE_GEOMETRY_DOUBLE_COUNT: usize = 19;
++
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub struct PaletteRow {
++    pub id: String,
++    pub label: String,
++    pub enabled: bool,
++    pub selected: bool,
++    pub command_index: i32,
++}
++
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub struct PaletteSnapshot {
++    pub generation: i32,
++    pub epoch: i32,
++    pub is_open: bool,
++    pub field_revision: i32,
++    pub displayed: String,
++    pub committed: String,
++    pub anchor_utf16: i32,
++    pub head_utf16: i32,
++    pub composing: bool,
++    pub marked: Option<std::ops::Range<usize>>,
++    pub match_count: i32,
++    pub active_index: Option<i32>,
++    pub visible_start: i32,
++    pub effect_kind: i32,
++    pub action_id: Option<String>,
++    pub last_request: i32,
++    pub pending_request: i32,
++    pub pending_epoch: i32,
++    pub pending_field_revision: i32,
++    pub rows: Vec<PaletteRow>,
++}
++
++#[derive(Clone, Copy, Debug, PartialEq)]
++pub struct PaletteMetrics<'a> {
++    pub ints: &'a [i32],
++    pub doubles: &'a [f64],
++}
++
++#[derive(Clone, Copy, Debug, PartialEq)]
++pub struct PendingLayout {
++    slot: i32,
++    generation: i32,
++    pub request: i32,
++    pub epoch: i32,
++    pub expected_revision: i32,
++}
++
++#[derive(Debug)]
++pub enum SubmitResult {
++    Complete(PaletteSnapshot),
++    NeedLayout {
++        pending: PendingLayout,
++        text: String,
++    },
++}
++
++pub struct NativePalette {
++    slot: i32,
++    generation: i32,
++    epoch: i32,
++    request: i32,
++    _owner_thread: PhantomData<Rc<()>>,
++}
++
++fn status(code: i32) -> Result<(), i32> {
++    if code == 0 { Ok(()) } else { Err(code) }
++}
++
++fn checked_len(length: usize) -> Result<i32, i32> {
++    i32::try_from(length).map_err(|_| -9)
++}
++
++fn checked_range(range: Option<std::ops::Range<usize>>) -> Result<(i32, i32, i32), i32> {
++    match range {
++        None => Ok((0, 0, 0)),
++        Some(range) => Ok((
++            1,
++            i32::try_from(range.start).map_err(|_| -9)?,
++            i32::try_from(range.end).map_err(|_| -9)?,
++        )),
++    }
++}
++
++fn encode_commands() -> Result<Vec<u8>, i32> {
++    let commands = [
++        (
++            b"mzed.open-settings-file".as_slice(),
++            b"Open Settings File".as_slice(),
++        ),
++        (
++            b"mzed.toggle-full-screen".as_slice(),
++            b"Toggle Full Screen".as_slice(),
++        ),
++    ];
++    let mut output = Vec::new();
++    for (id, label) in commands {
++        let id_len = u16::try_from(id.len()).map_err(|_| -9)?;
++        let label_len = u16::try_from(label.len()).map_err(|_| -9)?;
++        output.extend_from_slice(&id_len.to_le_bytes());
++        output.extend_from_slice(&label_len.to_le_bytes());
++        output.push(1);
++        output.extend_from_slice(id);
++        output.extend_from_slice(label);
++    }
++    Ok(output)
++}
++
++impl NativePalette {
++    pub fn new(
++        metrics: PaletteMetrics<'_>,
++        bounds_width: f64,
++        bounds_height: f64,
++        font_size: f64,
++    ) -> Result<Self, i32> {
++        let commands = encode_commands()?;
++        Self::new_with_commands(&commands, metrics, bounds_width, bounds_height, font_size)
++    }
++
++    fn new_with_commands(
++        commands: &[u8],
++        metrics: PaletteMetrics<'_>,
++        bounds_width: f64,
++        bounds_height: f64,
++        font_size: f64,
++    ) -> Result<Self, i32> {
++        super::native_island::claim_runtime_owner()?;
++        status(unsafe { ffi::mzed_native_palette_v1_init(1) })?;
++        let (slot, generation) = SLOTS.with(|slots| {
++            let mut slots = slots.borrow_mut();
++            let (index, state) = slots
++                .iter_mut()
++                .enumerate()
++                .find(|(_, state)| !state.0 && state.1 < 1_000_000)
++                .ok_or(-21)?;
++            state.0 = true;
++            state.1 += 1;
++            Ok::<_, i32>((index as i32, state.1))
++        })?;
++        let code = unsafe {
++            ffi::mzed_native_palette_v1_open(
++                slot,
++                generation,
++                commands.as_ptr(),
++                checked_len(commands.len())?,
++                metrics.ints.as_ptr(),
++                checked_len(metrics.ints.len())?,
++                metrics.doubles.as_ptr(),
++                checked_len(metrics.doubles.len())?,
++                bounds_width,
++                bounds_height,
++                font_size,
++            )
++        };
++        if let Err(error) = status(code) {
++            SLOTS.with(|slots| slots.borrow_mut()[slot as usize].0 = false);
++            return Err(error);
++        }
++        let mut owner = Self {
++            slot,
++            generation,
++            epoch: 1,
++            request: 0,
++            _owner_thread: PhantomData,
++        };
++        let snapshot = owner.snapshot()?;
++        owner.epoch = snapshot.epoch;
++        Ok(owner)
++    }
++
++    pub fn slot(&self) -> i32 {
++        self.slot
++    }
++    pub fn generation(&self) -> i32 {
++        self.generation
++    }
++    pub fn epoch(&self) -> i32 {
++        self.epoch
++    }
++    pub fn request(&self) -> i32 {
++        self.request
++    }
++
++    fn next_request(&mut self) -> Result<i32, i32> {
++        self.request = self
++            .request
++            .checked_add(1)
++            .filter(|n| *n <= 1_000_000)
++            .ok_or(-7)?;
++        Ok(self.request)
++    }
++
++    fn finish_submit(&mut self, code: i32, request: i32) -> Result<SubmitResult, i32> {
++        if code == 0 {
++            let snapshot = self.snapshot()?;
++            if snapshot.last_request != request || snapshot.pending_request != 0 {
++                return Err(-7);
++            }
++            self.epoch = snapshot.epoch;
++            Ok(SubmitResult::Complete(snapshot))
++        } else if code == 1 {
++            let snapshot = self.snapshot()?;
++            if snapshot.pending_request != request
++                || snapshot.pending_epoch != self.epoch
++                || snapshot.pending_field_revision != snapshot.field_revision
++            {
++                return Err(-7);
++            }
++            let mut bytes = vec![0_u8; PALETTE_MAX_QUERY_BYTES];
++            let count = unsafe {
++                ffi::mzed_native_palette_v1_pending_text(
++                    self.slot,
++                    self.generation,
++                    self.epoch,
++                    request,
++                    bytes.as_mut_ptr(),
++                    checked_len(bytes.len())?,
++                )
++            };
++            if count < 0 || count as usize > bytes.len() {
++                return Err(if count < 0 { count } else { -9 });
++            }
++            bytes.truncate(count as usize);
++            let text = String::from_utf8(bytes).map_err(|_| -9)?;
++            if text.len() > PALETTE_MAX_QUERY_BYTES {
++                return Err(-9);
++            }
++            Ok(SubmitResult::NeedLayout {
++                pending: PendingLayout {
++                    slot: self.slot,
++                    generation: self.generation,
++                    request,
++                    epoch: self.epoch,
++                    expected_revision: snapshot.pending_field_revision,
++                },
++                text,
++            })
++        } else {
++            Err(code)
++        }
++    }
++
++    pub fn input(
++        &mut self,
++        kind: i32,
++        key: i32,
++        modifier_bits: i32,
++        repeat: bool,
++        text: &str,
++    ) -> Result<SubmitResult, i32> {
++        if text.len() > PALETTE_MAX_TEXT_BYTES {
++            return Err(-9);
++        }
++        let request = self.next_request()?;
++        let code = unsafe {
++            ffi::mzed_native_palette_v1_input(
++                self.slot,
++                self.generation,
++                self.epoch,
++                request,
++                kind,
++                key,
++                modifier_bits,
++                repeat as i32,
++                text.as_ptr(),
++                checked_len(text.len())?,
++            )
++        };
++        self.finish_submit(code, request)
++    }
++
++    pub fn replace(
++        &mut self,
++        range: Option<std::ops::Range<usize>>,
++        text: &str,
++    ) -> Result<SubmitResult, i32> {
++        if text.len() > PALETTE_MAX_TEXT_BYTES {
++            return Err(-9);
++        }
++        let request = self.next_request()?;
++        let (present, start, end) = checked_range(range)?;
++        let code = unsafe {
++            ffi::mzed_native_palette_v1_replace(
++                self.slot,
++                self.generation,
++                self.epoch,
++                request,
++                present,
++                start,
++                end,
++                text.as_ptr(),
++                checked_len(text.len())?,
++            )
++        };
++        self.finish_submit(code, request)
++    }
++
++    pub fn mark(
++        &mut self,
++        range: Option<std::ops::Range<usize>>,
++        text: &str,
++        selection: Option<std::ops::Range<usize>>,
++    ) -> Result<SubmitResult, i32> {
++        if text.len() > PALETTE_MAX_TEXT_BYTES {
++            return Err(-9);
++        }
++        let request = self.next_request()?;
++        let (range_present, range_start, range_end) = checked_range(range)?;
++        let (selection_present, selection_start, selection_end) = checked_range(selection)?;
++        let code = unsafe {
++            ffi::mzed_native_palette_v1_mark(
++                self.slot,
++                self.generation,
++                self.epoch,
++                request,
++                range_present,
++                range_start,
++                range_end,
++                selection_present,
++                selection_start,
++                selection_end,
++                text.as_ptr(),
++                checked_len(text.len())?,
++            )
++        };
++        self.finish_submit(code, request)
++    }
++
++    fn composition_op(&mut self, unmark: bool) -> Result<SubmitResult, i32> {
++        let request = self.next_request()?;
++        let code = unsafe {
++            if unmark {
++                ffi::mzed_native_palette_v1_unmark_composition(
++                    self.slot,
++                    self.generation,
++                    self.epoch,
++                    request,
++                )
++            } else {
++                ffi::mzed_native_palette_v1_cancel_composition(
++                    self.slot,
++                    self.generation,
++                    self.epoch,
++                    request,
++                )
++            }
++        };
++        self.finish_submit(code, request)
++    }
++
++    pub fn cancel_composition(&mut self) -> Result<SubmitResult, i32> {
++        self.composition_op(false)
++    }
++    pub fn unmark_composition(&mut self) -> Result<SubmitResult, i32> {
++        self.composition_op(true)
++    }
++
++    pub fn pending_text(&self, pending: PendingLayout) -> Result<String, i32> {
++        self.validate_pending_owner(pending)?;
++        let mut bytes = vec![0_u8; PALETTE_MAX_QUERY_BYTES];
++        let count = unsafe {
++            ffi::mzed_native_palette_v1_pending_text(
++                self.slot,
++                self.generation,
++                pending.epoch,
++                pending.request,
++                bytes.as_mut_ptr(),
++                checked_len(bytes.len())?,
++            )
++        };
++        if count < 0 || count as usize > bytes.len() {
++            return Err(if count < 0 { count } else { -9 });
++        }
++        bytes.truncate(count as usize);
++        String::from_utf8(bytes).map_err(|_| -9)
++    }
++
++    pub fn continue_with_layout(
++        &mut self,
++        pending: PendingLayout,
++        metrics: PaletteMetrics<'_>,
++    ) -> Result<SubmitResult, i32> {
++        self.validate_pending_owner(pending)?;
++        status(unsafe {
++            ffi::mzed_native_palette_v1_stage_layout(
++                self.slot,
++                self.generation,
++                pending.epoch,
++                pending.request,
++                pending.expected_revision,
++                metrics.ints.as_ptr(),
++                checked_len(metrics.ints.len())?,
++                metrics.doubles.as_ptr(),
++                checked_len(metrics.doubles.len())?,
++            )
++        })?;
++        let code = unsafe {
++            ffi::mzed_native_palette_v1_continue(
++                self.slot,
++                self.generation,
++                pending.epoch,
++                pending.request,
++                pending.expected_revision,
++            )
++        };
++        self.finish_submit(code, pending.request)
++    }
++
++    pub fn abort_pending(&mut self, pending: PendingLayout) -> Result<(), i32> {
++        self.validate_pending_owner(pending)?;
++        status(unsafe {
++            ffi::mzed_native_palette_v1_abort_pending(
++                self.slot,
++                self.generation,
++                pending.epoch,
++                pending.request,
++            )
++        })
++    }
++
++    fn validate_pending_owner(&self, pending: PendingLayout) -> Result<(), i32> {
++        validate_pending_owner_identity(self.slot, self.generation, pending)
++    }
++
++    pub fn resize(&mut self, width: f64, height: f64) -> Result<(), i32> {
++        let request = self.next_request()?;
++        status(unsafe {
++            ffi::mzed_native_palette_v1_resize(
++                self.slot,
++                self.generation,
++                self.epoch,
++                request,
++                width,
++                height,
++            )
++        })?;
++        Ok(())
++    }
++
++    pub fn snapshot(&self) -> Result<PaletteSnapshot, i32> {
++        let mut bytes = vec![0_u8; PALETTE_MAX_SNAPSHOT_BYTES];
++        let count = unsafe {
++            ffi::mzed_native_palette_v1_snapshot(
++                self.slot,
++                self.generation,
++                bytes.as_mut_ptr(),
++                checked_len(bytes.len())?,
++            )
++        };
++        if count < 0 || count as usize > bytes.len() {
++            return Err(if count < 0 { count } else { -9 });
++        }
++        bytes.truncate(count as usize);
++        decode_snapshot(&bytes, self.generation)
++    }
++
++    pub fn geometry(&self) -> Result<[f64; PALETTE_GEOMETRY_DOUBLE_COUNT], i32> {
++        let mut output = [0.0; PALETTE_GEOMETRY_DOUBLE_COUNT];
++        let count = unsafe {
++            ffi::mzed_native_palette_v1_geometry(
++                self.slot,
++                self.generation,
++                output.as_mut_ptr(),
++                output.len() as i32,
++            )
++        };
++        if count == PALETTE_GEOMETRY_DOUBLE_COUNT as i32
++            && output.iter().all(|value| value.is_finite())
++            && output[2] > 0.0
++            && output[3] > 0.0
++            && output[6] > 0.0
++            && output[7] > 0.0
++            && output[8] >= 0.0
++            && output[11] >= 0.0
++            && output[12] >= 0.0
++        {
++            Ok(output)
++        } else {
++            Err(if count < 0 { count } else { -9 })
++        }
++    }
++
++    pub fn finish_close(&mut self, epoch: i32) -> Result<(), i32> {
++        status(unsafe {
++            ffi::mzed_native_palette_v1_finish_close(self.slot, self.generation, epoch)
++        })
++    }
++}
++
++fn validate_pending_owner_identity(
++    slot: i32,
++    generation: i32,
++    pending: PendingLayout,
++) -> Result<(), i32> {
++    if pending.slot == slot && pending.generation == generation {
++        Ok(())
++    } else {
++        Err(-5)
++    }
++}
++
++impl Drop for NativePalette {
++    fn drop(&mut self) {
++        let code = unsafe { ffi::mzed_native_palette_v1_destroy(self.slot, self.generation) };
++        if code != 0 {
++            eprintln!("MZed palette destroy rejected: {code}");
++        }
++        SLOTS.with(|slots| slots.borrow_mut()[self.slot as usize].0 = false);
++    }
++}
++
++fn read_i32(bytes: &[u8], offset: &mut usize) -> Result<i32, i32> {
++    let end = offset.checked_add(4).ok_or(-9)?;
++    let value = i32::from_le_bytes(
++        bytes
++            .get(*offset..end)
++            .ok_or(-9)?
++            .try_into()
++            .map_err(|_| -9)?,
++    );
++    *offset = end;
++    Ok(value)
++}
++
++fn read_string(bytes: &[u8], offset: &mut usize, length: usize) -> Result<String, i32> {
++    let end = offset.checked_add(length).ok_or(-9)?;
++    let value = String::from_utf8(bytes.get(*offset..end).ok_or(-9)?.to_vec()).map_err(|_| -9)?;
++    *offset = end;
++    Ok(value)
++}
++
++fn decode_snapshot(bytes: &[u8], expected_generation: i32) -> Result<PaletteSnapshot, i32> {
++    let mut offset = 0;
++    let mut header = [0_i32; 22];
++    for value in &mut header {
++        *value = read_i32(bytes, &mut offset)?;
++    }
++    if header[0] != 1
++        || header[1] != expected_generation
++        || header[2] <= 0
++        || !(0..=1).contains(&header[3])
++        || header[4] < 0
++        || header[5] < 0
++        || header[5] as usize > PALETTE_MAX_QUERY_BYTES
++        || header[6] < 0
++        || header[6] as usize > PALETTE_MAX_QUERY_BYTES
++        || header[7] < 0
++        || header[8] < 0
++        || !(0..=1).contains(&header[9])
++        || !(0..=128).contains(&header[12])
++        || !(-1..header[12]).contains(&header[13])
++        || header[14] < 0
++        || header[14] > header[12]
++        || !(0..=8).contains(&header[15])
++        || !(0..=3).contains(&header[16])
++        || !(0..=64).contains(&header[17])
++        || header[18] < 0
++        || header[19] < 0
++        || header[20] < 0
++        || header[21] < 0
++    {
++        return Err(-9);
++    }
++    if (header[10], header[11]) != (-1, -1) && (header[10] < 0 || header[11] < header[10]) {
++        return Err(-9);
++    }
++    if (header[19] == 0 && (header[20] != 0 || header[21] != 0))
++        || (header[19] > 0 && header[20] <= 0)
++    {
++        return Err(-9);
++    }
++    let displayed = read_string(bytes, &mut offset, header[5] as usize)?;
++    let committed = read_string(bytes, &mut offset, header[6] as usize)?;
++    let displayed_utf16 = utf16_len(&displayed);
++    if header[7] as usize > displayed_utf16
++        || header[8] as usize > displayed_utf16
++        || !utf16_boundary(&displayed, header[7] as usize)
++        || !utf16_boundary(&displayed, header[8] as usize)
++        || (header[10] >= 0
++            && (header[11] as usize > displayed_utf16
++                || !utf16_boundary(&displayed, header[10] as usize)
++                || !utf16_boundary(&displayed, header[11] as usize)))
++        || (header[19] > 0
++            && (header[20] != header[2] || header[19] <= header[18] || header[21] != header[4]))
++        || header[15] > header[12] - header[14]
++    {
++        return Err(-9);
++    }
++    let action_raw = read_string(bytes, &mut offset, header[17] as usize)?;
++    let mut rows = Vec::with_capacity(header[15] as usize);
++    let mut selected_rows = 0;
++    for _ in 0..header[15] {
++        let id_len = read_i32(bytes, &mut offset)?;
++        let label_len = read_i32(bytes, &mut offset)?;
++        let enabled = read_i32(bytes, &mut offset)?;
++        let selected = read_i32(bytes, &mut offset)?;
++        let command_index = read_i32(bytes, &mut offset)?;
++        if !(1..=64).contains(&id_len)
++            || !(1..=128).contains(&label_len)
++            || !(0..=1).contains(&enabled)
++            || !(0..=1).contains(&selected)
++            || command_index < 0
++        {
++            return Err(-9);
++        }
++        selected_rows += selected;
++        if command_index < header[14] || command_index >= header[14] + header[15] {
++            return Err(-9);
++        }
++        rows.push(PaletteRow {
++            id: read_string(bytes, &mut offset, id_len as usize)?,
++            label: read_string(bytes, &mut offset, label_len as usize)?,
++            enabled: enabled == 1,
++            selected: selected == 1,
++            command_index,
++        });
++    }
++    if offset != bytes.len() {
++        return Err(-9);
++    }
++    if selected_rows > 1
++        || rows.iter().any(|row| {
++            row.selected != (Some(row.command_index) == (header[13] >= 0).then_some(header[13]))
++        })
++    {
++        return Err(-9);
++    }
++    Ok(PaletteSnapshot {
++        generation: header[1],
++        epoch: header[2],
++        is_open: header[3] == 1,
++        field_revision: header[4],
++        displayed,
++        committed,
++        anchor_utf16: header[7],
++        head_utf16: header[8],
++        composing: header[9] == 1,
++        marked: if header[10] >= 0 && header[11] >= header[10] {
++            Some(header[10] as usize..header[11] as usize)
++        } else {
++            None
++        },
++        match_count: header[12],
++        active_index: (header[13] >= 0).then_some(header[13]),
++        visible_start: header[14],
++        effect_kind: header[16],
++        action_id: (!action_raw.is_empty()).then_some(action_raw),
++        last_request: header[18],
++        pending_request: header[19],
++        pending_epoch: header[20],
++        pending_field_revision: header[21],
++        rows,
++    })
++}
++
++fn utf16_len(text: &str) -> usize {
++    text.encode_utf16().count()
++}
++
++fn utf16_boundary(text: &str, target: usize) -> bool {
++    let mut offset = 0;
++    if target == 0 {
++        return true;
++    }
++    for scalar in text.chars() {
++        offset += scalar.len_utf16();
++        if offset == target {
++            return true;
++        }
++        if offset > target {
++            return false;
++        }
++    }
++    false
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn command_wire_is_bounded_and_uses_only_allowlisted_ids() {
++        let bytes = encode_commands().unwrap();
++        assert!(bytes.len() < 25216);
++        assert!(
++            bytes
++                .windows(b"mzed.open-settings-file".len())
++                .any(|w| w == b"mzed.open-settings-file")
++        );
++        assert!(
++            bytes
++                .windows(b"mzed.toggle-full-screen".len())
++                .any(|w| w == b"mzed.toggle-full-screen")
++        );
++    }
++
++    #[test]
++    fn snapshot_decoder_rejects_stale_schema_generation_and_trailing_data() {
++        let mut header = [0_i32; 22];
++        header[..4].copy_from_slice(&[1, 7, 2, 1]);
++        header[3] = 1;
++        header[10] = -1;
++        header[11] = -1;
++        header[13] = -1;
++        let mut bytes = Vec::new();
++        for value in header {
++            bytes.extend_from_slice(&value.to_le_bytes());
++        }
++        assert!(decode_snapshot(&bytes, 7).is_ok());
++        assert_eq!(decode_snapshot(&bytes, 8).unwrap_err(), -9);
++        bytes.push(0);
++        assert_eq!(decode_snapshot(&bytes, 7).unwrap_err(), -9);
++    }
++
++    #[test]
++    fn pending_layout_is_bound_to_the_exact_slot_generation() {
++        let token = PendingLayout {
++            slot: 1,
++            generation: 7,
++            request: 1,
++            epoch: 1,
++            expected_revision: 1,
++        };
++        assert_eq!(validate_pending_owner_identity(1, 8, token), Err(-5));
++        let live_token = PendingLayout {
++            generation: 8,
++            ..token
++        };
++        assert_eq!(validate_pending_owner_identity(1, 8, live_token), Ok(()));
++    }
++
++    #[test]
++    fn snapshot_decoder_rejects_bad_row_count_before_allocating() {
++        let mut header = [0_i32; 22];
++        header[..4].copy_from_slice(&[1, 7, 2, 1]);
++        header[13] = -1;
++        header[10] = -1;
++        header[11] = -1;
++        header[15] = -1;
++        let mut bytes = Vec::new();
++        for value in header {
++            bytes.extend_from_slice(&value.to_le_bytes());
++        }
++        assert!(std::panic::catch_unwind(|| decode_snapshot(&bytes, 7)).is_ok());
++        assert_eq!(decode_snapshot(&bytes, 7).unwrap_err(), -9);
++    }
++}
+diff --git a/crates/zed/src/zed/palette_view.rs b/crates/zed/src/zed/palette_view.rs
+new file mode 100644
+index 0000000..2102b14
+--- /dev/null
++++ b/crates/zed/src/zed/palette_view.rs
+@@ -0,0 +1,1598 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++//! Bounded Linux host for the shared MoonBit command palette.
++
++use std::ops::Range;
++
++use gpui::{
++    Action, App, Bounds, ContentMask, Context, DismissEvent, ElementInputHandler, Entity,
++    EntityInputHandler, EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement,
++    KeyUpEvent, ParentElement, Pixels, Point, Render, ShapedLine, SharedString, Styled,
++    Subscription, UTF16Selection, WeakEntity, Window, WindowId, canvas, div, fill, point, px, rgb,
++    size,
++};
++use ui::ActiveTheme;
++use unicode_bidi::{BidiClass, bidi_class};
++use unicode_segmentation::UnicodeSegmentation;
++use workspace::{ModalView, MultiWorkspace, Workspace};
++
++use super::{
++    ToggleFullScreen,
++    palette_protocol::{NativePalette, PaletteMetrics, PaletteSnapshot, SubmitResult},
++};
++
++const PALETTE_WIDTH: f32 = 640.0;
++const PALETTE_HEIGHT: f32 = 276.0;
++const FIELD_WIDTH: f32 = 608.0;
++const INITIAL_FIELD_HEIGHT: f64 = 128.0;
++const FIELD_X: f32 = 16.0;
++const FIELD_Y: f32 = 12.0;
++const FIELD_ROW_GAP: f32 = 12.0;
++const ROW_HEIGHT: f32 = 24.0;
++const MAX_VISIBLE_ROWS: usize = 8;
++const MAX_PALETTE_FIELD_HEIGHT: f32 =
++    PALETTE_HEIGHT - FIELD_Y - FIELD_ROW_GAP - MAX_VISIBLE_ROWS as f32 * ROW_HEIGHT;
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++enum CloseKey {
++    Enter,
++    Escape,
++}
++
++impl CloseKey {
++    fn tag(self) -> i32 {
++        match self {
++            Self::Enter => 1,
++            Self::Escape => 2,
++        }
++    }
++
++    fn matches(self, key: &str) -> bool {
++        match self {
++            Self::Enter => key == "enter",
++            Self::Escape => key == "escape",
++        }
++    }
++}
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++struct PendingRelease {
++    key: CloseKey,
++    was_composing: bool,
++    keydown_modifiers: i32,
++}
++
++struct KeyMap<'a> {
++    tag: i32,
++    shared_text: &'a str,
++    insert_text: Option<&'a str>,
++}
++
++#[derive(Clone, Debug, PartialEq, Eq)]
++struct StyleStamp {
++    font: String,
++    font_size_bits: u32,
++    line_height_bits: u32,
++    scale_bits: u32,
++    color_bits: [u32; 4],
++}
++
++#[derive(Clone)]
++struct PaletteTextStyle {
++    text_style: gpui::TextStyle,
++    font_size: Pixels,
++    line_height: Pixels,
++    stamp: StyleStamp,
++}
++
++#[derive(Clone)]
++struct CaretStop {
++    utf16: usize,
++    x: f32,
++}
++
++#[derive(Clone)]
++struct ShapeData {
++    line: ShapedLine,
++    metrics_ints: Vec<i32>,
++    metrics_doubles: Vec<f64>,
++    stops: Vec<CaretStop>,
++    line_height: Pixels,
++    font_size: Pixels,
++    style: StyleStamp,
++}
++
++struct PaletteFrame {
++    bounds: Bounds<Pixels>,
++    field_bounds: Bounds<Pixels>,
++    content_bounds: Bounds<Pixels>,
++    snapshot: PaletteSnapshot,
++    geometry: [f64; 19],
++    query: ShapeData,
++    rows: Vec<(ShapeData, bool, Bounds<Pixels>)>,
++    input_ready: bool,
++}
++
++pub struct PaletteView {
++    native: Option<NativePalette>,
++    focus: FocusHandle,
++    workspace: WeakEntity<Workspace>,
++    workspace_id: Option<gpui::EntityId>,
++    window_id: WindowId,
++    view_entity_id: gpui::EntityId,
++    style: StyleStamp,
++    palette_text_style: Option<PaletteTextStyle>,
++    snapshot: Option<PaletteSnapshot>,
++    query_shape: Option<ShapeData>,
++    last_field_bounds: Option<Bounds<Pixels>>,
++    pending_release: Option<PendingRelease>,
++    terminal: bool,
++    suspended: bool,
++    _subscriptions: Vec<Subscription>,
++}
++
++impl EventEmitter<DismissEvent> for PaletteView {}
++impl ModalView for PaletteView {}
++
++impl Focusable for PaletteView {
++    fn focus_handle(&self, _cx: &App) -> FocusHandle {
++        self.focus.clone()
++    }
++}
++
++impl PaletteView {
++    pub fn new(
++        workspace: WeakEntity<Workspace>,
++        window: &mut Window,
++        cx: &mut Context<Self>,
++    ) -> Self {
++        let focus = cx.focus_handle();
++        // Workspace dispatch and modal prepaint use different text styles:
++        // shape only once the view is mounted in its actual frame.
++        let style = style_stamp(window);
++        let window_id = window.window_handle().window_id();
++        let workspace_id = workspace.upgrade().map(|workspace| workspace.entity_id());
++        let view_entity_id = cx.entity_id();
++        let weak = cx.weak_entity();
++        let interceptor = cx.intercept_keystrokes(move |event, window, app| {
++            if window.window_handle().window_id() != window_id {
++                return;
++            }
++            let _ = weak.update(app, |this, cx| {
++                this.intercept_key_down(&event.keystroke, window, cx);
++            });
++        });
++        let blur_subscription = cx.on_blur(&focus, window, move |this, _window, cx| {
++            if !this.terminal {
++                this.terminal = true;
++                this.pending_release = None;
++                this.native.take();
++                cx.emit(DismissEvent);
++            }
++        });
++        let activation_subscription =
++            cx.observe_window_activation(window, move |this, window, cx| {
++                if !window.is_window_active() {
++                    this.dismiss_without_action(window, cx);
++                }
++            });
++        let visibility_subscription =
++            cx.observe_window_visibility(window, move |this, visibility, window, cx| {
++                if !visibility.is_visible() {
++                    this.dismiss_without_action(window, cx);
++                }
++            });
++        Self {
++            native: None,
++            focus,
++            workspace,
++            workspace_id,
++            window_id,
++            view_entity_id,
++            style,
++            palette_text_style: None,
++            snapshot: None,
++            query_shape: None,
++            last_field_bounds: None,
++            pending_release: None,
++            terminal: false,
++            suspended: false,
++            _subscriptions: vec![
++                interceptor,
++                blur_subscription,
++                activation_subscription,
++                visibility_subscription,
++            ],
++        }
++    }
++
++    fn intercept_key_down(
++        &mut self,
++        keystroke: &gpui::Keystroke,
++        window: &mut Window,
++        cx: &mut Context<Self>,
++    ) {
++        if self.window_id != window.window_handle().window_id()
++            || !self.focus.contains_focused(window, cx)
++            || self.terminal
++        {
++            return;
++        }
++        // This is before keybinding resolution, so underlying editor bindings
++        // and multi-stroke prefixes cannot observe modal keystrokes.
++        cx.stop_propagation();
++        window.prevent_default();
++        if self.pending_release.is_some() {
++            return;
++        }
++        if is_unqualified_clipboard_shortcut(keystroke) {
++            log::debug!("MZed palette clipboard shortcut is outside this Linux profile");
++            return;
++        }
++        let Some(mapped) = map_key(keystroke) else {
++            return;
++        };
++        if self.suspended || self.native.is_none() {
++            if mapped.tag == 2 {
++                self.dismiss_without_action(window, cx);
++            }
++            return;
++        }
++        if let Some(key) = CloseKey::try_from_tag(mapped.tag) {
++            let was_composing = self
++                .snapshot
++                .as_ref()
++                .is_some_and(|snapshot| snapshot.composing);
++            self.pending_release = Some(PendingRelease {
++                key,
++                was_composing,
++                keydown_modifiers: modifier_bits(keystroke),
++            });
++            return;
++        }
++        let Some(owner) = self.native.as_mut() else {
++            return;
++        };
++        let result = if let Some(text) = mapped.insert_text {
++            owner.replace(None, text)
++        } else {
++            owner.input(
++                1,
++                mapped.tag,
++                modifier_bits(keystroke),
++                false,
++                mapped.shared_text,
++            )
++        };
++        match result {
++            Ok(result) => {
++                let snapshot = self.finish_or_measure(result, window);
++                if let Some(snapshot) = snapshot {
++                    self.snapshot = Some(snapshot.clone());
++                    self.query_shape = None;
++                    if snapshot.effect_kind == 2 && !snapshot.is_open {
++                        // Shared Tab-to-blur is a terminal effect without a
++                        // physical close-key fence. It has no action token.
++                        self.defer_terminal_ack(snapshot.epoch, None, window, cx);
++                        return;
++                    }
++                    cx.notify();
++                }
++            }
++            Err(error) => log::debug!("MZed palette key was rejected: {error}"),
++        }
++    }
++
++    fn finish_or_measure(
++        &mut self,
++        result: SubmitResult,
++        window: &mut Window,
++    ) -> Option<PaletteSnapshot> {
++        if self.native.is_none() {
++            return None;
++        }
++        match result {
++            SubmitResult::Complete(snapshot) => Some(snapshot),
++            SubmitResult::NeedLayout { pending, text } => {
++                if text.len() > super::palette_protocol::PALETTE_MAX_QUERY_BYTES {
++                    self.native.as_mut()?.abort_pending(pending).ok();
++                    return None;
++                }
++                let palette_text_style = self.palette_text_style.as_ref()?;
++                let shape = match shape_text_with_style(&text, window, palette_text_style) {
++                    Ok(value) if value.style == self.style => value,
++                    Ok(_) | Err(_) => {
++                        self.native.as_mut()?.abort_pending(pending).ok();
++                        return None;
++                    }
++                };
++                let continued = self.native.as_mut()?.continue_with_layout(
++                    pending,
++                    PaletteMetrics {
++                        ints: &shape.metrics_ints,
++                        doubles: &shape.metrics_doubles,
++                    },
++                );
++                match continued {
++                    Ok(SubmitResult::Complete(snapshot)) => {
++                        self.query_shape = Some(shape);
++                        Some(snapshot)
++                    }
++                    Ok(SubmitResult::NeedLayout { pending, .. }) => {
++                        self.native.as_mut()?.abort_pending(pending).ok();
++                        None
++                    }
++                    Err(error) => {
++                        log::debug!("MZed palette layout continuation failed: {error}");
++                        self.native.as_mut()?.abort_pending(pending).ok();
++                        None
++                    }
++                }
++            }
++        }
++    }
++
++    fn on_key_up(&mut self, event: &KeyUpEvent, window: &mut Window, cx: &mut Context<Self>) {
++        if self.window_id != window.window_handle().window_id() || self.pending_release.is_none() {
++            return;
++        }
++        if self.terminal || !self.focus.contains_focused(window, cx) {
++            // GPUI may have precomputed this capture path before an ancestor
++            // moved focus. Never let an old modal's delayed close release
++            // dispatch an action after its owner was retired.
++            self.pending_release = None;
++            return;
++        }
++        window.prevent_default();
++        cx.stop_propagation();
++        let Some(pending_release) = self.pending_release else {
++            return;
++        };
++        let close_key = pending_release.key;
++        if !close_key.matches(&event.keystroke.key) {
++            return;
++        }
++        let Some(current_snapshot) = self.snapshot.as_ref() else {
++            self.pending_release = None;
++            return;
++        };
++        if self.native.is_none() {
++            self.pending_release = None;
++            return;
++        }
++        let current_composing = current_snapshot.composing;
++        let press_repeat = delayed_press_is_repeat(pending_release, current_composing);
++        let press_result = self.native.as_mut().map(|owner| {
++            owner.input(
++                1,
++                close_key.tag(),
++                pending_release.keydown_modifiers,
++                press_repeat,
++                "",
++            )
++        });
++        let press_snapshot = match press_result
++            .and_then(Result::ok)
++            .and_then(|result| self.finish_or_measure(result, window))
++        {
++            Some(snapshot) => snapshot,
++            None => {
++                self.pending_release = None;
++                self.dismiss_without_action(window, cx);
++                return;
++            }
++        };
++        let terminal_press = press_snapshot.effect_kind == 2 && !press_snapshot.is_open;
++        let release_result = self.native.as_mut().map(|owner| {
++            owner.input(
++                2,
++                close_key.tag(),
++                modifier_bits_from_keyup(&event.keystroke),
++                false,
++                "",
++            )
++        });
++        let release_snapshot = release_result
++            .and_then(Result::ok)
++            .and_then(|result| self.finish_or_measure(result, window));
++        let release_succeeded = release_snapshot.is_some();
++        let display_snapshot = release_snapshot.unwrap_or_else(|| press_snapshot.clone());
++        self.snapshot = Some(display_snapshot);
++        self.pending_release = None;
++        if terminal_press {
++            let action_id = if release_succeeded && !press_snapshot.composing {
++                press_snapshot.action_id.clone()
++            } else {
++                None
++            };
++            self.defer_terminal_ack(press_snapshot.epoch, action_id, window, cx);
++        } else {
++            cx.notify();
++        }
++    }
++
++    fn defer_terminal_ack(
++        &mut self,
++        epoch: i32,
++        action_id: Option<String>,
++        window: &mut Window,
++        cx: &mut Context<Self>,
++    ) {
++        self.terminal = true;
++        let Some(mut owner) = self.native.take() else {
++            cx.emit(DismissEvent);
++            return;
++        };
++        let workspace = self.workspace.clone();
++        let workspace_id = self.workspace_id;
++        let view_entity_id = self.view_entity_id;
++        // Retire the native input owner before emitting dismissal. Keep the FFI
++        // guard strongly captured outside the view so dropping the modal cannot
++        // skip its terminal ACK.
++        window.retire_text_input_owner();
++        cx.emit(DismissEvent);
++        window.defer(cx, move |window, app| {
++            let old_modal_is_active = workspace
++                .update(app, |workspace, cx| {
++                    workspace
++                        .active_modal::<PaletteView>(cx)
++                        .is_some_and(|modal| modal.entity_id() == view_entity_id)
++                })
++                .unwrap_or(false);
++            if old_modal_is_active {
++                drop(owner);
++                return;
++            }
++            let captured_workspace_is_live = workspace.update(app, |_, _| ()).is_ok();
++            let displayed_workspace_matches = workspace_id.is_some_and(|expected| {
++                window
++                    .root::<MultiWorkspace>()
++                    .flatten()
++                    .is_some_and(|multi_workspace| {
++                        multi_workspace.read(app).workspace().entity_id() == expected
++                    })
++            });
++            if let Err(error) = owner.finish_close(epoch) {
++                log::error!("MZed palette close ACK rejected: {error}");
++                drop(owner);
++                return;
++            }
++            // finish_close consumes the shared terminal before the guard is
++            // dropped and before an allowlisted host action can reenter GPUI.
++            drop(owner);
++            if !captured_workspace_is_live || !displayed_workspace_matches {
++                return;
++            }
++            let action = match action_id.as_deref() {
++                Some("mzed.open-settings-file") => {
++                    Some(zed_actions::OpenSettingsFile.boxed_clone())
++                }
++                Some("mzed.toggle-full-screen") => Some(ToggleFullScreen.boxed_clone()),
++                _ => None,
++            };
++            if let Some(action) = action {
++                window.dispatch_action(action, app);
++            }
++        });
++    }
++
++    fn dismiss_without_action(&mut self, window: &mut Window, cx: &mut Context<Self>) {
++        if self.terminal {
++            return;
++        }
++        self.terminal = true;
++        self.pending_release = None;
++        window.retire_text_input_owner();
++        self.native.take();
++        cx.emit(DismissEvent);
++    }
++
++    fn prepare(&mut self, bounds: Bounds<Pixels>, window: &mut Window) -> Option<PaletteFrame> {
++        if self.suspended || self.terminal {
++            return None;
++        }
++        if self.native.is_none() {
++            if !self.initialize_for_frame(window) {
++                return None;
++            }
++        }
++        let stamp = style_stamp(window);
++        if stamp != self.style {
++            log::error!(
++                "MZed palette suspended after text style changed: initial={:?}, frame={:?}",
++                self.style,
++                stamp
++            );
++            self.suspended = true;
++            return None;
++        }
++        let Some(snapshot) = self
++            .snapshot
++            .clone()
++            .or_else(|| self.native.as_ref().and_then(|owner| owner.snapshot().ok()))
++        else {
++            log::error!("MZed palette frame has no shared snapshot");
++            return None;
++        };
++        let Some(owner) = self.native.as_ref() else {
++            log::error!("MZed palette frame has no native owner");
++            return None;
++        };
++        let geometry = match owner.geometry() {
++            Ok(geometry) => geometry,
++            Err(error) => {
++                log::error!("MZed palette frame geometry failed: {error}");
++                return None;
++            }
++        };
++        let palette_text_style = self.palette_text_style.as_ref()?.clone();
++        let query = match self.query_shape.clone() {
++            Some(shape)
++                if shape.style == stamp && snapshot.displayed == shape.line.text.as_ref() =>
++            {
++                shape
++            }
++            _ => match shape_text_with_style(&snapshot.displayed, window, &palette_text_style) {
++                Ok(shape) => shape,
++                Err(error) => {
++                    log::error!("MZed palette query shaping failed: {error}");
++                    return None;
++                }
++            },
++        };
++        let field_bounds = Bounds::new(
++            bounds.origin
++                + point(
++                    px(FIELD_X + geometry[0] as f32),
++                    px(FIELD_Y + geometry[1] as f32),
++                ),
++            size(px(geometry[2] as f32), px(geometry[3] as f32)),
++        );
++        let content_bounds = Bounds::new(
++            field_bounds.origin + point(px(geometry[4] as f32), px(geometry[5] as f32)),
++            size(px(geometry[6] as f32), px(geometry[7] as f32)),
++        );
++        self.last_field_bounds = Some(field_bounds);
++        let row_top = FIELD_Y + geometry[1] as f32 + geometry[3] as f32 + FIELD_ROW_GAP;
++        let mut rows = Vec::with_capacity(snapshot.rows.len());
++        for (index, row) in snapshot.rows.iter().enumerate() {
++            let shape = match shape_row_label_with_style(&row.label, window, &palette_text_style) {
++                Ok(shape) => shape,
++                Err(error) => {
++                    log::error!("MZed palette row shaping failed: {error}");
++                    return None;
++                }
++            };
++            let row_bounds = Bounds::new(
++                bounds.origin + point(px(FIELD_X), px(row_top + ROW_HEIGHT * index as f32)),
++                size(px(FIELD_WIDTH), px(ROW_HEIGHT)),
++            );
++            rows.push((shape, row.selected, row_bounds));
++        }
++        self.query_shape = Some(query.clone());
++        Some(PaletteFrame {
++            bounds,
++            field_bounds,
++            content_bounds,
++            snapshot: snapshot.clone(),
++            geometry,
++            query,
++            rows,
++            input_ready: !self.suspended && !self.terminal && snapshot.is_open,
++        })
++    }
++
++    fn paint(
++        weak: WeakEntity<Self>,
++        frame: PaletteFrame,
++        window: &mut Window,
++        cx: &mut App,
++        focus: &FocusHandle,
++        view: Entity<Self>,
++    ) {
++        let field = frame.field_bounds;
++        let content = frame.content_bounds;
++        let text_origin = field.origin + query_text_offset(&frame.geometry);
++        let field_bg = Bounds::new(field.origin, field.size);
++        let colors = cx.theme().colors();
++        let field_color = colors.element_background;
++        let selection_color = colors.element_selection_background;
++        let caret_color = colors.text;
++        let selected_row_color = colors.ghost_element_selected;
++        let mut paint_ok = true;
++        window.with_content_mask(
++            Some(ContentMask {
++                bounds: frame.bounds,
++            }),
++            |window| {
++                window.paint_quad(fill(field_bg, field_color));
++                window.with_content_mask(Some(ContentMask { bounds: content }), |window| {
++                    if let (Some(start), Some(end)) = (
++                        frame
++                            .query
++                            .stops
++                            .iter()
++                            .find(|stop| stop.utf16 == frame.snapshot.anchor_utf16 as usize),
++                        frame
++                            .query
++                            .stops
++                            .iter()
++                            .find(|stop| stop.utf16 == frame.snapshot.head_utf16 as usize),
++                    ) {
++                        if start.utf16 != end.utf16 {
++                            let selected = Bounds::new(
++                                text_origin + point(px(start.x.min(end.x)), px(0.0)),
++                                size(px((end.x - start.x).abs()), content.size.height),
++                            );
++                            window.paint_quad(fill(selected, selection_color));
++                        }
++                    }
++                    if let Some(marked) = frame.snapshot.marked.as_ref() {
++                        if let (Some(start), Some(end)) = (
++                            frame
++                                .query
++                                .stops
++                                .iter()
++                                .find(|stop| stop.utf16 == marked.start),
++                            frame
++                                .query
++                                .stops
++                                .iter()
++                                .find(|stop| stop.utf16 == marked.end),
++                        ) {
++                            let underline = Bounds::new(
++                                text_origin
++                                    + point(px(start.x), px(content.size.height.as_f32() - 2.0)),
++                                size(px((end.x - start.x).max(0.0)), px(1.0)),
++                            );
++                            window.paint_quad(fill(underline, rgb(0xe0b35a)));
++                        }
++                    }
++                    if frame
++                        .query
++                        .line
++                        .paint(
++                            text_origin,
++                            frame.query.line_height,
++                            gpui::TextAlign::Left,
++                            None,
++                            window,
++                            cx,
++                        )
++                        .is_err()
++                    {
++                        paint_ok = false;
++                    }
++                    let caret = Bounds::new(
++                        field.origin
++                            + point(px(frame.geometry[9] as f32), px(frame.geometry[10] as f32)),
++                        size(px(frame.geometry[11] as f32), px(frame.geometry[12] as f32)),
++                    );
++                    if frame.input_ready && frame.snapshot.anchor_utf16 == frame.snapshot.head_utf16
++                    {
++                        window.paint_quad(fill(caret, caret_color));
++                    }
++                });
++                for (shape, selected, bounds) in &frame.rows {
++                    if *selected {
++                        window.paint_quad(fill(*bounds, selected_row_color));
++                    }
++                    let row_origin = bounds.origin + point(px(6.0), px(2.0));
++                    if shape
++                        .line
++                        .paint(
++                            row_origin,
++                            shape.line_height,
++                            gpui::TextAlign::Left,
++                            None,
++                            window,
++                            cx,
++                        )
++                        .is_err()
++                    {
++                        paint_ok = false;
++                    }
++                }
++            },
++        );
++        if !paint_ok {
++            let _ = weak.update(cx, |this, _cx| this.suspended = true);
++            window.retire_text_input_owner();
++            return;
++        }
++        if frame.input_ready {
++            window.handle_input(focus, ElementInputHandler::new(field, view), cx);
++        }
++    }
++
++    fn current_snapshot(&self) -> Option<PaletteSnapshot> {
++        self.snapshot.clone()
++    }
++
++    fn current_shape(&mut self, window: &Window) -> Option<ShapeData> {
++        let snapshot = self.snapshot.as_ref()?.clone();
++        if let Some(shape) = self.query_shape.as_ref()
++            && shape.style == self.style
++            && shape.line.text.as_ref() == snapshot.displayed
++        {
++            return Some(shape.clone());
++        }
++        let palette_text_style = self.palette_text_style.as_ref()?;
++        let shape = shape_text_with_style(&snapshot.displayed, window, palette_text_style).ok()?;
++        if shape.style != self.style {
++            self.suspended = true;
++            return None;
++        }
++        self.query_shape = Some(shape.clone());
++        Some(shape)
++    }
++}
++
++impl EntityInputHandler for PaletteView {
++    fn text_for_range(
++        &mut self,
++        range: Range<usize>,
++        adjusted_range: &mut Option<Range<usize>>,
++        _window: &mut Window,
++        _cx: &mut Context<Self>,
++    ) -> Option<String> {
++        let snapshot = self.current_snapshot()?;
++        let bytes = utf16_range_to_bytes(&snapshot.displayed, range)?;
++        if let Some(text) = snapshot.displayed.get(bytes) {
++            adjusted_range.take();
++            Some(text.to_owned())
++        } else {
++            None
++        }
++    }
++
++    fn selected_text_range(
++        &mut self,
++        _ignore_disabled_input: bool,
++        _window: &mut Window,
++        _cx: &mut Context<Self>,
++    ) -> Option<UTF16Selection> {
++        let snapshot = self.current_snapshot()?;
++        Some(UTF16Selection {
++            range: snapshot.anchor_utf16.min(snapshot.head_utf16) as usize
++                ..snapshot.anchor_utf16.max(snapshot.head_utf16) as usize,
++            reversed: snapshot.anchor_utf16 > snapshot.head_utf16,
++        })
++    }
++
++    fn marked_text_range(
++        &self,
++        _window: &mut Window,
++        _cx: &mut Context<Self>,
++    ) -> Option<Range<usize>> {
++        self.snapshot.as_ref()?.marked.clone()
++    }
++
++    fn unmark_text(&mut self, window: &mut Window, _cx: &mut Context<Self>) {
++        if !self.accepting_input() {
++            return;
++        }
++        let result = self.native.as_mut().map(NativePalette::unmark_composition);
++        match result {
++            Some(Ok(result)) => {
++                if let Some(snapshot) = self.finish_or_measure(result, window) {
++                    self.snapshot = Some(snapshot);
++                    window.refresh();
++                }
++            }
++            Some(Err(error)) => log::debug!("MZed palette unmark rejected: {error}"),
++            None => (),
++        }
++    }
++
++    fn paste(&mut self, _item: gpui::ClipboardItem, _window: &mut Window, _cx: &mut Context<Self>) {
++        // This ABI has no clipboard success receipt, so paste remains closed
++        // until the host can preserve the shared Cut/Paste transaction rules.
++    }
++
++    fn replace_text_in_range(
++        &mut self,
++        range: Option<Range<usize>>,
++        text: &str,
++        window: &mut Window,
++        cx: &mut Context<Self>,
++    ) {
++        if !self.accepting_input() {
++            return;
++        }
++        let result = self.native.as_mut().map(|owner| owner.replace(range, text));
++        match result {
++            Some(Ok(result)) => {
++                if let Some(snapshot) = self.finish_or_measure(result, window) {
++                    self.snapshot = Some(snapshot);
++                    cx.notify();
++                }
++            }
++            Some(Err(error)) => log::debug!("MZed palette text replacement rejected: {error}"),
++            None => (),
++        }
++    }
++
++    fn cancel_text_composition(&mut self, window: &mut Window, cx: &mut Context<Self>) {
++        if !self.accepting_input() {
++            return;
++        }
++        let result = self.native.as_mut().map(NativePalette::cancel_composition);
++        match result {
++            Some(Ok(result)) => {
++                if let Some(snapshot) = self.finish_or_measure(result, window) {
++                    self.snapshot = Some(snapshot);
++                    cx.notify();
++                }
++            }
++            Some(Err(error)) => log::debug!("MZed palette composition cancel rejected: {error}"),
++            None => (),
++        }
++    }
++
++    fn replace_and_mark_text_in_range(
++        &mut self,
++        range: Option<Range<usize>>,
++        new_text: &str,
++        selection: Option<Range<usize>>,
++        window: &mut Window,
++        cx: &mut Context<Self>,
++    ) {
++        if !self.accepting_input() {
++            return;
++        }
++        let result = self
++            .native
++            .as_mut()
++            .map(|owner| owner.mark(range, new_text, selection));
++        match result {
++            Some(Ok(result)) => {
++                if let Some(snapshot) = self.finish_or_measure(result, window) {
++                    self.snapshot = Some(snapshot);
++                    cx.notify();
++                }
++            }
++            Some(Err(error)) => log::debug!("MZed palette composition update rejected: {error}"),
++            None => (),
++        }
++    }
++
++    fn bounds_for_range(
++        &mut self,
++        range_utf16: Range<usize>,
++        element_bounds: Bounds<Pixels>,
++        window: &mut Window,
++        _cx: &mut Context<Self>,
++    ) -> Option<Bounds<Pixels>> {
++        let shape = self.current_shape(window)?;
++        let start = shape
++            .stops
++            .iter()
++            .find(|stop| stop.utf16 == range_utf16.start)?;
++        let end = shape
++            .stops
++            .iter()
++            .find(|stop| stop.utf16 == range_utf16.end)?;
++        let geometry = self.native.as_ref()?.geometry().ok()?;
++        let content_x = query_x_offset(&geometry);
++        let caret_y = geometry[10] as f32;
++        let caret_height = geometry[12] as f32;
++        Some(Bounds::new(
++            element_bounds.origin + point(px(content_x + start.x), px(caret_y)),
++            size(px((end.x - start.x).max(0.0)), px(caret_height)),
++        ))
++    }
++
++    fn character_index_for_point(
++        &mut self,
++        point: Point<Pixels>,
++        window: &mut Window,
++        _cx: &mut Context<Self>,
++    ) -> Option<usize> {
++        let shape = self.current_shape(window)?;
++        let field_bounds = self.last_field_bounds?;
++        if !field_bounds.contains(&point) {
++            return None;
++        }
++        let geometry = self.native.as_ref()?.geometry().ok()?;
++        let content_x = query_x_offset(&geometry);
++        let local_x = point.x - field_bounds.origin.x - px(content_x);
++        shape
++            .stops
++            .iter()
++            .min_by(|a, b| {
++                (a.x - local_x.as_f32())
++                    .abs()
++                    .total_cmp(&(b.x - local_x.as_f32()).abs())
++            })
++            .map(|stop| stop.utf16)
++    }
++
++    fn text_length_utf16(
++        &mut self,
++        _window: &mut Window,
++        _cx: &mut Context<Self>,
++    ) -> Option<usize> {
++        Some(self.snapshot.as_ref()?.displayed.encode_utf16().count())
++    }
++
++    fn accepts_text_input(&self, _window: &mut Window, _cx: &mut Context<Self>) -> bool {
++        self.accepting_input()
++    }
++
++    fn prefers_direct_ime_commit_as_text(
++        &self,
++        _window: &mut Window,
++        _cx: &mut Context<Self>,
++    ) -> bool {
++        self.accepting_input()
++    }
++}
++
++impl PaletteView {
++    fn accepting_input(&self) -> bool {
++        !self.terminal
++            && !self.suspended
++            && self.native.is_some()
++            && self
++                .snapshot
++                .as_ref()
++                .is_some_and(|snapshot| snapshot.is_open)
++    }
++
++    fn initialize_for_frame(&mut self, window: &mut Window) -> bool {
++        let palette_text_style = capture_palette_text_style(window);
++        let shape = match shape_text_with_style("", window, &palette_text_style) {
++            Ok(shape) => shape,
++            Err(error) => {
++                log::error!("MZed palette initial shaping failed: {error}");
++                self.suspended = true;
++                return false;
++            }
++        };
++        log::info!(
++            "MZed palette initialized with frame style: {:?}",
++            palette_text_style.stamp
++        );
++        let Some(owner) = open_native_palette_with_measured_height(&shape) else {
++            self.suspended = true;
++            return false;
++        };
++        let snapshot = match owner.snapshot() {
++            Ok(snapshot) => snapshot,
++            Err(error) => {
++                log::error!("MZed palette initial snapshot failed: {error}");
++                self.suspended = true;
++                return false;
++            }
++        };
++        self.style = palette_text_style.stamp.clone();
++        self.palette_text_style = Some(palette_text_style);
++        self.query_shape = Some(shape);
++        self.snapshot = Some(snapshot);
++        self.native = Some(owner);
++        true
++    }
++}
++
++impl Render for PaletteView {
++    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
++        let weak_prepare = cx.weak_entity();
++        let weak_paint = cx.weak_entity();
++        let focus = self.focus.clone();
++        let entity = cx.entity();
++        let key_up = cx.listener(Self::on_key_up);
++        let theme = cx.theme();
++        let mut root = div()
++            .track_focus(&self.focus)
++            .capture_key_up(move |event, window, cx| key_up(event, window, cx))
++            .on_mouse_down(
++                gpui::MouseButton::Left,
++                cx.listener(|this, _, window, cx| {
++                    window.focus(&this.focus, cx);
++                }),
++            )
++            .w(px(PALETTE_WIDTH))
++            .h(px(PALETTE_HEIGHT))
++            .bg(theme.colors().elevated_surface_background)
++            .text_color(theme.colors().text)
++            .border_1()
++            .border_color(theme.colors().border_variant)
++            .rounded_md();
++        if self.suspended {
++            root = root.child(
++                div()
++                    .p_4()
++                    .child("Palette input is suspended. Press Escape to close."),
++            );
++        } else {
++            root = root.child(
++                canvas(
++                    move |bounds, window, cx| {
++                        weak_prepare
++                            .update(cx, |this, cx| {
++                                let was_suspended = this.suspended;
++                                let frame = this.prepare(bounds, window);
++                                if !was_suspended && this.suspended {
++                                    cx.notify();
++                                }
++                                frame
++                            })
++                            .ok()
++                            .flatten()
++                    },
++                    move |_, frame, window, cx| {
++                        if let Some(frame) = frame {
++                            Self::paint(weak_paint, frame, window, cx, &focus, entity);
++                        }
++                    },
++                )
++                .w(px(PALETTE_WIDTH))
++                .h(px(PALETTE_HEIGHT)),
++            );
++        }
++        root
++    }
++}
++
++fn style_stamp(window: &Window) -> StyleStamp {
++    capture_palette_text_style(window).stamp
++}
++
++fn capture_palette_text_style(window: &Window) -> PaletteTextStyle {
++    let text_style = window.text_style();
++    let font_size = text_style.font_size.to_pixels(window.rem_size());
++    let line_height = window.pixel_snap(
++        text_style
++            .line_height
++            .to_pixels(font_size.into(), window.rem_size()),
++    );
++    let stamp = StyleStamp {
++        font: format!("{:?}", text_style.font()),
++        font_size_bits: font_size.as_f32().to_bits(),
++        line_height_bits: line_height.as_f32().to_bits(),
++        scale_bits: window.scale_factor().to_bits(),
++        color_bits: [
++            text_style.color.h.to_bits(),
++            text_style.color.s.to_bits(),
++            text_style.color.l.to_bits(),
++            text_style.color.a.to_bits(),
++        ],
++    };
++    PaletteTextStyle {
++        text_style,
++        font_size,
++        line_height,
++        stamp,
++    }
++}
++
++fn open_native_palette_with_measured_height(shape: &ShapeData) -> Option<NativePalette> {
++    let mut owner = match NativePalette::new(
++        PaletteMetrics {
++            ints: &shape.metrics_ints,
++            doubles: &shape.metrics_doubles,
++        },
++        f64::from(FIELD_WIDTH),
++        INITIAL_FIELD_HEIGHT,
++        f64::from(shape.font_size),
++    ) {
++        Ok(owner) => owner,
++        Err(error) => {
++            log::error!("MZed palette owner open failed: {error}");
++            return None;
++        }
++    };
++    let geometry = match owner.geometry() {
++        Ok(geometry) => geometry,
++        Err(error) => {
++            log::error!("MZed palette initial geometry failed: {error}");
++            return None;
++        }
++    };
++    let field_height = geometry[3];
++    let content_height = geometry[7];
++    let vertical_inset = field_height - content_height;
++    let shared_run_height = geometry[18];
++    let line_height = f64::from(shape.line_height);
++    let font_size = f64::from(shape.font_size);
++    if !field_height.is_finite()
++        || !content_height.is_finite()
++        || !vertical_inset.is_finite()
++        || vertical_inset < 0.0
++        || !shared_run_height.is_finite()
++        || shared_run_height < 0.0
++        || !line_height.is_finite()
++        || !font_size.is_finite()
++    {
++        log::error!("MZed palette produced non-finite or negative field geometry");
++        return None;
++    }
++    let required_content_height = line_height.max(font_size).max(shared_run_height);
++    let required_field_height = (required_content_height + vertical_inset).max(24.0);
++    let max_field_height = f64::from(MAX_PALETTE_FIELD_HEIGHT);
++    log::info!(
++        "MZed palette field geometry: line_height_px={line_height:.3}, font_size_px={font_size:.3}, shared_run_height_px={shared_run_height:.3}, shared_vertical_inset_px={vertical_inset:.3}, requested_field_height_px={required_field_height:.3}, max_field_height_px={max_field_height:.3}"
++    );
++    if required_field_height > max_field_height {
++        log::error!("MZed palette field does not fit the bounded 8-row panel");
++        return None;
++    }
++    if let Err(error) = owner.resize(f64::from(FIELD_WIDTH), required_field_height) {
++        log::error!("MZed palette field resize failed: {error}");
++        return None;
++    }
++    let resized = match owner.geometry() {
++        Ok(geometry) => geometry,
++        Err(error) => {
++            log::error!("MZed palette resized geometry failed: {error}");
++            return None;
++        }
++    };
++    if (resized[3] - required_field_height).abs() > 0.01
++        || resized[7] + 0.01 < required_content_height
++    {
++        log::error!("MZed palette shared field geometry did not retain the requested line height");
++        return None;
++    }
++    Some(owner)
++}
++
++fn shape_text_with_style(
++    text: &str,
++    window: &Window,
++    palette_style: &PaletteTextStyle,
++) -> Result<ShapeData, &'static str> {
++    if text.len() > super::palette_protocol::PALETTE_MAX_QUERY_BYTES
++        || text.contains('\n')
++        || text.contains('\r')
++    {
++        return Err("text exceeds the admitted single-line profile");
++    }
++    for grapheme in text.graphemes(true) {
++        if grapheme.chars().count() != 1 {
++            return Err("multi-scalar grapheme geometry is not admitted");
++        }
++    }
++    for scalar in text.chars() {
++        if matches!(
++            bidi_class(scalar),
++            BidiClass::R
++                | BidiClass::AL
++                | BidiClass::AN
++                | BidiClass::RLE
++                | BidiClass::RLO
++                | BidiClass::RLI
++                | BidiClass::LRE
++                | BidiClass::LRO
++                | BidiClass::LRI
++                | BidiClass::FSI
++                | BidiClass::PDI
++                | BidiClass::PDF
++        ) {
++            return Err("bidirectional text is not admitted");
++        }
++    }
++    let stamp = palette_style.stamp.clone();
++    let text_style = &palette_style.text_style;
++    let font_size = palette_style.font_size;
++    let line_height = palette_style.line_height;
++    if font_size.as_f32() <= 0.0 || line_height.as_f32() <= 0.0 {
++        return Err("invalid text style");
++    }
++    let shared: SharedString = text.to_owned().into();
++    let run = text_style.to_run(text.len());
++    let line = window
++        .text_system()
++        .shape_line(shared, font_size, &[run], None);
++    let mut glyphs = line
++        .runs
++        .iter()
++        .flat_map(|run| run.glyphs.iter())
++        .collect::<Vec<_>>();
++    glyphs.sort_by_key(|glyph| glyph.index);
++    let scalars = text.char_indices().collect::<Vec<_>>();
++    if glyphs.len() != scalars.len() {
++        return Err("shape did not produce exactly one glyph per scalar");
++    }
++    let mut stops = Vec::with_capacity(scalars.len() + 1);
++    let mut utf16_offset = 0_usize;
++    let mut previous_x = -1.0_f32;
++    let mut ints = vec![1, 0, checked_i32(scalars.len() + 1)?];
++    for (index, (byte_offset, scalar)) in scalars.iter().enumerate() {
++        let glyph = glyphs[index];
++        let x = glyph.position.x.as_f32();
++        if glyph.index != *byte_offset || glyph.id.0 == 0 || !x.is_finite() || x <= previous_x {
++            return Err("shape contains a merged, missing, or non-monotone glyph stop");
++        }
++        stops.push(CaretStop {
++            utf16: utf16_offset,
++            x,
++        });
++        ints.push(checked_i32(utf16_offset)?);
++        ints.push(1);
++        previous_x = x;
++        utf16_offset += scalar.len_utf16();
++    }
++    let end_x = line.width().as_f32();
++    if !end_x.is_finite() || end_x < previous_x {
++        return Err("shape produced an invalid trailing caret");
++    }
++    stops.push(CaretStop {
++        utf16: utf16_offset,
++        x: end_x,
++    });
++    ints.push(checked_i32(utf16_offset)?);
++    ints.push(1);
++    let line_height_f32 = line_height.as_f32();
++    let ascent = line.ascent.as_f32();
++    let descent = line.descent.as_f32();
++    let baseline = (line_height_f32 - ascent - descent) / 2.0 + ascent;
++    if !baseline.is_finite() || baseline < 0.0 || baseline > line_height_f32 {
++        return Err("shape produced an invalid baseline");
++    }
++    let width = end_x.max(0.0);
++    let mut doubles = vec![
++        0.0,
++        0.0,
++        f64::from(width),
++        f64::from(line_height),
++        // This profile admits host shaping and rejects paint errors. It does
++        // not claim exact CPU ink bounds or Pango-equivalent bearings.
++        0.0,
++        0.0,
++        f64::from(width),
++        f64::from(line_height),
++        f64::from(baseline),
++    ];
++    for stop in &stops {
++        doubles.extend_from_slice(&[
++            f64::from(stop.x),
++            0.0,
++            0.0,
++            f64::from(line_height),
++            f64::from(stop.x),
++            0.0,
++            0.0,
++            f64::from(line_height),
++        ]);
++    }
++    Ok(ShapeData {
++        line,
++        metrics_ints: ints,
++        metrics_doubles: doubles,
++        stops,
++        line_height,
++        font_size,
++        style: stamp,
++    })
++}
++
++fn shape_row_label_with_style(
++    text: &str,
++    window: &Window,
++    palette_style: &PaletteTextStyle,
++) -> Result<ShapeData, &'static str> {
++    let style = palette_style.stamp.clone();
++    let text_style = &palette_style.text_style;
++    let font_size = palette_style.font_size;
++    let line_height = palette_style.line_height;
++    if font_size.as_f32() <= 0.0 || line_height.as_f32() <= 0.0 {
++        return Err("invalid row text style");
++    }
++    let shared: SharedString = text.to_owned().into();
++    let run = text_style.to_run(text.len());
++    let line = window
++        .text_system()
++        .shape_line(shared, font_size, &[run], None);
++    Ok(ShapeData {
++        line,
++        metrics_ints: Vec::new(),
++        metrics_doubles: Vec::new(),
++        stops: Vec::new(),
++        line_height,
++        font_size,
++        style,
++    })
++}
++
++fn checked_i32(value: usize) -> Result<i32, &'static str> {
++    i32::try_from(value).map_err(|_| "text offset overflow")
++}
++
++fn query_x_offset(geometry: &[f64; 19]) -> f32 {
++    geometry[4] as f32 - geometry[8] as f32 + geometry[13] as f32
++}
++
++fn query_global_x(field_origin: Pixels, geometry: &[f64; 19]) -> Pixels {
++    field_origin + px(query_x_offset(geometry))
++}
++
++fn query_text_offset(geometry: &[f64; 19]) -> Point<Pixels> {
++    point(
++        px(query_x_offset(geometry)),
++        px(geometry[5] as f32 + geometry[14] as f32),
++    )
++}
++
++fn modifier_bits(keystroke: &gpui::Keystroke) -> i32 {
++    (keystroke.modifiers.shift as i32)
++        | ((keystroke.modifiers.control as i32) << 1)
++        | ((keystroke.modifiers.alt as i32) << 2)
++        | ((keystroke.modifiers.platform as i32) << 3)
++}
++
++fn delayed_press_is_repeat(pending: PendingRelease, currently_composing: bool) -> bool {
++    match pending.key {
++        CloseKey::Enter => pending.was_composing,
++        CloseKey::Escape => pending.was_composing && !currently_composing,
++    }
++}
++
++fn modifier_bits_from_keyup(keystroke: &gpui::Keystroke) -> i32 {
++    modifier_bits(keystroke)
++}
++
++fn is_unqualified_clipboard_shortcut(keystroke: &gpui::Keystroke) -> bool {
++    (keystroke.modifiers.control || keystroke.modifiers.platform)
++        && matches!(keystroke.key.to_ascii_lowercase().as_str(), "c" | "v" | "x")
++}
++
++fn map_key(keystroke: &gpui::Keystroke) -> Option<KeyMap<'_>> {
++    let key = keystroke.key.as_str();
++    let modifiers = keystroke.modifiers;
++    let no_text_modifier = !modifiers.control && !modifiers.platform;
++    Some(match key {
++        "enter" => KeyMap {
++            tag: 1,
++            shared_text: "",
++            insert_text: None,
++        },
++        "escape" => KeyMap {
++            tag: 2,
++            shared_text: "",
++            insert_text: None,
++        },
++        "backspace" => KeyMap {
++            tag: 3,
++            shared_text: "",
++            insert_text: None,
++        },
++        "delete" => KeyMap {
++            tag: 4,
++            shared_text: "",
++            insert_text: None,
++        },
++        "tab" => KeyMap {
++            tag: 5,
++            shared_text: "",
++            insert_text: None,
++        },
++        "left" => KeyMap {
++            tag: 6,
++            shared_text: "",
++            insert_text: None,
++        },
++        "right" => KeyMap {
++            tag: 7,
++            shared_text: "",
++            insert_text: None,
++        },
++        "up" => KeyMap {
++            tag: 8,
++            shared_text: "",
++            insert_text: None,
++        },
++        "down" => KeyMap {
++            tag: 9,
++            shared_text: "",
++            insert_text: None,
++        },
++        "home" => KeyMap {
++            tag: 10,
++            shared_text: "",
++            insert_text: None,
++        },
++        "end" => KeyMap {
++            tag: 11,
++            shared_text: "",
++            insert_text: None,
++        },
++        "pageup" => KeyMap {
++            tag: 12,
++            shared_text: "",
++            insert_text: None,
++        },
++        "pagedown" => KeyMap {
++            tag: 13,
++            shared_text: "",
++            insert_text: None,
++        },
++        "space" if no_text_modifier => KeyMap {
++            tag: 14,
++            shared_text: " ",
++            insert_text: Some(keystroke.key_char.as_deref().unwrap_or(" ")),
++        },
++        "space" => KeyMap {
++            tag: 14,
++            shared_text: " ",
++            insert_text: None,
++        },
++        _ => {
++            let shared_text = if no_text_modifier {
++                keystroke.key_char.as_deref().unwrap_or(key)
++            } else {
++                key
++            };
++            if shared_text.chars().count() != 1 {
++                return None;
++            }
++            KeyMap {
++                tag: 15,
++                shared_text,
++                insert_text: if no_text_modifier {
++                    keystroke
++                        .key_char
++                        .as_deref()
++                        .filter(|text| !text.is_empty())
++                } else {
++                    None
++                },
++            }
++        }
++    })
++}
++
++fn utf16_range_to_bytes(text: &str, range: Range<usize>) -> Option<Range<usize>> {
++    if range.start > range.end {
++        return None;
++    }
++    fn byte_for_offset(text: &str, target: usize) -> Option<usize> {
++        let mut utf16 = 0;
++        for (byte, scalar) in text.char_indices() {
++            if utf16 == target {
++                return Some(byte);
++            }
++            utf16 += scalar.len_utf16();
++            if utf16 > target {
++                return None;
++            }
++        }
++        (utf16 == target).then_some(text.len())
++    }
++    Some(byte_for_offset(text, range.start)?..byte_for_offset(text, range.end)?)
++}
++
++impl CloseKey {
++    fn try_from_tag(tag: i32) -> Option<Self> {
++        match tag {
++            1 => Some(Self::Enter),
++            2 => Some(Self::Escape),
++            _ => None,
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn range_adapter_rejects_utf16_surrogate_interiors() {
++        assert_eq!(utf16_range_to_bytes("a😀b", 1..3), Some(1..5));
++        assert_eq!(utf16_range_to_bytes("a😀b", 2..3), None);
++        assert_eq!(utf16_range_to_bytes("a😀b", 1..2), None);
++    }
++
++    #[test]
++    fn close_key_release_matches_only_stable_terminal_keys() {
++        assert!(CloseKey::Enter.matches("enter"));
++        assert!(!CloseKey::Enter.matches("?"));
++        assert!(CloseKey::Escape.matches("escape"));
++    }
++
++    #[test]
++    fn composing_enter_release_survives_commit_before_key_up() {
++        let first = PendingRelease {
++            key: CloseKey::Enter,
++            was_composing: true,
++            keydown_modifiers: 0,
++        };
++        assert!(delayed_press_is_repeat(first, false));
++        let fresh = PendingRelease {
++            was_composing: false,
++            ..first
++        };
++        assert!(!delayed_press_is_repeat(fresh, false));
++    }
++
++    #[test]
++    fn composing_escape_cancels_once_then_a_fresh_escape_can_dismiss() {
++        let first = PendingRelease {
++            key: CloseKey::Escape,
++            was_composing: true,
++            keydown_modifiers: 0,
++        };
++        assert!(!delayed_press_is_repeat(first, true));
++        assert!(delayed_press_is_repeat(first, false));
++        let fresh = PendingRelease {
++            was_composing: false,
++            ..first
++        };
++        assert!(!delayed_press_is_repeat(fresh, false));
++    }
++
++    #[test]
++    fn control_selection_and_undo_keys_have_logical_characters_without_text_insert() {
++        for key in ["a", "z", "y"] {
++            let event = gpui::Keystroke {
++                modifiers: gpui::Modifiers {
++                    control: true,
++                    ..Default::default()
++                },
++                key: key.to_owned(),
++                key_char: None,
++            };
++            let mapped = map_key(&event).unwrap();
++            assert_eq!(mapped.tag, 15);
++            assert_eq!(mapped.shared_text, key);
++            assert!(mapped.insert_text.is_none());
++        }
++    }
++
++    #[test]
++    fn printable_and_clipboard_shortcuts_have_separate_policies() {
++        let letter = gpui::Keystroke {
++            modifiers: Default::default(),
++            key: "a".to_owned(),
++            key_char: Some("a".to_owned()),
++        };
++        let mapped = map_key(&letter).unwrap();
++        assert_eq!(mapped.insert_text, Some("a"));
++        let cut = gpui::Keystroke {
++            modifiers: gpui::Modifiers {
++                control: true,
++                ..Default::default()
++            },
++            key: "x".to_owned(),
++            key_char: None,
++        };
++        assert!(is_unqualified_clipboard_shortcut(&cut));
++        assert_eq!(map_key(&cut).unwrap().shared_text, "x");
++    }
++
++    #[test]
++    fn query_geometry_applies_field_origin_padding_run_origin_and_scroll_once() {
++        let mut geometry = [0.0; 19];
++        geometry[4] = 4.0;
++        geometry[5] = 4.0;
++        geometry[8] = 11.0;
++        geometry[13] = 2.0;
++        geometry[14] = 1.0;
++        assert_eq!(query_x_offset(&geometry), -5.0);
++        assert_eq!(query_global_x(px(500.0), &geometry), px(495.0));
++    }
++
++    #[test]
++    fn delayed_close_press_keeps_keydown_modifiers_until_release() {
++        let down = gpui::Keystroke {
++            modifiers: gpui::Modifiers {
++                control: true,
++                ..Default::default()
++            },
++            key: "enter".to_owned(),
++            key_char: None,
++        };
++        let up = gpui::Keystroke {
++            modifiers: Default::default(),
++            key: "enter".to_owned(),
++            key_char: None,
++        };
++        let pending = PendingRelease {
++            key: CloseKey::Enter,
++            was_composing: false,
++            keydown_modifiers: modifier_bits(&down),
++        };
++        assert_eq!(pending.keydown_modifiers, 2);
++        assert_eq!(modifier_bits_from_keyup(&up), 0);
++    }
++}

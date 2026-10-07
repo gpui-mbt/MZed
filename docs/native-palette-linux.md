@@ -1,9 +1,13 @@
 # Linux command palette profile
 
 This document describes the bounded MZed integration work. The pinned derived
-Zed package has passed a serial compile/link check. The app has not been
-launched, and real compositor input has not been exercised, so this is not a
-Linux IME or issue 0019 qualification.
+Zed package passed a serial compile/link check. In a dedicated X11 profile, the
+MZed palette opened in the existing Zed window, rendered its field and selected
+command row legibly, accepted a keyboard query, filtered to `Open Settings File`,
+and closed cleanly. The query `Settings` matched; lowercase `settings`
+did not, because the pinned shared picker currently filters case-sensitively.
+This smoke covers the X11 window, palette, query, and close path. Wayland and
+IME input have not been qualified.
 
 The Linux-only palette is mounted as a modal in the existing Zed window when
 `MZED_NATIVE_PALETTE=1` and opened with `Ctrl+Alt+Shift+P`. The Rust view owns
@@ -39,14 +43,16 @@ The following paths remain outside this profile:
   grapheme clusters, merged glyphs, missing glyphs, and non-monotone caret
   stops. The host uses GPUI shaping; it makes no Pango-equivalence or complete
   native raster-admission claim.
-- Only the pinned Linux/Wayland path is under consideration. X11, other
-  compositors, seat hot-unplug, macOS, Windows, and accessibility behavior are
-  not qualified by the linked ABI tests.
+- The observed runtime smoke used X11. Wayland text-input-v3, other
+  compositors, seat hot-unplug, macOS, Windows, and accessibility behavior
+  remain unqualified.
 
 The linked C tests exercise the copied MoonBit ABI, Unicode boundaries,
 composition transactions, and delayed Enter/Escape state transitions. The
 derived Zed package compile/link check confirms the Rust host graph builds, but
 the linked tests and compile do not execute the Rust ModalLayer, GPUI keybinding
-interceptor, Wayland client, or an IME. A dedicated Linux profile/window
-startup and close smoke, followed by real IBus/Mozc input checks, is still
-needed before making runtime or IME qualification claims.
+interceptor, Wayland client, or an IME. A dedicated Linux X11 profile/window
+smoke exercised the mounted palette, visible keyboard query/filter result, and
+close path with exit code 0. It does not qualify Wayland text-input-v3 or real
+IBus/Mozc input; those still need separate checks before claiming Wayland
+runtime or IME qualification.

@@ -23,11 +23,14 @@ use super::{
 const PALETTE_WIDTH: f32 = 640.0;
 const PALETTE_HEIGHT: f32 = 276.0;
 const FIELD_WIDTH: f32 = 608.0;
-const FIELD_HEIGHT: f32 = 32.0;
+const INITIAL_FIELD_HEIGHT: f64 = 128.0;
 const FIELD_X: f32 = 16.0;
 const FIELD_Y: f32 = 12.0;
-const ROW_TOP: f32 = 56.0;
+const FIELD_ROW_GAP: f32 = 12.0;
 const ROW_HEIGHT: f32 = 24.0;
+const MAX_VISIBLE_ROWS: usize = 8;
+const MAX_PALETTE_FIELD_HEIGHT: f32 =
+    PALETTE_HEIGHT - FIELD_Y - FIELD_ROW_GAP - MAX_VISIBLE_ROWS as f32 * ROW_HEIGHT;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CloseKey {
@@ -70,6 +73,15 @@ struct StyleStamp {
     font_size_bits: u32,
     line_height_bits: u32,
     scale_bits: u32,
+    color_bits: [u32; 4],
+}
+
+#[derive(Clone)]
+struct PaletteTextStyle {
+    text_style: gpui::TextStyle,
+    font_size: Pixels,
+    line_height: Pixels,
+    stamp: StyleStamp,
 }
 
 #[derive(Clone)]
@@ -108,6 +120,7 @@ pub struct PaletteView {
     window_id: WindowId,
     view_entity_id: gpui::EntityId,
     style: StyleStamp,
+    palette_text_style: Option<PaletteTextStyle>,
     snapshot: Option<PaletteSnapshot>,
     query_shape: Option<ShapeData>,
     last_field_bounds: Option<Bounds<Pixels>>,
@@ -133,31 +146,9 @@ impl PaletteView {
         cx: &mut Context<Self>,
     ) -> Self {
         let focus = cx.focus_handle();
-        let initial_shape = shape_text("", window).ok();
-        let native = initial_shape.as_ref().and_then(|shape| {
-            NativePalette::new(
-                PaletteMetrics {
-                    ints: &shape.metrics_ints,
-                    doubles: &shape.metrics_doubles,
-                },
-                f64::from(FIELD_WIDTH),
-                f64::from(FIELD_HEIGHT),
-                f64::from(shape.font_size),
-            )
-            .map_err(|error| log::error!("MZed palette owner open failed: {error}"))
-            .ok()
-        });
-        let snapshot = native.as_ref().and_then(|owner| match owner.snapshot() {
-            Ok(value) => Some(value),
-            Err(error) => {
-                log::error!("MZed palette initial snapshot failed: {error}");
-                None
-            }
-        });
-        let style = initial_shape
-            .as_ref()
-            .map(|shape| shape.style.clone())
-            .unwrap_or_else(|| style_stamp(window));
+        // Workspace dispatch and modal prepaint use different text styles:
+        // shape only once the view is mounted in its actual frame.
+        let style = style_stamp(window);
         let window_id = window.window_handle().window_id();
         let workspace_id = workspace.upgrade().map(|workspace| workspace.entity_id());
         let view_entity_id = cx.entity_id();
@@ -191,15 +182,16 @@ impl PaletteView {
                 }
             });
         Self {
-            native,
+            native: None,
             focus,
             workspace,
             workspace_id,
             window_id,
             view_entity_id,
             style,
-            snapshot,
-            query_shape: initial_shape,
+            palette_text_style: None,
+            snapshot: None,
+            query_shape: None,
             last_field_bounds: None,
             pending_release: None,
             terminal: false,
@@ -305,7 +297,8 @@ impl PaletteView {
                     self.native.as_mut()?.abort_pending(pending).ok();
                     return None;
                 }
-                let shape = match shape_text(&text, window) {
+                let palette_text_style = self.palette_text_style.as_ref()?;
+                let shape = match shape_text_with_style(&text, window, palette_text_style) {
                     Ok(value) if value.style == self.style => value,
                     Ok(_) | Err(_) => {
                         self.native.as_mut()?.abort_pending(pending).ok();
@@ -494,41 +487,83 @@ impl PaletteView {
     }
 
     fn prepare(&mut self, bounds: Bounds<Pixels>, window: &mut Window) -> Option<PaletteFrame> {
-        let stamp = style_stamp(window);
-        if stamp != self.style {
-            self.suspended = true;
-        }
         if self.suspended || self.terminal {
             return None;
         }
-        let snapshot = self
+        if self.native.is_none() {
+            if !self.initialize_for_frame(window) {
+                return None;
+            }
+        }
+        let stamp = style_stamp(window);
+        if stamp != self.style {
+            log::error!(
+                "MZed palette suspended after text style changed: initial={:?}, frame={:?}",
+                self.style,
+                stamp
+            );
+            self.suspended = true;
+            return None;
+        }
+        let Some(snapshot) = self
             .snapshot
             .clone()
-            .or_else(|| self.native.as_ref()?.snapshot().ok())?;
-        let owner = self.native.as_ref()?;
-        let geometry = owner.geometry().ok()?;
+            .or_else(|| self.native.as_ref().and_then(|owner| owner.snapshot().ok()))
+        else {
+            log::error!("MZed palette frame has no shared snapshot");
+            return None;
+        };
+        let Some(owner) = self.native.as_ref() else {
+            log::error!("MZed palette frame has no native owner");
+            return None;
+        };
+        let geometry = match owner.geometry() {
+            Ok(geometry) => geometry,
+            Err(error) => {
+                log::error!("MZed palette frame geometry failed: {error}");
+                return None;
+            }
+        };
+        let palette_text_style = self.palette_text_style.as_ref()?.clone();
         let query = match self.query_shape.clone() {
             Some(shape)
                 if shape.style == stamp && snapshot.displayed == shape.line.text.as_ref() =>
             {
                 shape
             }
-            _ => shape_text(&snapshot.displayed, window).ok()?,
+            _ => match shape_text_with_style(&snapshot.displayed, window, &palette_text_style) {
+                Ok(shape) => shape,
+                Err(error) => {
+                    log::error!("MZed palette query shaping failed: {error}");
+                    return None;
+                }
+            },
         };
         let field_bounds = Bounds::new(
-            bounds.origin + point(px(FIELD_X), px(FIELD_Y)),
-            size(px(FIELD_WIDTH), px(FIELD_HEIGHT)),
+            bounds.origin
+                + point(
+                    px(FIELD_X + geometry[0] as f32),
+                    px(FIELD_Y + geometry[1] as f32),
+                ),
+            size(px(geometry[2] as f32), px(geometry[3] as f32)),
         );
         let content_bounds = Bounds::new(
             field_bounds.origin + point(px(geometry[4] as f32), px(geometry[5] as f32)),
             size(px(geometry[6] as f32), px(geometry[7] as f32)),
         );
         self.last_field_bounds = Some(field_bounds);
+        let row_top = FIELD_Y + geometry[1] as f32 + geometry[3] as f32 + FIELD_ROW_GAP;
         let mut rows = Vec::with_capacity(snapshot.rows.len());
         for (index, row) in snapshot.rows.iter().enumerate() {
-            let shape = shape_row_label(&row.label, window).ok()?;
+            let shape = match shape_row_label_with_style(&row.label, window, &palette_text_style) {
+                Ok(shape) => shape,
+                Err(error) => {
+                    log::error!("MZed palette row shaping failed: {error}");
+                    return None;
+                }
+            };
             let row_bounds = Bounds::new(
-                bounds.origin + point(px(FIELD_X), px(ROW_TOP + ROW_HEIGHT * index as f32)),
+                bounds.origin + point(px(FIELD_X), px(row_top + ROW_HEIGHT * index as f32)),
                 size(px(FIELD_WIDTH), px(ROW_HEIGHT)),
             );
             rows.push((shape, row.selected, row_bounds));
@@ -558,13 +593,18 @@ impl PaletteView {
         let content = frame.content_bounds;
         let text_origin = field.origin + query_text_offset(&frame.geometry);
         let field_bg = Bounds::new(field.origin, field.size);
+        let colors = cx.theme().colors();
+        let field_color = colors.element_background;
+        let selection_color = colors.element_selection_background;
+        let caret_color = colors.text;
+        let selected_row_color = colors.ghost_element_selected;
         let mut paint_ok = true;
         window.with_content_mask(
             Some(ContentMask {
                 bounds: frame.bounds,
             }),
             |window| {
-                window.paint_quad(fill(field_bg, rgb(0x1f2329)));
+                window.paint_quad(fill(field_bg, field_color));
                 window.with_content_mask(Some(ContentMask { bounds: content }), |window| {
                     if let (Some(start), Some(end)) = (
                         frame
@@ -583,7 +623,7 @@ impl PaletteView {
                                 text_origin + point(px(start.x.min(end.x)), px(0.0)),
                                 size(px((end.x - start.x).abs()), content.size.height),
                             );
-                            window.paint_quad(fill(selected, rgb(0x365389)));
+                            window.paint_quad(fill(selected, selection_color));
                         }
                     }
                     if let Some(marked) = frame.snapshot.marked.as_ref() {
@@ -629,12 +669,12 @@ impl PaletteView {
                     );
                     if frame.input_ready && frame.snapshot.anchor_utf16 == frame.snapshot.head_utf16
                     {
-                        window.paint_quad(fill(caret, rgb(0xd7dae0)));
+                        window.paint_quad(fill(caret, caret_color));
                     }
                 });
                 for (shape, selected, bounds) in &frame.rows {
                     if *selected {
-                        window.paint_quad(fill(*bounds, rgb(0x303943)));
+                        window.paint_quad(fill(*bounds, selected_row_color));
                     }
                     let row_origin = bounds.origin + point(px(6.0), px(2.0));
                     if shape
@@ -676,7 +716,8 @@ impl PaletteView {
         {
             return Some(shape.clone());
         }
-        let shape = shape_text(&snapshot.displayed, window).ok()?;
+        let palette_text_style = self.palette_text_style.as_ref()?;
+        let shape = shape_text_with_style(&snapshot.displayed, window, palette_text_style).ok()?;
         if shape.style != self.style {
             self.suspended = true;
             return None;
@@ -897,6 +938,40 @@ impl PaletteView {
                 .as_ref()
                 .is_some_and(|snapshot| snapshot.is_open)
     }
+
+    fn initialize_for_frame(&mut self, window: &mut Window) -> bool {
+        let palette_text_style = capture_palette_text_style(window);
+        let shape = match shape_text_with_style("", window, &palette_text_style) {
+            Ok(shape) => shape,
+            Err(error) => {
+                log::error!("MZed palette initial shaping failed: {error}");
+                self.suspended = true;
+                return false;
+            }
+        };
+        log::info!(
+            "MZed palette initialized with frame style: {:?}",
+            palette_text_style.stamp
+        );
+        let Some(owner) = open_native_palette_with_measured_height(&shape) else {
+            self.suspended = true;
+            return false;
+        };
+        let snapshot = match owner.snapshot() {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                log::error!("MZed palette initial snapshot failed: {error}");
+                self.suspended = true;
+                return false;
+            }
+        };
+        self.style = palette_text_style.stamp.clone();
+        self.palette_text_style = Some(palette_text_style);
+        self.query_shape = Some(shape);
+        self.snapshot = Some(snapshot);
+        self.native = Some(owner);
+        true
+    }
 }
 
 impl Render for PaletteView {
@@ -919,10 +994,11 @@ impl Render for PaletteView {
             .w(px(PALETTE_WIDTH))
             .h(px(PALETTE_HEIGHT))
             .bg(theme.colors().elevated_surface_background)
+            .text_color(theme.colors().text)
             .border_1()
             .border_color(theme.colors().border_variant)
             .rounded_md();
-        if self.suspended || self.native.is_none() {
+        if self.suspended {
             root = root.child(
                 div()
                     .p_4()
@@ -933,7 +1009,14 @@ impl Render for PaletteView {
                 canvas(
                     move |bounds, window, cx| {
                         weak_prepare
-                            .update(cx, |this, _cx| this.prepare(bounds, window))
+                            .update(cx, |this, cx| {
+                                let was_suspended = this.suspended;
+                                let frame = this.prepare(bounds, window);
+                                if !was_suspended && this.suspended {
+                                    cx.notify();
+                                }
+                                frame
+                            })
                             .ok()
                             .flatten()
                     },
@@ -952,6 +1035,10 @@ impl Render for PaletteView {
 }
 
 fn style_stamp(window: &Window) -> StyleStamp {
+    capture_palette_text_style(window).stamp
+}
+
+fn capture_palette_text_style(window: &Window) -> PaletteTextStyle {
     let text_style = window.text_style();
     let font_size = text_style.font_size.to_pixels(window.rem_size());
     let line_height = window.pixel_snap(
@@ -959,15 +1046,102 @@ fn style_stamp(window: &Window) -> StyleStamp {
             .line_height
             .to_pixels(font_size.into(), window.rem_size()),
     );
-    StyleStamp {
+    let stamp = StyleStamp {
         font: format!("{:?}", text_style.font()),
         font_size_bits: font_size.as_f32().to_bits(),
         line_height_bits: line_height.as_f32().to_bits(),
         scale_bits: window.scale_factor().to_bits(),
+        color_bits: [
+            text_style.color.h.to_bits(),
+            text_style.color.s.to_bits(),
+            text_style.color.l.to_bits(),
+            text_style.color.a.to_bits(),
+        ],
+    };
+    PaletteTextStyle {
+        text_style,
+        font_size,
+        line_height,
+        stamp,
     }
 }
 
-fn shape_text(text: &str, window: &Window) -> Result<ShapeData, &'static str> {
+fn open_native_palette_with_measured_height(shape: &ShapeData) -> Option<NativePalette> {
+    let mut owner = match NativePalette::new(
+        PaletteMetrics {
+            ints: &shape.metrics_ints,
+            doubles: &shape.metrics_doubles,
+        },
+        f64::from(FIELD_WIDTH),
+        INITIAL_FIELD_HEIGHT,
+        f64::from(shape.font_size),
+    ) {
+        Ok(owner) => owner,
+        Err(error) => {
+            log::error!("MZed palette owner open failed: {error}");
+            return None;
+        }
+    };
+    let geometry = match owner.geometry() {
+        Ok(geometry) => geometry,
+        Err(error) => {
+            log::error!("MZed palette initial geometry failed: {error}");
+            return None;
+        }
+    };
+    let field_height = geometry[3];
+    let content_height = geometry[7];
+    let vertical_inset = field_height - content_height;
+    let shared_run_height = geometry[18];
+    let line_height = f64::from(shape.line_height);
+    let font_size = f64::from(shape.font_size);
+    if !field_height.is_finite()
+        || !content_height.is_finite()
+        || !vertical_inset.is_finite()
+        || vertical_inset < 0.0
+        || !shared_run_height.is_finite()
+        || shared_run_height < 0.0
+        || !line_height.is_finite()
+        || !font_size.is_finite()
+    {
+        log::error!("MZed palette produced non-finite or negative field geometry");
+        return None;
+    }
+    let required_content_height = line_height.max(font_size).max(shared_run_height);
+    let required_field_height = (required_content_height + vertical_inset).max(24.0);
+    let max_field_height = f64::from(MAX_PALETTE_FIELD_HEIGHT);
+    log::info!(
+        "MZed palette field geometry: line_height_px={line_height:.3}, font_size_px={font_size:.3}, shared_run_height_px={shared_run_height:.3}, shared_vertical_inset_px={vertical_inset:.3}, requested_field_height_px={required_field_height:.3}, max_field_height_px={max_field_height:.3}"
+    );
+    if required_field_height > max_field_height {
+        log::error!("MZed palette field does not fit the bounded 8-row panel");
+        return None;
+    }
+    if let Err(error) = owner.resize(f64::from(FIELD_WIDTH), required_field_height) {
+        log::error!("MZed palette field resize failed: {error}");
+        return None;
+    }
+    let resized = match owner.geometry() {
+        Ok(geometry) => geometry,
+        Err(error) => {
+            log::error!("MZed palette resized geometry failed: {error}");
+            return None;
+        }
+    };
+    if (resized[3] - required_field_height).abs() > 0.01
+        || resized[7] + 0.01 < required_content_height
+    {
+        log::error!("MZed palette shared field geometry did not retain the requested line height");
+        return None;
+    }
+    Some(owner)
+}
+
+fn shape_text_with_style(
+    text: &str,
+    window: &Window,
+    palette_style: &PaletteTextStyle,
+) -> Result<ShapeData, &'static str> {
     if text.len() > super::palette_protocol::PALETTE_MAX_QUERY_BYTES
         || text.contains('\n')
         || text.contains('\r')
@@ -998,14 +1172,10 @@ fn shape_text(text: &str, window: &Window) -> Result<ShapeData, &'static str> {
             return Err("bidirectional text is not admitted");
         }
     }
-    let stamp = style_stamp(window);
-    let text_style = window.text_style();
-    let font_size = text_style.font_size.to_pixels(window.rem_size());
-    let line_height = window.pixel_snap(
-        text_style
-            .line_height
-            .to_pixels(font_size.into(), window.rem_size()),
-    );
+    let stamp = palette_style.stamp.clone();
+    let text_style = &palette_style.text_style;
+    let font_size = palette_style.font_size;
+    let line_height = palette_style.line_height;
     if font_size.as_f32() <= 0.0 || line_height.as_f32() <= 0.0 {
         return Err("invalid text style");
     }
@@ -1097,15 +1267,15 @@ fn shape_text(text: &str, window: &Window) -> Result<ShapeData, &'static str> {
     })
 }
 
-fn shape_row_label(text: &str, window: &Window) -> Result<ShapeData, &'static str> {
-    let style = style_stamp(window);
-    let text_style = window.text_style();
-    let font_size = text_style.font_size.to_pixels(window.rem_size());
-    let line_height = window.pixel_snap(
-        text_style
-            .line_height
-            .to_pixels(font_size.into(), window.rem_size()),
-    );
+fn shape_row_label_with_style(
+    text: &str,
+    window: &Window,
+    palette_style: &PaletteTextStyle,
+) -> Result<ShapeData, &'static str> {
+    let style = palette_style.stamp.clone();
+    let text_style = &palette_style.text_style;
+    let font_size = palette_style.font_size;
+    let line_height = palette_style.line_height;
     if font_size.as_f32() <= 0.0 || line_height.as_f32() <= 0.0 {
         return Err("invalid row text style");
     }
