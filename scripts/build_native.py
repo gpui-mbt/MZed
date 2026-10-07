@@ -8,7 +8,8 @@ import subprocess
 import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
-GPUI_COMMIT = 'bf965aebbeb1dfdfed26373d4a7a58bb51a5ad01'
+GPUI_COMMIT = '72d89475894e14f3fea9a3407e12a640da356ed9'
+GPUI_TREE = 'f91c255f5bd18e2d7ca84df4e73d96f240837995'
 COMPILER = '0.10.14+7d59c7ec9'
 
 
@@ -21,6 +22,9 @@ def build(source, output, mode):
     actual = subprocess.check_output(['git', '-C', str(source), 'rev-parse', 'HEAD'], text=True).strip()
     if actual != GPUI_COMMIT:
         raise ValueError('gpui.mbt source does not match reviewed pin')
+    actual_tree = subprocess.check_output(['git', '-C', str(source), 'rev-parse', 'HEAD^{tree}'], text=True).strip()
+    if actual_tree != GPUI_TREE:
+        raise ValueError('gpui.mbt source tree does not match qualified tree')
     if subprocess.check_output(['git', '-C', str(source), 'status', '--porcelain'], text=True).strip():
         raise ValueError('preserve modified gpui.mbt; use a fresh checkout')
     if not (ROOT / "native/island.mbt").is_file():
@@ -35,24 +39,47 @@ def build(source, output, mode):
     if core_version != COMPILER:
         raise ValueError('MoonBit core does not match pinned version')
     core = home / 'lib/core/_build/native/release/bundle'
-    packages = [('primitives', []), ('layout', ['primitives']), ('scene', ['primitives']),
-                ('element', ['primitives', 'layout', 'scene'])]
-    for package, dependencies in packages:
-        files = sorted(p for p in (source / package).glob('*.mbt') if not p.name.endswith('_test.mbt'))
+    packages = [
+        ('primitives', 'primitives', []),
+        ('layout', 'layout', ['primitives']),
+        ('scene', 'scene', ['primitives']),
+        ('text', 'text', []),
+        ('text_layout', 'text_layout', ['primitives', 'text']),
+        ('element', 'element', ['primitives', 'layout', 'scene']),
+        ('diagnostics', 'diagnostics', []),
+        ('core', 'core', ['diagnostics']),
+        ('capability', 'capability', ['core', 'diagnostics']),
+        ('controls/text_field', 'text_field',
+         ['primitives', 'text', 'text_layout', 'scene', 'element']),
+        ('controls/command_palette', 'command_palette',
+         ['primitives', 'text', 'text_layout', 'text_field', 'element',
+          'capability', 'diagnostics', 'scene']),
+    ]
+    artifacts = {
+        alias: artifact
+        for package, artifact, _ in packages
+        for alias in (package, artifact)
+    }
+    for package, artifact, dependencies in packages:
+        files = sorted(
+            p for p in (source / package).glob('*.mbt')
+            if not p.name.endswith(('_test.mbt', '_wbtest.mbt'))
+        )
         argv = [compiler, 'build-package', *files, '-pkg', 'f4ah6o/gpui/' + package,
                 '-pkg-type', 'library', '-target', 'native', '-std-path', core,
-                '-i', str(core / 'prelude/prelude.mi') + ':prelude', '-o', output / (package + '.core')]
+                '-i', str(core / 'prelude/prelude.mi') + ':prelude', '-o', output / (artifact + '.core')]
         for dependency in dependencies:
-            argv += ['-i', str(output / (dependency + '.mi')) + ':' + dependency]
+            argv += ['-i', str(output / (artifacts[dependency] + '.mi')) + ':' + dependency]
         run(argv)
-    argv = [compiler, 'build-package', ROOT / 'native/island.mbt', '-pkg', 'mzed/native_island',
+    argv = [compiler, 'build-package', ROOT / 'native/island.mbt', ROOT / 'native/palette.mbt',
+            '-pkg', 'mzed/native_island',
             '-pkg-type', 'foreign_library', '-target', 'native', '-std-path', core,
             '-i', str(core / 'prelude/prelude.mi') + ':prelude', '-o', output / 'island.core']
-    for package, _ in packages:
-        argv += ['-i', str(output / (package + '.mi')) + ':' + package]
+    for package, artifact, _ in packages:
+        argv += ['-i', str(output / (artifact + '.mi')) + ':' + package.split('/')[-1]]
     run(argv)
     run([compiler, 'link-core', core / 'abort/abort.core', core / 'core.core',
-         *[output / (package + '.core') for package, _ in packages], output / 'island.core',
+         *[output / (artifact + '.core') for _, artifact, _ in packages], output / 'island.core',
          '-main', 'mzed/native_island', '-target', 'native', '-o', output / 'island.c'])
     flags = ['-std=gnu11', '-O2', '-g', '-fwrapv', '-fno-strict-aliasing',
              '-ffunction-sections', '-fdata-sections', '-I' + str(home / 'include')]
@@ -68,6 +95,7 @@ def build(source, output, mode):
         objects.append(obj)
     run(['ar', 'crs', output / 'libmzed_native.a', *objects])
     (output / 'build.json').write_text(json.dumps({'schema': 1, 'gpui_commit': actual,
+        'gpui_tree': actual_tree,
         'compiler': version, 'core_version': core_version, 'mode': mode, 'native_library': str(output / 'libmzed_native.a')}, indent=2) + '\n')
 
 
