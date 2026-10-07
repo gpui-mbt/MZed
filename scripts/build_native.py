@@ -60,6 +60,7 @@ def build(source, output, mode):
         for package, artifact, _ in packages
         for alias in (package, artifact)
     }
+    strict_import_packages = {'text', 'controls/text_field', 'controls/command_palette'}
     for package, artifact, dependencies in packages:
         files = sorted(
             p for p in (source / package).glob('*.mbt')
@@ -70,6 +71,10 @@ def build(source, output, mode):
                 '-i', str(core / 'prelude/prelude.mi') + ':prelude', '-o', output / (artifact + '.core')]
         for dependency in dependencies:
             argv += ['-i', str(output / (artifacts[dependency] + '.mi')) + ':' + dependency]
+        if package in strict_import_packages:
+            # These package manifests declare moonbitlang/core/int. Keep the
+            # manual build hermetic and reject implicit package resolution.
+            argv += ['-i', str(core / 'int/int.mi') + ':int', '-w', '@a']
         run(argv)
     argv = [compiler, 'build-package', ROOT / 'native/island.mbt', ROOT / 'native/palette.mbt',
             '-pkg', 'mzed/native_island',
