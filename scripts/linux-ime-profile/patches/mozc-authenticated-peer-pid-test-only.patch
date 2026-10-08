@@ -1,0 +1,93 @@
+diff --git a/src/ipc/ipc.gyp b/src/ipc/ipc.gyp
+index a917ddc..06f0ba1 100644
+--- a/src/ipc/ipc.gyp
++++ b/src/ipc/ipc.gyp
+@@ -30,6 +30,7 @@
+ {
+   'variables': {
+     'relative_dir': 'ipc',
++    'mozc_test_log_authenticated_peer_pid%': 0,
+   },
+   'targets': [
+     {
+@@ -52,6 +53,11 @@
+         'ipc_protocol',
+       ],
+       'conditions': [
++        ['mozc_test_log_authenticated_peer_pid==1', {
++          'defines': [
++            'MOZC_TEST_AUTHENTICATED_PEER_PID',
++          ],
++        }],
+         ['target_platform=="Windows"', {
+           'dependencies': [
+             '../base/base.gyp:obfuscator_support',
+diff --git a/src/ipc/peer_pid_log_test.h b/src/ipc/peer_pid_log_test.h
+new file mode 100644
+index 0000000..d069c75
+--- /dev/null
++++ b/src/ipc/peer_pid_log_test.h
+@@ -0,0 +1,40 @@
++// Private, compile-gated peer-PID observation used only by the MZed Linux
++// integration profile. The emitted value is the numeric SO_PEERCRED peer PID.
++
++#ifndef MOZC_IPC_PEER_PID_LOG_TEST_H_
++#define MOZC_IPC_PEER_PID_LOG_TEST_H_
++
++#include <cerrno>
++#include <cstdio>
++#include <cstdlib>
++#include <string>
++#include <sys/types.h>
++#include <unistd.h>
++
++namespace mozc {
++namespace ipc_test {
++
++inline void MaybeLogAuthenticatedPeerPid(pid_t peer_pid,
++                                         bool expected_server_path_present) {
++#if defined(MOZC_TEST_AUTHENTICATED_PEER_PID)
++  const int saved_errno = errno;
++  if (peer_pid > 0 && expected_server_path_present) {
++    const char *expected_emitter_pid =
++        std::getenv("MOZC_TEST_FCITX_EMITTER_PID");
++    if (expected_emitter_pid != nullptr &&
++        std::to_string(static_cast<long>(::getpid())) == expected_emitter_pid) {
++      std::fprintf(stderr, "MOZC_TEST_AUTHENTICATED_UNIX_PEER_PID=%ld\n",
++                   static_cast<long>(peer_pid));
++    }
++  }
++  errno = saved_errno;
++#else
++  (void)peer_pid;
++  (void)expected_server_path_present;
++#endif
++}
++
++}  // namespace ipc_test
++}  // namespace mozc
++
++#endif  // MOZC_IPC_PEER_PID_LOG_TEST_H_
+diff --git a/src/ipc/unix_ipc.cc b/src/ipc/unix_ipc.cc
+index 91840e1..720e0a1 100644
+--- a/src/ipc/unix_ipc.cc
++++ b/src/ipc/unix_ipc.cc
+@@ -49,6 +49,7 @@
+ #include "base/thread.h"
+ #include "ipc/ipc.h"
+ #include "ipc/ipc_path_manager.h"
++#include "ipc/peer_pid_log_test.h"
+ #include "absl/status/status.h"
+ #include "absl/strings/str_format.h"
+ #include "absl/strings/string_view.h"
+@@ -285,6 +286,10 @@ void IPCClient::Init(const absl::string_view name,
+         last_ipc_error_ = IPC_INVALID_SERVER;
+         break;
+       }
++      // `pid` was read from SO_PEERCRED and has passed the existing UID and
++      // compiled-server-path checks. The test hook is compile-gated, requires
++      // the exact Fcitx emitter PID, and never logs request or input data.
++      ipc_test::MaybeLogAuthenticatedPeerPid(pid, !server_path.empty());
+       last_ipc_error_ = IPC_NO_ERROR;
+       connected_ = true;
+       break;

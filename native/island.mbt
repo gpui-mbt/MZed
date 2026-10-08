@@ -234,6 +234,7 @@ fn summarize_scene(
                 alpha: color.alpha(),
               })
             }
+          @scene.SceneItem::TextItem(..) | @scene.SceneItem::TextRunItem(..) => Err(-12)
         }
       }
     }

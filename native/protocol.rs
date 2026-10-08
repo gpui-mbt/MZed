@@ -50,10 +50,7 @@ fn success(status: i32) -> Result<(), i32> {
 
 impl Native {
     pub fn new(width: i32, height: i32) -> Result<Self, i32> {
-        let owner = OWNER.get_or_init(|| thread::current().id());
-        if *owner != thread::current().id() {
-            return Err(-20);
-        }
+        claim_runtime_owner()?;
         // The process owner is fixed before the first call; the facade is !Send/!Sync.
         success(unsafe { ffi::mzed_native_v1_init(1) })?;
         let (slot, generation) = SLOTS.with(|slots| {
@@ -143,6 +140,18 @@ impl Native {
             return Ok(());
         }
         self.dispatch(2, width, height)
+    }
+}
+
+/// Enforce one process-wide MoonBit runtime owner across every native facade.
+/// Each facade is independently !Send/!Sync, but separate first-use checks
+/// would still permit two threads to race the shared runtime initialization.
+pub(crate) fn claim_runtime_owner() -> Result<(), i32> {
+    let owner = OWNER.get_or_init(|| thread::current().id());
+    if *owner == thread::current().id() {
+        Ok(())
+    } else {
+        Err(-20)
     }
 }
 
