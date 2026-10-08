@@ -20,28 +20,50 @@ registries, missing DBus, and a `timed out waiting on app_will_quit` error at
 shutdown. The smoke covers normal keyboard events and palette open/query/dismiss
 on the nested Wayland session; it did not exercise IME behavior.
 
-A separate nested Wayland IME smoke used the pinned `ZED_STATELESS=1` diagnostic
-path, which uses in-memory databases and skips the Linux single-instance
-listener. With nested Fcitx5 running and its Mozc addon loaded, the palette
-displayed `にほんご` preedit and candidate choices; Escape canceled composition
-while keeping the palette open; Space and Return committed `日本語`; a fresh
-Escape dismissed the palette.
-This demonstrates visible Japanese preedit, cancel, and commit behavior in the
-tested nested profile. The selected Fcitx engine was not independently
-confirmed by the saved status command, and a direct Fcitx-to-Mozc IPC identity
-trace was not captured. The Mozc server PID and executable were not captured
-while input was active.
+An earlier, separate nested Wayland IME run used the pinned `ZED_STATELESS=1`
+diagnostic path. It showed `にほんご` preedit and candidate choices, Escape
+cancellation while the palette stayed open, and a visible unmarked `日本語`
+state after Return followed by palette dismissal on Escape. Those screenshots
+and observations belong to that run only. They did not establish the exact
+commit callback or native event order, and they did not independently identify
+the active Fcitx engine or the connected Mozc process.
 
-The stateless run does not resolve the persistent-profile startup issue: the
-earlier normal run still reported `zed is already running`, and no bind errno
-was available in its log. The diagnostic is limited to its isolated profile
-and does not imply that all settings, logs, caches, or other files are
-disabled. Zed and the runner both exited with code 0, while Zed logged a
-`timed out waiting on app_will_quit` diagnostic. Fcitx logged a SIGTERM
-shutdown trace. After shutdown, a Mozc server was observed as a zombie with
-parent PID 1; a later check no longer found its process entry, but the
-reaping time and cause were not observed. This is not an error-free or
-complete-cleanup claim.
+A later run on 2026-10-08 used a fresh private profile and the same
+`ZED_STATELESS=1` diagnostic path, which uses in-memory databases and skips the
+Linux single-instance listener. The live nested compositor passed the
+text-input-v3 and input-method-v2 interface checks. Fcitx switched from its
+keyboard input method to Mozc, and the active context read back as Mozc. The
+actual Fcitx client connection reported a kernel peer identity that matched
+the retained, supervised Mozc child across 40 observed records. The existing
+UID and executable checks remained enabled. This verifies the observed
+connection peer for this run; it does not claim that no other Mozc process
+existed system-wide.
+
+The visible sequence was: `にほんご` preedit and candidates; Escape canceled
+composition and left the palette open; Space showed an underlined `日本語`
+conversion preview; Return left unmarked `日本語` visible with the palette
+still open; Escape then removed the palette. The shared filter behavior is
+consistent with Return committing the query, but the commit callback and exact
+native event order were not traced. No command was selected or dispatched.
+Only the preedit and cancellation screenshots from this run were retained.
+The Space, Return, Escape-dismissal, and post-exit images were observed during
+the run but were not saved as raw images, so they have no retained image hashes.
+The earlier run's screenshots are separate evidence and do not fill this gap.
+
+The later run ended through Ctrl+Q with Zed exit code 0 and a completed wait
+on its supervised child. The Fcitx monitor and both process supervisors also
+exited successfully. The owned Mozc child was stopped and reaped by its
+supervisor; a cleanup readback found no remaining tracked run processes or
+private sockets. This is a bounded normal-exit result for the isolated run,
+not a claim of error-free shutdown on every profile.
+
+The stateless runs do not resolve persistent-profile startup. An earlier
+normal-profile launch reported `zed is already running`, but its log did not
+expose the underlying bind errno. A separate socket diagnostic was denied by
+the environment with `EPERM`; that probe did not reproduce the Zed launch and
+does not identify its cause. No workaround was applied. `ZED_STATELESS=1` is
+limited to the isolated diagnostic profile: it does not disable all settings,
+logs, caches, or other files.
 
 The Linux-only palette is mounted as a modal in the existing Zed window when
 `MZED_NATIVE_PALETTE=1` and opened with `Ctrl+Alt+Shift+Z`. This avoids the
@@ -68,6 +90,9 @@ The following paths remain outside this profile:
 
 - Pointer input can focus the modal, but it does not place the caret, select
   query text, or activate command rows.
+- Runtime tests showed a filtered command row but did not activate a command.
+  `Open Settings File` execution and exactly-once action dispatch remain
+  unqualified.
 - Clipboard shortcuts C/V/X are consumed without editing. The ABI has no
   clipboard payload or success acknowledgement.
 - Arbitrary system selection changes and partial replacement ranges are not
@@ -91,7 +116,9 @@ derived Zed package compile/link check confirms the Rust host graph builds, but
 the linked tests and compile do not execute the Rust ModalLayer, GPUI keybinding
 interceptor, Wayland client, or an IME. The X11 and nested Wayland runs exercised
 the mounted palette, visible keyboard query/filter result, and dismissal. The
-separate stateless Wayland run also showed Japanese preedit, cancellation, and
-commit using Fcitx5/Mozc in the nested profile. Persistent-profile startup,
-direct Fcitx-to-Mozc IPC identity, selected-engine machine verification, and
-complete process reaping remain unqualified or incomplete as recorded above.
+stateless nested IME run adds observed Japanese preedit, cancellation,
+conversion display, an unmarked post-Return query, authenticated
+Fcitx-to-Mozc peer identity, and normal supervised exit for that run.
+Persistent-profile startup, exact commit callback/event ordering,
+selected-command execution, arbitrary system selection changes, and other
+compositor or hardware-renderer profiles remain unqualified.
