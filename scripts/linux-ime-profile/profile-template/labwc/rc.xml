@@ -1,0 +1,8 @@
+<?xml version="1.0"?>
+<labwc_config>
+  <core><decoration>server</decoration></core>
+  <keyboard>
+    <keybind key="A-F4"><action name="Close"/></keybind>
+    <keybind key="W-Escape"><action name="Exit"/></keybind>
+  </keyboard>
+</labwc_config>

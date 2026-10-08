@@ -15,6 +15,7 @@ The native CI result must be inspected before calling that baseline qualified.
 - [Source pin and build procedure](docs/linux-baseline.md)
 - [Native seam investigation and remaining gates](docs/native-seam.md)
 - [Linux command palette profile and exclusions](docs/native-palette-linux.md)
+- [Linux IME test environment IaC](docs/linux-ime-environment.md)
 - [Machine-readable source lock](upstream.lock.json)
 
 Run the dependency-free harness tests:

@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+RUN=${MZED_RUN_ROOT:?MZED_RUN_ROOT must name this fresh run directory}
+PROFILE="$RUN/profile"
+PREFIX=${MZED_RUNTIME_PREFIX:?MZED_RUNTIME_PREFIX must name the private runtime prefix}
+BUNDLE="$RUN/runner"
+INNER="$RUN/run-session-inner.sh"
+INTEGRATION_MANIFEST="$RUN/integration-manifest.json"
+ZED=${MZED_ZED_BINARY:?MZED_ZED_BINARY must name the compiled MZed ELF}
+if [[ $# -gt 0 && ( "${1:-}" != "--test-fail-before-components" || $# != 1 ) ]]; then
+  echo "unsupported launcher argument" >&2
+  exit 2
+fi
+: "${DISPLAY:?managed outer X11 DISPLAY is required}"
+[[ -n "${XAUTHORITY:-}" && -r "$XAUTHORITY" ]] || { echo "managed XAUTHORITY is absent or unreadable" >&2; exit 2; }
+[[ -d "$PROFILE" && -d "$PROFILE/xdg-runtime" ]] || { echo "fresh private profile is missing" >&2; exit 2; }
+[[ ! -e "$PROFILE/xdg-runtime/wayland-0" && ! -L "$PROFILE/xdg-runtime/wayland-0" ]] || { echo "refusing to reuse an existing Wayland socket" >&2; exit 2; }
+[[ ! -e "$PROFILE/xdg-runtime/bus" && ! -L "$PROFILE/xdg-runtime/bus" ]] || { echo "refusing to reuse an existing D-Bus socket" >&2; exit 2; }
+python3 - "$RUN" "$INTEGRATION_MANIFEST" "$PREFIX" "$ZED" <<'PY'
+import hashlib, json, os, pathlib, re, sys
+run = pathlib.Path(sys.argv[1])
+manifest_path = pathlib.Path(sys.argv[2])
+prefix = pathlib.Path(sys.argv[3])
+requested_zed = pathlib.Path(sys.argv[4])
+manifest = json.loads(manifest_path.read_text())
+if manifest.get('schema') != 'mzed-private-ime-run-v1' or pathlib.Path(manifest['run_root']) != run:
+    raise SystemExit('integration manifest points at a different run root')
+profile_manifest = run / 'profile-manifest.json'
+if not profile_manifest.is_file() or profile_manifest.is_symlink():
+    raise SystemExit('fresh profile manifest is absent or not a regular file')
+profile_data = json.loads(profile_manifest.read_text())
+if profile_data.get('schema') != 'mzed-test-profile-v1' or profile_data.get('copied_user_data') is not False:
+    raise SystemExit('profile is not a newly prepared empty-user-data diagnostic profile')
+profile_root = run / 'profile'
+expected_files = profile_data.get('profile_files')
+expected_dirs = profile_data.get('profile_directories')
+if not isinstance(expected_files, dict) or not isinstance(expected_dirs, list):
+    raise SystemExit('profile file/directory manifest is invalid')
+actual_files, actual_dirs = set(), set()
+for entry in profile_root.rglob('*'):
+    relative = entry.relative_to(profile_root).as_posix()
+    if entry.is_symlink():
+        raise SystemExit('profile contains a symlink')
+    if entry.is_file():
+        actual_files.add(relative)
+    elif entry.is_dir():
+        actual_dirs.add(relative)
+    else:
+        raise SystemExit('profile contains a non-regular entry')
+if actual_files != set(expected_files) or actual_dirs != set(expected_dirs):
+    raise SystemExit('profile contents differ from the fresh template')
+for relative, record in expected_files.items():
+    path = pathlib.PurePosixPath(relative)
+    if path.is_absolute() or '..' in path.parts:
+        raise SystemExit('unsafe profile template path')
+    item = profile_root.joinpath(*path.parts)
+    if (not isinstance(record, dict) or not item.is_file() or item.is_symlink()
+            or item.stat().st_size != record.get('bytes')
+            or hashlib.sha256(item.read_bytes()).hexdigest() != record.get('sha256')):
+        raise SystemExit('profile template file hash mismatch')
+if hashlib.sha256(profile_manifest.read_bytes()).hexdigest() != manifest['profile_manifest_sha256']:
+    raise SystemExit('fresh profile manifest hash mismatch')
+budget_path = run / 'socket-path-budget.json'
+if not budget_path.is_file() or budget_path.is_symlink():
+    raise SystemExit('Unix socket budget receipt is absent or points outside this run root')
+if hashlib.sha256(budget_path.read_bytes()).hexdigest() != manifest['socket_path_budget_sha256']:
+    raise SystemExit('Unix socket budget receipt hash mismatch')
+budget = json.loads(budget_path.read_text())
+if budget.get('status') != 'pass':
+    raise SystemExit('Unix socket budget preflight failed or belongs to another run root')
+if not all(item.get('fits') is True for item in budget.get('unix_socket_candidates', []) + budget.get('related_filesystem_paths', [])):
+    raise SystemExit('Unix socket budget has a path over its recorded limit')
+source_lock = run / 'runner/source-lock.json'
+if not source_lock.is_file() or source_lock.is_symlink() or hashlib.sha256(source_lock.read_bytes()).hexdigest() != manifest['source_lock_sha256']:
+    raise SystemExit('committed runtime source lock is absent or changed')
+for rel, expected in manifest['runtime_inputs'].items():
+    relative = pathlib.PurePosixPath(rel)
+    if relative.is_absolute() or '..' in relative.parts:
+        raise SystemExit('unsafe runtime input path in integration manifest')
+    path = run.joinpath(*relative.parts)
+    if not path.is_file() or path.is_symlink():
+        raise SystemExit(f"runtime input absent or not regular: {rel}")
+    if hashlib.sha256(path.read_bytes()).hexdigest() != expected:
+        raise SystemExit(f"runtime input hash mismatch: {rel}")
+zed = pathlib.Path(manifest['zed_binary']['path'])
+if zed != requested_zed or not zed.is_file() or zed.is_symlink() or hashlib.sha256(zed.read_bytes()).hexdigest() != manifest['zed_binary']['sha256']:
+    raise SystemExit('pinned Zed ELF hash mismatch')
+identity = run / 'runner/build-identity.json'
+if hashlib.sha256(identity.read_bytes()).hexdigest() != manifest['mozc_identity']['build_identity_sha256']:
+    raise SystemExit('Mozc build identity hash mismatch')
+mozc = json.loads(identity.read_text())
+if mozc.get('schema') != 'mzed-mozc-build-identity-v1' or mozc.get('test_only_authenticated_peer_pid_hook_enabled') is not True:
+    raise SystemExit('diagnostic peer-PID build is not enabled for this test profile')
+if not prefix.is_absolute() or prefix.is_symlink() or not prefix.is_dir():
+    raise SystemExit('private runtime prefix is absent or not a real directory')
+expected_server_dir = str(prefix / 'usr/lib/mozc')
+if mozc.get('configured_server_directory') != expected_server_dir:
+    raise SystemExit('Mozc server was configured for a different absolute runtime prefix')
+gyp_name = mozc.get('gyp_configure_receipt')
+if not isinstance(gyp_name, str) or pathlib.Path(gyp_name).name != gyp_name:
+    raise SystemExit('GYP receipt identity is unsafe')
+gyp_path = run / 'runner' / gyp_name
+if (not gyp_path.is_file() or gyp_path.is_symlink()
+        or hashlib.sha256(gyp_path.read_bytes()).hexdigest() != mozc.get('gyp_configure_receipt_sha256')):
+    raise SystemExit('GYP receipt is absent or mismatched')
+gyp = json.loads(gyp_path.read_text())
+expected_graphs = {'build.ninja', 'obj/base/base_core.ninja', 'obj/ipc/ipc.ninja'}
+graph_hashes = gyp.get('build_graph_files_sha256')
+if (gyp.get('server_dir_absolute') != expected_server_dir
+        or gyp.get('server_dir_relative') != 'usr/lib/mozc'
+        or not isinstance(graph_hashes, dict) or set(graph_hashes) != expected_graphs
+        or any(not isinstance(value, str) or re.fullmatch(r'[0-9a-f]{64}', value) is None for value in graph_hashes.values())
+        or not isinstance(gyp.get('target_commands_sha256'), str)
+        or re.fullmatch(r'[0-9a-f]{64}', gyp['target_commands_sha256']) is None):
+    raise SystemExit('GYP receipt does not bind the configured target graph')
+expected_configs = {
+    'usr/share/fcitx5/addon/mozc.conf',
+    'usr/share/fcitx5/inputmethod/mozc.conf',
+}
+config_hashes = mozc.get('fcitx5_config_files_sha256')
+if not isinstance(config_hashes, dict) or set(config_hashes) != expected_configs:
+    raise SystemExit('Fcitx descriptor identity does not match the pinned profile contract')
+if (manifest['mozc_identity'].get('configured_server_directory') != expected_server_dir
+        or manifest['mozc_identity'].get('fcitx5_config_files_sha256') != config_hashes):
+    raise SystemExit('integration manifest does not bind the absolute server path and Fcitx descriptors')
+for relative, expected in config_hashes.items():
+    relpath = pathlib.PurePosixPath(relative)
+    if relpath.is_absolute() or '..' in relpath.parts:
+        raise SystemExit('unsafe Fcitx descriptor path in build identity')
+    descriptor = prefix.joinpath(*relpath.parts)
+    if (not descriptor.is_file() or descriptor.is_symlink()
+            or hashlib.sha256(descriptor.read_bytes()).hexdigest() != expected):
+        raise SystemExit('private Fcitx descriptor hash mismatch')
+server = prefix / 'usr/lib/mozc/mozc_server'
+module = prefix / 'usr/lib/x86_64-linux-gnu/fcitx5/fcitx5-mozc.so'
+if not server.is_file() or server.is_symlink() or hashlib.sha256(server.read_bytes()).hexdigest() != manifest['mozc_identity']['server_sha256']:
+    raise SystemExit('private Mozc server hash mismatch')
+if not module.is_file() or module.is_symlink() or hashlib.sha256(module.read_bytes()).hexdigest() != manifest['mozc_identity']['fcitx5_mozc_sha256']:
+    raise SystemExit('private Fcitx module hash mismatch')
+PY
+if [[ "${1:-}" == "--test-fail-before-components" ]]; then
+  exec python3 "$BUNDLE/scripts/prefix-env.py" \
+    --prefix "$PREFIX" --profile "$PROFILE" --display "$DISPLAY" \
+    --wayland-display wayland-0 --xauthority "$XAUTHORITY" \
+    --mzed-runner --mzed-zed-binary "$ZED" -- \
+    /usr/bin/bash "$INNER" --test-fail-before-components
+else
+  exec python3 "$BUNDLE/scripts/prefix-env.py" \
+    --prefix "$PREFIX" --profile "$PROFILE" --display "$DISPLAY" \
+    --wayland-display wayland-0 --xauthority "$XAUTHORITY" \
+    --mzed-runner --mzed-zed-binary "$ZED" -- \
+    /usr/bin/bash "$INNER"
+fi
