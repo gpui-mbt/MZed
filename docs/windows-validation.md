@@ -62,12 +62,13 @@ On 2026-10-10, the local x64 Windows host built the archive from the exact
 gpui.mbt pin with MoonBit compiler/core `0.10.14+7d59c7ec9` and MSVC C toolset
 `14.44.35207`. Rust `1.98.1` (`48a229cea`, 2026-09-01) linked the archive for
 `x86_64-pc-windows-msvc`; both tests in `native/protocol.rs` passed, including
-the 1,000 mount/dispatch/copy/destroy cycles. The record and command output are
-under `_build/native-windows-try4/build.json` and
-`_build/native-windows-test-try4/` on the working Windows host. The Python
+the 1,000 mount/dispatch/copy/destroy cycles. The build record is under
+`_build/native-windows-final2/build.json`; Rust compile and runtime logs are
+under `_build/native-windows-test-final2/` on the working Windows host. The
+build and test JSON include the exact MZed harness commit and gpui.mbt source
+pin, and the ABI test refuses archive evidence from another pin. The Python
 harness suite passed 41 tests with 14 Linux-only cache and X11 smoke tests
-skipped. Build and test JSON include both the MZed harness commit and gpui.mbt
-source pin, and the ABI test refuses archive evidence from another pin.
+skipped.
 
 The full pinned Zed Windows build and editor window smoke are **UNRUN locally**.
 The workspace had 19.01 GiB free, below the build's 20 GiB preflight. The
