@@ -226,6 +226,7 @@ impl NativeIsland {
                         });
                         window.capture_pointer(hitbox.id);
                         this.capture = Some(hitbox.id);
+                        log::info!("MZed island press owned generation={}", native.generation);
                         window.prevent_default();
                         cx.stop_propagation();
                         // Force a redraw while down so ownership cannot rely on a frame-local hitbox.
