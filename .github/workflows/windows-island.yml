@@ -81,11 +81,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          repository: zed-industries/zed
-          ref: 76659a55a8c10ed355a070f8764a0b1733e3c115
-          path: _build/zed-windows
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: mzed-native-windows-${{ github.sha }}
@@ -93,14 +88,10 @@ jobs:
       - name: Install the pinned Rust toolchain
         shell: pwsh
         run: rustup toolchain install 1.98.1 --profile minimal
-      - name: Verify and prepare an isolated derived Zed source
+      - name: Acquire, verify and prepare an isolated derived Zed source
         shell: pwsh
         run: |
-          git -C _build/zed-windows config core.autocrlf false
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          git -C _build/zed-windows config core.eol lf
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          git -C _build/zed-windows -c core.autocrlf=false -c core.eol=lf checkout-index --all --force
+          python scripts/baseline.py source --source _build/zed-windows
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python scripts/baseline.py verify --source _build/zed-windows
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

@@ -14,7 +14,10 @@ toolchain. The script discovers VS 2022 through `vswhere` or `VSINSTALLDIR`; set
 Windows sanitizer modes are unsupported by this MSVC lane.
 
 From a fresh MZed checkout in PowerShell, point `MOON_HOME` at the pinned
-MoonBit toolchain and acquire the exact sources first:
+MoonBit toolchain and acquire the exact sources first. Use a new disposable
+directory for the Zed source on each attempt; acquisition pins the line-ending
+policy before checkout, then verifies the release commit, clean tree and locked
+file hashes. It refuses to overwrite or reset an existing source directory.
 
 ```powershell
 $env:MOON_HOME = 'C:\path\to\moonbit'
@@ -29,11 +32,6 @@ Then run the native archive and same-process ABI checks:
 python -m unittest discover -s tests -v
 python scripts/build_native.py --source _build/gpui-windows --output _build/native-windows
 python scripts/test_native_windows.py --native _build/native-windows --output _build/native-windows-test
-# The following three commands deliberately re-materialize tracked files. Use
-# only a fresh, disposable Zed checkout, never an existing working tree.
-git -C _build/zed-windows config core.autocrlf false
-git -C _build/zed-windows config core.eol lf
-git -C _build/zed-windows -c core.autocrlf=false -c core.eol=lf checkout-index --all --force
 python scripts/baseline.py verify --source _build/zed-windows
 python scripts/prepare_island.py --source _build/zed-windows
 python scripts/build_island.py --source _build/zed-windows --native _build/native-windows --output _build/windows-island-build
