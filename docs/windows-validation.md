@@ -66,7 +66,8 @@ the 1,000 mount/dispatch/copy/destroy cycles. The record and command output are
 under `_build/native-windows-try4/build.json` and
 `_build/native-windows-test-try4/` on the working Windows host. The Python
 harness suite passed 41 tests with 14 Linux-only cache and X11 smoke tests
-skipped.
+skipped. Build and test JSON include both the MZed harness commit and gpui.mbt
+source pin, and the ABI test refuses archive evidence from another pin.
 
 The full pinned Zed Windows build and editor window smoke are **UNRUN locally**.
 The workspace had 19.01 GiB free, below the build's 20 GiB preflight. The

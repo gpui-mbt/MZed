@@ -7,7 +7,7 @@ from pathlib import Path
 import shutil
 import subprocess
 
-from build_native import _environment_value, load_msvc_environment
+from build_native import GPUI_COMMIT, _environment_value, load_msvc_environment
 from baseline import LOCK
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -20,6 +20,11 @@ def test(native, output):
     output.mkdir(parents=True, exist_ok=False)
     if not (native / 'mzed_native.lib').is_file():
         raise FileNotFoundError('MSVC archive is missing: ' + str(native / 'mzed_native.lib'))
+    build_record = json.loads((native / 'build.json').read_text())
+    if build_record.get('gpui_commit') != GPUI_COMMIT:
+        raise ValueError('MSVC archive evidence does not match the reviewed gpui.mbt source pin')
+    if build_record.get('target') != 'x86_64-pc-windows-msvc' or build_record.get('mode') != 'normal':
+        raise ValueError('MSVC archive evidence does not describe a normal Windows build')
     environment = load_msvc_environment()
     path = _environment_value(environment, 'PATH')
     rustup = shutil.which('rustup.exe', path=path) or shutil.which('rustup')
@@ -42,7 +47,9 @@ def test(native, output):
     with (output / 'runtime.log').open('w') as log:
         subprocess.run([str(executable), '--nocapture'], check=True, env=environment,
                        stdout=log, stderr=subprocess.STDOUT, text=True)
-    record = {'schema': 1, 'target': target, 'rust': LOCK['rust'], 'native_library': str(native / 'mzed_native.lib'),
+    harness_commit = subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip()
+    record = {'schema': 1, 'harness_commit': harness_commit, 'gpui_commit': GPUI_COMMIT,
+              'target': target, 'rust': LOCK['rust'], 'native_library': str(native / 'mzed_native.lib'),
               'harness': 'native/protocol.rs', 'runtime': 'passed', 'executable': str(executable)}
     (output / 'test.json').write_text(json.dumps(record, indent=2) + '\n')
     print(json.dumps(record, indent=2))

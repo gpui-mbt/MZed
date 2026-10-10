@@ -178,7 +178,9 @@ def build(source, output, mode):
         run(['ar', 'crs', archive, *objects])
         target = 'native'
         c_compiler = subprocess.check_output(['cc', '--version'], text=True).splitlines()[0]
+    harness_commit = subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip()
     (output / 'build.json').write_text(json.dumps({'schema': 1, 'gpui_commit': actual,
+        'harness_commit': harness_commit,
         'compiler': version, 'core_version': core_version, 'mode': mode, 'target': target,
         'c_compiler': c_compiler, 'native_library': str(archive)}, indent=2) + '\n')
 
