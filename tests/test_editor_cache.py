@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -10,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 import editor_cache
 
 
+@unittest.skipIf(os.name == 'nt', 'editor build cache is a Linux ELF and system-loader cache')
 class CacheTests(unittest.TestCase):
     def fixture(self, root):
         cache = root / 'cache'
@@ -74,6 +76,7 @@ class CacheTests(unittest.TestCase):
                 editor_cache.restore(root / 'source', root / 'evidence', cache, {'key': 'expected', 'inputs': {'source_commit': 'upstream'}})
             self.assertEqual(sentinel.read_text(), 'keep')
 
+@unittest.skipIf(os.name == 'nt', 'editor cache fingerprints Linux build and loader inputs')
 class FingerprintTests(unittest.TestCase):
     def test_application_and_environment_changes_invalidate_but_harness_does_not(self):
         with tempfile.TemporaryDirectory() as directory:

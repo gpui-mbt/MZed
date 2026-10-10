@@ -56,6 +56,12 @@ links real native MoonBit, runs contract tests normally and with C/runtime
 UBSan and ASan+UBSan, then builds the editor. Rust is not sanitizer-instrumented;
 LeakSanitizer is disabled and no leak qualification is claimed.
 
+The `Windows native island` workflow builds the same copied-scene archive with
+MSVC, links and runs `native/protocol.rs` in one Rust process, builds the pinned
+editor with the opt-in island, and records an isolated native-window
+open/edit/save smoke. That Windows smoke does not inspect island pixels or
+pointer ownership; Windows same-window UI acceptance remains unqualified.
+
 The declared local churn budget is 1,000 create/dispatch/copy/destroy cycles,
 maximum four live slots and one quad per snapshot. This is a bounded regression,
 not proof of an allocation ceiling or arbitrary callback execution budget.
@@ -72,9 +78,10 @@ check rectangle pixels against logical dimensions rather than assuming scale.
 
 A compiled binary or ABI-only pass is not a same-window pass. Consult the exact
 commit's workflow and uploaded build/smoke JSON, logs and screenshots. Hardware,
-Wayland, macOS application UI, Windows, accessibility, IME, modal-during-drag,
-full-frame performance and all hidden/clipped lifecycle paths remain outside
-this first qualification unless separately demonstrated.
+Wayland, macOS application UI, Windows island pixel and pointer acceptance,
+accessibility, IME, modal-during-drag, full-frame performance and all
+hidden/clipped lifecycle paths remain outside this first qualification unless
+separately demonstrated.
 
 ## Faster harness iteration, separate final qualification
 

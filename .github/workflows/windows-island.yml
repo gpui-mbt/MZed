@@ -1,0 +1,129 @@
+name: Windows native island
+on:
+  pull_request:
+    paths:
+      - upstream.lock.json
+      - native/**
+      - patches/native-island.patch
+      - scripts/baseline.py
+      - scripts/build_native.py
+      - scripts/build_island.py
+      - scripts/prepare_island.py
+      - scripts/test_native_windows.py
+      - scripts/smoke_windows.py
+      - scripts/capture_windows_window.ps1
+      - tests/**
+      - .github/workflows/windows-island.yml
+  workflow_dispatch:
+    inputs:
+      run_editor_smoke:
+        description: Build the full pinned Zed editor and run its Windows fixture smoke
+        required: true
+        type: boolean
+        default: false
+permissions:
+  contents: read
+jobs:
+  windows-native-abi:
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: gpui-mbt/gpui.mbt
+          ref: bf965aebbeb1dfdfed26373d4a7a58bb51a5ad01
+          path: _build/gpui-windows
+      - uses: hustcer/setup-moonbit@1522f9aef02a8ca0187dfc00a41f5dd6b16750f7
+        with:
+          version: 0.10.14+7d59c7ec9
+          core-version: 0.10.14+7d59c7ec9
+      - name: Install the pinned Rust toolchain and Windows target
+        shell: pwsh
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustup target add x86_64-pc-windows-msvc --toolchain 1.98.1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Run portable harness checks
+        shell: pwsh
+        run: |
+          python -m unittest discover -s tests -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m compileall -q scripts tests
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build the MoonBit native archive with MSVC
+        shell: pwsh
+        run: python scripts/build_native.py --source _build/gpui-windows --output _build/native-windows
+      - name: Link and run the same-process Rust ABI harness
+        shell: pwsh
+        run: python scripts/test_native_windows.py --native _build/native-windows --output _build/native-windows-test
+      - name: Preserve native ABI evidence and editor build input
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: mzed-native-windows-${{ github.event.pull_request.head.sha || github.sha }}
+          path: |
+            _build/native-windows/build.json
+            _build/native-windows/mzed_native.lib
+            _build/native-windows-test/test.json
+            _build/native-windows-test/rustc.log
+            _build/native-windows-test/runtime.log
+          retention-days: 14
+  windows-editor-smoke:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_editor_smoke }}
+    needs: windows-native-abi
+    runs-on: windows-2022
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: zed-industries/zed
+          ref: 76659a55a8c10ed355a070f8764a0b1733e3c115
+          path: _build/zed-windows
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: mzed-native-windows-${{ github.sha }}
+          path: _build
+      - name: Install the pinned Rust toolchain
+        shell: pwsh
+        run: rustup toolchain install 1.98.1 --profile minimal
+      - name: Verify and prepare an isolated derived Zed source
+        shell: pwsh
+        run: |
+          git -C _build/zed-windows config core.autocrlf false
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git -C _build/zed-windows config core.eol lf
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git -C _build/zed-windows -c core.autocrlf=false -c core.eol=lf checkout-index --all --force
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python scripts/baseline.py verify --source _build/zed-windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python scripts/prepare_island.py --source _build/zed-windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build the pinned Windows editor with the native island enabled
+        shell: pwsh
+        run: python scripts/build_island.py --source _build/zed-windows --native _build/native-windows --output _build/windows-island-build
+      - name: Open, edit and save a fixture through the native Windows editor
+        shell: pwsh
+        run: python scripts/smoke_windows.py --binary _build/zed-windows/target/mzed-island/debug/zed.exe --source _build/zed-windows --output _build/windows-smoke
+      - name: Preserve Windows editor smoke evidence, never publish an editor binary
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: windows-editor-smoke-${{ github.sha }}
+          path: |
+            upstream.lock.json
+            _build/zed-windows/mzed-derived.json
+            _build/windows-island-build/build.json
+            _build/windows-island-build/cargo.log
+            _build/windows-smoke/smoke.json
+            _build/windows-smoke/editor.log
+            _build/windows-smoke/*.png
+            _build/windows-smoke/mzed-windows-fixture.txt
+          retention-days: 14
