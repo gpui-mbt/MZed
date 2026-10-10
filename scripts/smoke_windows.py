@@ -221,18 +221,23 @@ def screen_point(snapshot, position):
             int(snapshot['top']) + int(position[1]))
 
 
+def cursor_position():
+    actual = POINT()
+    if not _user32().GetCursorPos(ctypes.byref(actual)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return actual.x, actual.y
+
+
 def move_pointer(hwnd, snapshot, position, require_foreground=True):
     user32 = _user32()
     if require_foreground:
         _require_foreground(hwnd)
-    x, y = screen_point(snapshot, position)
-    if not user32.SetCursorPos(x, y):
+    expected = screen_point(snapshot, position)
+    if not user32.SetCursorPos(*expected):
         raise ctypes.WinError(ctypes.get_last_error())
-    actual = POINT()
-    if not user32.GetCursorPos(ctypes.byref(actual)):
-        raise ctypes.WinError(ctypes.get_last_error())
-    if (actual.x, actual.y) != (x, y):
-        raise RuntimeError(f'pointer did not reach requested screen point {(x, y)}; got {(actual.x, actual.y)}')
+    actual = cursor_position()
+    if actual != expected:
+        raise RuntimeError(f'pointer did not reach requested screen point {expected}; got {actual}')
 
 
 def click(hwnd, snapshot, position, button='left', shift=False):
@@ -320,6 +325,66 @@ def scene_matches(snapshot, expected):
     return scene_state(snapshot)[0] == expected
 
 
+def native_log_path(output):
+    return output / 'profile' / 'data' / 'logs' / 'Zed.log'
+
+
+def read_native_log(path):
+    if not path.is_file():
+        raise RuntimeError('editor log is missing; cannot verify native island lifecycle')
+    return path.read_text(encoding='utf-8', errors='replace')
+
+
+def press_ack_generations(native_log):
+    return [int(value) for value in re.findall(r'MZed island press owned generation=(\d+)', native_log)]
+
+
+def native_dispatches(native_log):
+    return [int(value) for value in re.findall(r'MZed island counter=(\d+)', native_log)]
+
+
+def wait_for_press_ack(process, log_path, previous_count, timeout=5):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError(f'editor exited before acknowledging island press: {process.returncode}')
+        acknowledgments = press_ack_generations(read_native_log(log_path))
+        if len(acknowledgments) > previous_count + 1:
+            raise RuntimeError('one mouse down produced multiple native island press acknowledgments')
+        if len(acknowledgments) == previous_count + 1:
+            return acknowledgments[-1]
+        time.sleep(0.05)
+    raise RuntimeError('native island did not acknowledge owned press before minimize')
+
+
+def assert_scene_unchanged(snapshot, native_log, expected_color, expected_dispatches):
+    actual_color, _ = scene_state(snapshot)
+    if actual_color != expected_color:
+        raise RuntimeError(f'bare late release changed scene from {expected_color!r} to {actual_color!r}')
+    actual_dispatches = native_dispatches(native_log)
+    if actual_dispatches != expected_dispatches:
+        raise RuntimeError(
+            f'bare late release changed native dispatches from {expected_dispatches} to {actual_dispatches}')
+
+
+def observe_scene_unchanged(hwnd, output, log_path, stage, expected_color, expected_dispatches, duration=1.5):
+    deadline = None
+    observations = 0
+    last_snapshot = None
+    while True:
+        last_snapshot = capture(hwnd, output / f'{stage}.png')
+        assert_scene_unchanged(last_snapshot, read_native_log(log_path), expected_color, expected_dispatches)
+        observations += 1
+        if deadline is None:
+            deadline = time.monotonic() + duration
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 and observations >= 2:
+            break
+        time.sleep(min(0.15, max(0, remaining)))
+    _, rectangle = scene_state(last_snapshot)
+    return last_snapshot, rectangle, observations
+
+
 def scene_center(rectangle):
     left, top, right, bottom = rectangle
     return ((left + right) // 2, (top + bottom) // 2)
@@ -371,7 +436,7 @@ def outside_point(snapshot, rectangle):
     raise RuntimeError('could not find a window point outside the native island')
 
 
-def exercise_island(hwnd, process, source, output, record):
+def exercise_island(hwnd, process, output, record):
     owned = process_windows(process.pid)
     if len(owned) != 1 or owned[0]['handle'] != hwnd:
         raise RuntimeError(f'expected one process-owned top-level window, got {owned}')
@@ -416,20 +481,35 @@ def exercise_island(hwnd, process, source, output, record):
     snapshot, rect = wait_scene(hwnd, output, 'island-outside-release', 'pink')
     record['operations'].append('owned outside release canceled without activating the native scene')
 
+    log_path = native_log_path(output)
+    previous_acknowledgments = len(press_ack_generations(read_native_log(log_path)))
+    minimize_pointer = screen_point(snapshot, scene_center(rect))
     move_pointer(hwnd, snapshot, scene_center(rect))
     mouse_button('left', True)
     try:
+        generation = wait_for_press_ack(process, log_path, previous_acknowledgments)
+        record['minimize_press_owned_generation'] = generation
         _user32().ShowWindow(hwnd, SW_MINIMIZE)
         wait_minimized(hwnd, process)
-        # Release while the window is hidden, then restore and prove the gesture was canceled.
+        # Release while the window is hidden, then restore and probe with no new down.
         mouse_button('left', False)
     finally:
         mouse_button('left', False)
     activate_window(hwnd)
     snapshot, rect = wait_scene(hwnd, output, 'island-interrupted-press', 'pink')
+    restored_center = screen_point(snapshot, scene_center(rect))
+    if restored_center != minimize_pointer or cursor_position() != restored_center:
+        raise RuntimeError('pointer or island moved during restore; bare-release cancellation oracle cannot proceed safely')
+    dispatches_before_late_release = native_dispatches(read_native_log(log_path))
+    mouse_button('left', False)
+    snapshot, rect, observations = observe_scene_unchanged(
+        hwnd, output, log_path, 'island-minimize-late-release', 'pink',
+        dispatches_before_late_release)
+    record['minimize_late_release_observations'] = observations
     click(hwnd, snapshot, outside_point(snapshot, rect))
     snapshot, rect = wait_scene(hwnd, output, 'island-after-minimize', 'pink')
-    record['operations'].append('minimize during an owned press canceled it before an outside release')
+    record['operations'].append(
+        'acknowledged an owned press before minimize, then restored and rejected a bare center release before any new down')
 
     click(hwnd, snapshot, scene_center(rect))
     snapshot, rect = wait_scene(hwnd, output, 'island-repeat', 'blue')
@@ -456,11 +536,8 @@ def exercise_island(hwnd, process, source, output, record):
     record['toplevels_after'] = owned
     if len(owned) != 1 or owned[0]['handle'] != hwnd:
         raise RuntimeError(f'native island created or removed a process-owned top-level window: {owned}')
-    log_path = output / 'profile' / 'data' / 'logs' / 'Zed.log'
-    if not log_path.is_file():
-        raise RuntimeError('editor log is missing; cannot verify native island dispatch lifecycle')
-    native_log = log_path.read_text(encoding='utf-8', errors='replace')
-    dispatches = [int(value) for value in re.findall(r'MZed island counter=(\d+)', native_log)]
+    native_log = read_native_log(native_log_path(output))
+    dispatches = native_dispatches(native_log)
     if dispatches != [1, 2, 1]:
         raise RuntimeError(f'native dispatch sequence was not exactly [1, 2, 1]: {dispatches}')
     if native_log.count('MZed island disabled and native instance destroyed') != 2:
@@ -556,7 +633,7 @@ def main():
                 raise RuntimeError('editor window ownership changed after startup readiness input')
             if int(_user32().GetForegroundWindow() or 0) != hwnd:
                 activate_window(hwnd)
-            exercise_island(hwnd, process, source, output, record)
+            exercise_island(hwnd, process, output, record)
 
             chord([VK_CONTROL], VK_END)
             type_text(addition)

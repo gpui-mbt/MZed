@@ -64,9 +64,13 @@ status-bar smoke; the Linux X11 lane remains unchanged.
 
 The `Windows native island` workflow builds the same copied-scene archive with
 MSVC, links and runs `native/protocol.rs` in one Rust process, builds the pinned
-editor with the opt-in island, and records an isolated native-window
-open/edit/save smoke. That Windows smoke does not inspect island pixels or
-pointer ownership; Windows same-window UI acceptance remains unqualified.
+editor with the opt-in island, and runs an isolated native-window smoke. The
+smoke captures the island's exact scene pixels, drives same-window Win32 pointer
+input, checks resize and lifecycle behavior, and verifies open/edit/save through
+the editor. Its minimize cancellation case waits for an app-side owned-press
+acknowledgment, then probes a bare release after restore before any new press.
+Windows same-window UI acceptance remains unqualified until the exact-commit
+hosted workflow passes.
 
 The declared local churn budget is 1,000 create/dispatch/copy/destroy cycles,
 maximum four live slots and one quad per snapshot. This is a bounded regression,
@@ -83,11 +87,11 @@ then exact native editor edit/save after disabling the island. The 1x/2x runs
 check rectangle pixels against logical dimensions rather than assuming scale.
 
 A compiled binary or ABI-only pass is not a same-window pass. Consult the exact
-commit's workflow and uploaded build/smoke JSON, logs and screenshots. Hardware,
-Wayland, macOS application UI, Windows island pixel and pointer acceptance,
-accessibility, IME, modal-during-drag, full-frame performance and all
-hidden/clipped lifecycle paths remain outside this first qualification unless
-separately demonstrated.
+commit's workflow and uploaded build/smoke JSON, logs and screenshots. Windows
+pixel and pointer acceptance remains runtime-unqualified until the hosted
+workflow passes. Hardware, Wayland, macOS application UI, accessibility, IME,
+modal-during-drag, full-frame performance and all hidden/clipped lifecycle paths
+remain outside this first qualification unless separately demonstrated.
 
 ## Faster harness iteration, separate final qualification
 

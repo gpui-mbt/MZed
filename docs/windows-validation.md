@@ -50,7 +50,10 @@ checks the exact solid blue/pink scene pixels at the window's DPI scale, and
 sends native Win32 `SendInput` pointer events to that same window. It exercises
 unsupported right, modified-left, and wheel input; an accepted click after a
 resize; outside-release and minimize cancellation; disable/remount; late
-release rejection; and exact native dispatch/destroy log counts. It then types
+release rejection; and exact native dispatch/destroy log counts. For minimize
+cancellation it waits for an app-side owned-press acknowledgment, then sends a
+bare center release after restore before any new down and polls both scene pixels
+and dispatch logs for stability. It then types
 and saves a fixture through native keyboard input and compares the exact bytes.
 `same_window_island` is `passed` only when the pixel, pointer, lifecycle, and
 single-window checks all pass. Failed and unrun states remain explicit in
@@ -73,12 +76,12 @@ the 1,000 mount/dispatch/copy/destroy cycles. The build record is under
 under `_build/native-windows-test-final2/` on the working Windows host. The
 build and test JSON include the exact MZed harness commit and gpui.mbt source
 pin, and the ABI test refuses archive evidence from another pin. The Python
-harness suite passed 41 tests with 14 Linux-only cache and X11 smoke tests
-skipped.
+harness suite passed 69 tests with 14 platform-specific tests skipped.
 
 The full pinned Zed Windows build and editor window smoke are **UNRUN locally**.
-The workspace had 19.01 GiB free, below the build's 20 GiB preflight. The
-workflow exposes that longer editor build only through manual dispatch with
+Available C: space is below the build's 20 GiB preflight, so no full editor build
+or runtime qualification was attempted locally. The workflow exposes that
+longer editor build only through manual dispatch with
 `run_editor_smoke` enabled. Read its exact commit's artifact before reporting a
 Windows same-window island pass; the portable harness tests do not replace the
 native pixel and pointer evidence.

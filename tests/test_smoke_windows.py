@@ -1,6 +1,7 @@
 import importlib.util
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 SPEC = importlib.util.spec_from_file_location(
     'smoke_windows', Path(__file__).resolve().parents[1] / 'scripts/smoke_windows.py')
@@ -55,6 +56,39 @@ class WindowsSceneEvidenceTests(unittest.TestCase):
         self.assertEqual(smoke.validate_scene_size((15, 22, 254, 57), 2.0), (240, 36))
         with self.assertRaisesRegex(RuntimeError, 'scaled exactly once'):
             smoke.validate_scene_size((15, 22, 254, 57), 1.0)
+
+    def test_minimize_waits_until_the_native_press_acknowledgment_advances(self):
+        class RunningProcess:
+            @staticmethod
+            def poll():
+                return None
+
+        log_before = 'MZed island press owned generation=4\n'
+        log_after = log_before + 'MZed island press owned generation=4\n'
+        with patch.object(smoke, 'read_native_log', side_effect=[log_before, log_after]):
+            self.assertEqual(smoke.wait_for_press_ack(
+                RunningProcess(), Path('unused'), previous_count=1, timeout=0.2), 4)
+
+    def test_minimize_rejects_an_old_press_acknowledgment(self):
+        class RunningProcess:
+            @staticmethod
+            def poll():
+                return None
+
+        log = 'MZed island press owned generation=4\n'
+        with patch.object(smoke, 'read_native_log', return_value=log):
+            with self.assertRaisesRegex(RuntimeError, 'did not acknowledge owned press'):
+                smoke.wait_for_press_ack(RunningProcess(), Path('unused'), previous_count=1, timeout=0.01)
+
+    def test_late_release_oracle_requires_unchanged_pixels_and_dispatches(self):
+        snapshot = capture(pink=(0, 0, 119, 17))
+        smoke.assert_scene_unchanged(snapshot, 'MZed island counter=2\n', 'pink', [2])
+        with self.assertRaisesRegex(RuntimeError, 'changed native dispatches'):
+            smoke.assert_scene_unchanged(
+                snapshot, 'MZed island counter=2\nMZed island counter=3\n', 'pink', [2])
+        with self.assertRaisesRegex(RuntimeError, 'changed scene'):
+            smoke.assert_scene_unchanged(
+                capture(blue=(0, 0, 119, 17)), 'MZed island counter=2\n', 'pink', [2])
 
 
 if __name__ == '__main__':
