@@ -65,6 +65,39 @@ the exact commit's artifact before reporting a pass. The workflow does not
 publish an editor binary. This harness repository has no `moon.mod`, so MZed is
 not itself a Mooncakes package and has no registry publish step.
 
+## Hosted Windows qualification
+
+On 2026-10-10, the full hosted workflow [run 38041917899](https://github.com/gpui-mbt/MZed/actions/runs/38041917899)
+passed for MZed harness commit `40069b99460ba9b16e6aba9a130711d2c7acc5f9`.
+The run used the pinned Zed v1.22.0 source at
+`76659a55a8c10ed355a070f8764a0b1733e3c115` and gpui.mbt at
+`bf965aebbeb1dfdfed26373d4a7a58bb51a5ad01`. The Windows 2022 runner built
+without reusing a Cargo target cache; the editor build took 1,993.578 seconds.
+It used MoonBit compiler/core `0.10.14+7d59c7ec9`, Rust `1.98.1`, and MSVC C
+toolset `14.44.35207` for `x86_64-pc-windows-msvc`. The derived editor binary
+SHA-256 was
+`ff24d54330fb3a6b147e99aec2783989c6048042ccbf6f58e310208accc4e399`.
+The native ABI harness passed both protocol tests; the hosted portable suite
+ran 71 tests with 14 expected platform-specific skips. The previously
+recorded local suite result remains separate at 69 tests with 14 skipped; the
+two additional hosted tests cover the taskbar-safe work-area geometry added
+for this candidate.
+
+The editor smoke passed on one primary-monitor work area of 1024×728 pixels at
+96 DPI. It captured the scene at its expected 120×18-pixel size, drove
+same-window Win32 input, and its before/after checks found one process-owned
+top-level window. Right click, modified left click, and wheel input left the
+scene unchanged; resize and one plain left click changed it once; outside release
+and minimize cancellation did not activate it. The minimize test observed the
+late-release oracle three times. Disable, inactive-region click, remount,
+late release, and a fresh click produced the expected lifecycle and dispatch
+sequence `[1, 2, 1]`. Finally, native keyboard input saved the fixture as
+`MZed pinned Windows fixture\nMZed native edit save verified\n`.
+`smoke.json`, `Zed.log`, build metadata, ABI logs, fixture bytes and screenshots
+are attached to the exact run. This qualifies only the bounded hosted
+primary-monitor scenario; local full-editor build and UI execution remain
+unrun for the disk-space reason below.
+
 ## Local evidence
 
 On 2026-10-10, the local x64 Windows host built the archive from the exact
@@ -76,7 +109,7 @@ the 1,000 mount/dispatch/copy/destroy cycles. The build record is under
 under `_build/native-windows-test-final2/` on the working Windows host. The
 build and test JSON include the exact MZed harness commit and gpui.mbt source
 pin, and the ABI test refuses archive evidence from another pin. The Python
-harness suite passed 69 tests with 14 platform-specific tests skipped.
+harness suite ran 69 tests with 14 platform-specific tests skipped.
 
 The full pinned Zed Windows build and editor window smoke are **UNRUN locally**.
 Available C: space is below the build's 20 GiB preflight, so no full editor build
