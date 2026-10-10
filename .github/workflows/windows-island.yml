@@ -116,5 +116,6 @@ jobs:
             _build/windows-smoke/smoke.json
             _build/windows-smoke/editor.log
             _build/windows-smoke/*.png
+            _build/windows-smoke/profile/data/logs/Zed.log*
             _build/windows-smoke/mzed-windows-fixture.txt
           retention-days: 14

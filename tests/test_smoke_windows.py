@@ -57,6 +57,19 @@ class WindowsSceneEvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'scaled exactly once'):
             smoke.validate_scene_size((15, 22, 254, 57), 1.0)
 
+    def test_smoke_window_leaves_resize_room_inside_taskbar_safe_work_area(self):
+        layout = smoke.smoke_window_bounds((0, 0, 1024, 732), 1.0)
+        self.assertEqual(layout['initial_window_rect'], [8, 8, 776, 564])
+        self.assertEqual(layout['resized_window_rect'], [8, 8, 1016, 724])
+        self.assertEqual(layout['resize_growth'], [240, 160])
+
+    def test_smoke_window_bounds_scale_growth_and_reject_small_work_areas(self):
+        layout = smoke.smoke_window_bounds((0, 0, 2560, 1440), 2.0)
+        self.assertEqual(layout['resize_growth'], [480, 320])
+        self.assertEqual(layout['resized_window_rect'], [8, 8, 2552, 1432])
+        with self.assertRaisesRegex(RuntimeError, 'too small'):
+            smoke.smoke_window_bounds((0, 0, 600, 300), 1.0)
+
     def test_minimize_waits_until_the_native_press_acknowledgment_advances(self):
         class RunningProcess:
             @staticmethod

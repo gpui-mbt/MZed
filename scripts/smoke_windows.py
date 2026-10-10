@@ -95,6 +95,12 @@ def _user32():
         ctypes.c_int, ctypes.c_int, wintypes.UINT,
     ]
     user32.SetWindowPos.restype = wintypes.BOOL
+    user32.SystemParametersInfoW.argtypes = [
+        wintypes.UINT, wintypes.UINT, ctypes.c_void_p, wintypes.UINT,
+    ]
+    user32.SystemParametersInfoW.restype = wintypes.BOOL
+    user32.GetDpiForWindow.argtypes = [wintypes.HWND]
+    user32.GetDpiForWindow.restype = wintypes.UINT
     user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
     user32.BringWindowToTop.argtypes = [wintypes.HWND]
     user32.SetForegroundWindow.argtypes = [wintypes.HWND]
@@ -291,6 +297,59 @@ def resize_window(hwnd, scale):
             return {'width': current[2] - current[0], 'height': current[3] - current[1]}
         time.sleep(0.05)
     raise RuntimeError(f'window did not reach requested resized bounds {target_width}x{target_height}')
+
+
+def smoke_window_bounds(work_area, scale, margin=8):
+    if scale <= 0:
+        raise RuntimeError(f'Windows work-area setup received invalid DPI scale: {scale}')
+    left, top, right, bottom = work_area
+    width, height = right - left, bottom - top
+    target_width, target_height = width - 2 * margin, height - 2 * margin
+    growth_width, growth_height = round(240 * scale), round(160 * scale)
+    initial_width, initial_height = target_width - growth_width, target_height - growth_height
+    if initial_width < 320 or initial_height < 240:
+        raise RuntimeError(
+            f'Windows work area is too small for the smoke and its resize step: {work_area}, scale={scale}')
+    initial = (left + margin, top + margin,
+               left + margin + initial_width, top + margin + initial_height)
+    resized = (initial[0], initial[1], initial[2] + growth_width, initial[3] + growth_height)
+    return {
+        'work_area': [left, top, right, bottom],
+        'initial_window_rect': list(initial),
+        'resized_window_rect': list(resized),
+        'resize_growth': [growth_width, growth_height],
+    }
+
+
+def fit_window_to_smoke_work_area(hwnd):
+    user32 = _user32()
+    area = wintypes.RECT()
+    # SPI_GETWORKAREA excludes the shell taskbar and its reserved edge.
+    if not user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(area), 0):
+        raise ctypes.WinError(ctypes.get_last_error())
+    dpi = int(user32.GetDpiForWindow(hwnd))
+    if dpi <= 0:
+        raise RuntimeError('Windows did not report a valid DPI for the editor window')
+    scale = dpi / 96.0
+    geometry = smoke_window_bounds(
+        (area.left, area.top, area.right, area.bottom), scale)
+    geometry['dpi'] = dpi
+    geometry['scale'] = scale
+    left, top, right, bottom = geometry['initial_window_rect']
+    if not user32.SetWindowPos(
+            hwnd, None, left, top, right - left, bottom - top,
+            SWP_NOZORDER | SWP_NOACTIVATE):
+        raise ctypes.WinError(ctypes.get_last_error())
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        actual = window_rect(hwnd)
+        if actual == (left, top, right, bottom):
+            geometry['actual_initial_window_rect'] = list(actual)
+            return geometry
+        time.sleep(0.05)
+    raise RuntimeError(
+        f'editor window did not enter the taskbar-safe smoke bounds: requested={(left, top, right, bottom)}, '
+        f'actual={window_rect(hwnd)}')
 
 
 def color_rectangle(snapshot, name):
@@ -623,7 +682,10 @@ def main():
             record['window'] = stable[0]
             record['operations'].append('opened fixture in one visible process-owned native window')
             activate_window(hwnd)
-            capture(hwnd, output / 'before-input.png')
+            record['window_layout'] = fit_window_to_smoke_work_area(hwnd)
+            record['operations'].append(
+                'placed the editor within the taskbar-safe work area, leaving room for the resize check')
+            record['before_input_capture'] = capture(hwnd, output / 'before-input.png')
             record['operations'].append('captured the focused editor window before native input')
             # Pinned Zed keymap action: choose Stay in Restricted Mode if first-run UI asks.
             chord([VK_CONTROL, VK_MENU, VK_SHIFT], VK_S)
