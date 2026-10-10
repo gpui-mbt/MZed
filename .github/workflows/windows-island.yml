@@ -17,7 +17,7 @@ on:
   workflow_dispatch:
     inputs:
       run_editor_smoke:
-        description: Build the full pinned Zed editor and run its Windows fixture smoke
+        description: Build the full pinned Zed editor and qualify its Windows island and fixture smoke
         required: true
         type: boolean
         default: false
@@ -100,7 +100,7 @@ jobs:
       - name: Build the pinned Windows editor with the native island enabled
         shell: pwsh
         run: python scripts/build_island.py --source _build/zed-windows --native _build/native-windows --output _build/windows-island-build
-      - name: Open, edit and save a fixture through the native Windows editor
+      - name: Qualify the same-window island and save a fixture through native Windows input
         shell: pwsh
         run: python scripts/smoke_windows.py --binary _build/zed-windows/target/mzed-island/debug/zed.exe --source _build/zed-windows --output _build/windows-smoke
       - name: Preserve Windows editor smoke evidence, never publish an editor binary

@@ -44,12 +44,17 @@ python scripts/smoke_windows.py --binary _build/zed-windows/target/mzed-island/d
 The ABI harness calls the actual static archive through the existing Rust C ABI
 and covers initialization, create, copied snapshots, dispatch, resize, stale
 identity rejection, destruction, remount, four-slot bounds, 1,000 lifecycle
-cycles, and owner-thread enforcement. The editor smoke uses a fresh profile,
-identifies the editor's visible process-owned top-level window, sends native
-keyboard input, checks exact saved fixture bytes, and captures before/after
-screenshots. Its `same_window_island` result is always `not_qualified`: it does
-not verify the status-bar scene pixels, pointer targeting, or cancellation
-behavior on Windows.
+cycles, and owner-thread enforcement. The editor smoke uses a fresh profile and
+requires one visible process-owned top-level window. It captures that window,
+checks the exact solid blue/pink scene pixels at the window's DPI scale, and
+sends native Win32 `SendInput` pointer events to that same window. It exercises
+unsupported right, modified-left, and wheel input; an accepted click after a
+resize; outside-release and minimize cancellation; disable/remount; late
+release rejection; and exact native dispatch/destroy log counts. It then types
+and saves a fixture through native keyboard input and compares the exact bytes.
+`same_window_island` is `passed` only when the pixel, pointer, lifecycle, and
+single-window checks all pass. Failed and unrun states remain explicit in
+`smoke.json`.
 
 The `Windows native island` GitHub Actions workflow runs these steps on a
 Windows 2022 host and uploads JSON, logs, fixture bytes and screenshots. Read
@@ -74,5 +79,6 @@ skipped.
 The full pinned Zed Windows build and editor window smoke are **UNRUN locally**.
 The workspace had 19.01 GiB free, below the build's 20 GiB preflight. The
 workflow exposes that longer editor build only through manual dispatch with
-`run_editor_smoke` enabled. Same-window island pixel and pointer acceptance is
-also unrun; the editor smoke does not claim it.
+`run_editor_smoke` enabled. Read its exact commit's artifact before reporting a
+Windows same-window island pass; the portable harness tests do not replace the
+native pixel and pointer evidence.
