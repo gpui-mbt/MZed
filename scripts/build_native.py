@@ -4,8 +4,10 @@ import argparse
 import json
 import os
 import platform
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
+import shutil
 import subprocess
+import tempfile
 import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,12 +20,135 @@ def run(argv):
     subprocess.run(list(map(str, argv)), check=True)
 
 
+def _vsdevcmd():
+    configured = os.environ.get('MZED_VSDEVCMD')
+    if configured:
+        path = Path(configured)
+        if path.is_file():
+            return path.resolve()
+        raise FileNotFoundError(f'MZED_VSDEVCMD does not exist: {path}')
+    for variable in ('VSINSTALLDIR', 'VS170COMNTOOLS'):
+        value = os.environ.get(variable)
+        if value:
+            base = Path(value)
+            candidates = [base / 'VsDevCmd.bat', base / 'Common7/Tools/VsDevCmd.bat',
+                          base / '../Common7/Tools/VsDevCmd.bat']
+            for candidate in candidates:
+                if candidate.is_file():
+                    return candidate.resolve()
+    vswhere_candidates = [
+        Path(os.environ.get('ProgramFiles(x86)', r'C:\Program Files (x86)')) / 'Microsoft Visual Studio/Installer/vswhere.exe',
+        Path(os.environ.get('ProgramFiles', r'C:\Program Files')) / 'Microsoft Visual Studio/Installer/vswhere.exe',
+    ]
+    for vswhere in vswhere_candidates:
+        if not vswhere.is_file():
+            continue
+        installation = subprocess.check_output([
+            str(vswhere), '-latest', '-products', '*', '-requires',
+            'Microsoft.VisualStudio.Component.VC.Tools.x86.x64', '-property', 'installationPath',
+        ], text=True).strip()
+        candidate = Path(installation) / 'Common7/Tools/VsDevCmd.bat'
+        if candidate.is_file():
+            return candidate
+    raise FileNotFoundError('Visual Studio 2022 x64 C++ tools were not found (install them or set MZED_VSDEVCMD)')
+
+
+def _environment_value(environment, name):
+    for key, value in environment.items():
+        if key.casefold() == name.casefold():
+            return value
+    return None
+
+
+def _msvc_tool_target_arch(executable):
+    path = PureWindowsPath(str(executable))
+    host = path.parent.parent.name.casefold()
+    target = path.parent.name.casefold()
+    if path.name.casefold() not in {'cl.exe', 'lib.exe'}:
+        return None
+    if host not in {'hostx64', 'hostx86'} or target not in {'x64', 'x86', 'arm64'}:
+        return None
+    return target
+
+
+def _x64_msvc_tools(environment):
+    path = _environment_value(environment, 'PATH')
+    if not path:
+        return None
+    compiler = shutil.which('cl.exe', path=path)
+    librarian = shutil.which('lib.exe', path=path)
+    if (compiler and librarian and _msvc_tool_target_arch(compiler) == 'x64'
+            and _msvc_tool_target_arch(librarian) == 'x64'):
+        return compiler, librarian
+    return None
+
+
+def load_msvc_environment():
+    """Return the current process environment with the x64 MSVC tools loaded."""
+    if os.name != 'nt':
+        raise RuntimeError('the MSVC environment is available only on Windows')
+    current = dict(os.environ)
+    if _x64_msvc_tools(current):
+        return current
+    devcmd = _vsdevcmd()
+    with tempfile.NamedTemporaryFile('w', suffix='.cmd', encoding='ascii', newline='\r\n', delete=False) as script:
+        script_path = Path(script.name)
+        script.write('@echo off\r\n')
+        script.write(f'call "{devcmd}" -no_logo -arch=x64 -host_arch=x64 >nul\r\n')
+        script.write('if errorlevel 1 exit /b 1\r\n')
+        script.write('set\r\n')
+    try:
+        result = subprocess.run(['cmd.exe', '/d', '/c', str(script_path)], check=True,
+                                capture_output=True, text=True, encoding='mbcs')
+    finally:
+        script_path.unlink(missing_ok=True)
+    environment = dict(os.environ)
+    keys = {name.casefold(): name for name in environment}
+    for line in result.stdout.splitlines():
+        if '=' not in line:
+            continue
+        name, value = line.split('=', 1)
+        # cmd.exe also prints drive-current-directory pseudo variables (for example =C:).
+        if name and not name.startswith('='):
+            key = keys.get(name.casefold(), name)
+            environment[key] = value
+            keys[name.casefold()] = key
+    if not _x64_msvc_tools(environment):
+        raise RuntimeError('VsDevCmd did not expose x64-target cl.exe and lib.exe')
+    return environment
+
+
+def build_msvc(units, output, home):
+    environment = load_msvc_environment()
+    path = _environment_value(environment, 'PATH')
+    compiler = shutil.which('cl.exe', path=path)
+    librarian = shutil.which('lib.exe', path=path)
+    include = home / 'include'
+    objects = []
+    for unit in units:
+        obj = output / (unit.stem + '.obj')
+        argv = [compiler, '/nologo', '/O2', '/std:c11', '/utf-8',
+                '/D_CRT_SECURE_NO_WARNINGS', '/DWIN32_LEAN_AND_MEAN', '/DNOMINMAX',
+                '/I' + str(include), '/c', str(unit), '/Fo' + str(obj)]
+        print(' '.join(map(str, argv)), flush=True)
+        subprocess.run(argv, check=True, env=environment)
+        objects.append(obj)
+    archive = output / 'mzed_native.lib'
+    argv = [librarian, '/NOLOGO', '/OUT:' + str(archive), *map(str, objects)]
+    print(' '.join(map(str, argv)), flush=True)
+    subprocess.run(argv, check=True, env=environment)
+    toolset = Path(compiler).parents[3].name
+    return archive, 'MSVC C compiler toolset ' + toolset
+
+
 def build(source, output, mode):
     system = platform.system()
-    if system not in ('Linux', 'Darwin'):
+    if system not in ('Linux', 'Darwin', 'Windows'):
         raise ValueError(f'unsupported native host: {system}')
     if system == 'Darwin' and mode != 'normal':
         raise ValueError('the UBSan and ASan ABI lanes are qualified on Linux only')
+    if os.name == 'nt' and mode != 'normal':
+        raise ValueError('MSVC native builds support mode=normal; sanitizer modes are Linux-only')
     actual = subprocess.check_output(['git', '-C', str(source), 'rev-parse', 'HEAD'], text=True).strip()
     if actual != GPUI_COMMIT:
         raise ValueError('gpui.mbt source does not match reviewed pin')
@@ -60,23 +185,32 @@ def build(source, output, mode):
     run([compiler, 'link-core', core / 'abort/abort.core', core / 'core.core',
          *[output / (package + '.core') for package, _ in packages], output / 'island.core',
          '-main', 'mzed/native_island', '-target', 'native', '-o', output / 'island.c'])
-    flags = ['-std=gnu11', '-O2', '-g', '-fwrapv', '-fno-strict-aliasing',
-             '-ffunction-sections', '-fdata-sections', '-I' + str(home / 'include')]
-    if mode != 'normal':
-        flags += ['-fsanitize=' + ('undefined' if mode == 'ubsan' else 'address,undefined'),
-                  '-fno-sanitize-recover=all']
     units = [output / 'island.c', ROOT / 'native/bootstrap.c']
     units += [home / 'lib/runtime' / (name + '.c') for name in ['runtime', 'env', 'backtrace', 'utf']]
-    objects = []
-    for unit in units:
-        obj = output / (unit.stem + '.o')
-        run(['cc', *flags, '-c', unit, '-o', obj])
-        objects.append(obj)
-    run(['ar', 'crs', output / 'libmzed_native.a', *objects])
+    if os.name == 'nt':
+        archive, c_compiler = build_msvc(units, output, home)
+        target = 'x86_64-pc-windows-msvc'
+    else:
+        flags = ['-std=gnu11', '-O2', '-g', '-fwrapv', '-fno-strict-aliasing',
+                 '-ffunction-sections', '-fdata-sections', '-I' + str(home / 'include')]
+        if mode != 'normal':
+            flags += ['-fsanitize=' + ('undefined' if mode == 'ubsan' else 'address,undefined'),
+                      '-fno-sanitize-recover=all']
+        objects = []
+        for unit in units:
+            obj = output / (unit.stem + '.o')
+            run(['cc', *flags, '-c', unit, '-o', obj])
+            objects.append(obj)
+        archive = output / 'libmzed_native.a'
+        run(['ar', 'crs', archive, *objects])
+        target = 'native'
+        c_compiler = subprocess.check_output(['cc', '--version'], text=True).splitlines()[0]
+    harness_commit = subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip()
     (output / 'build.json').write_text(json.dumps({'schema': 1, 'gpui_commit': actual,
-        'compiler': version, 'core_version': core_version, 'mode': mode,
+        'harness_commit': harness_commit,
+        'compiler': version, 'core_version': core_version, 'mode': mode, 'target': target,
         'host_system': system, 'host_machine': platform.machine(),
-        'native_library': str(output / 'libmzed_native.a')}, indent=2) + '\n')
+        'c_compiler': c_compiler, 'native_library': str(archive)}, indent=2) + '\n')
 
 
 if __name__ == '__main__':

@@ -74,6 +74,9 @@ def fingerprint(source, native):
     }
     # The compiler output location is fixed by this lane, but does not identify its contents.
     inputs['native_build'].pop('native_library', None)
+    # Retain the source stamp in build evidence without invalidating a reusable
+    # native archive for commits that only change the smoke/editor harness.
+    inputs['native_build'].pop('harness_commit', None)
     key = hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
     return {'key': 'mzed-editor-v1-' + key, 'inputs': inputs}
 

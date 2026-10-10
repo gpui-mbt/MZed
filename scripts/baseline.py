@@ -57,7 +57,11 @@ def verify_source(source, lock=LOCK):
 def acquire(source):
     if not source.exists():
         source.parent.mkdir(parents=True, exist_ok=True)
-        subprocess.run(['git', 'clone', '--depth=1', '--single-branch', '--branch', LOCK['release'],
+        # Pin the checkout policy before Git writes files. The source lock hashes
+        # raw bytes (including lockfiles, license text and script/linux), so a
+        # Windows user's global autocrlf setting must not rewrite those inputs.
+        subprocess.run(['git', 'clone', '-c', 'core.autocrlf=false', '-c', 'core.eol=lf',
+                        '--depth=1', '--single-branch', '--branch', LOCK['release'],
                         LOCK['repository'], str(source)], check=True, timeout=600)
     verify_source(source)
     # Prevent accidental pushes without changing the tracked source baseline.
@@ -125,18 +129,23 @@ def missing_prerequisites(environment):
     return missing
 
 
+def baseline_editor_path(target):
+    executable = 'zed.exe' if platform.system() == 'Windows' else 'zed'
+    return target / 'debug' / executable
+
+
 def preserve_baseline_binary(source, record):
     target = source / 'target/mzed-baseline'
     recorded_target = Path(record.get('target_directory', ''))
     if recorded_target.resolve() != target.resolve():
         raise ValueError('baseline evidence target does not match the pinned checkout')
-    original = target / 'debug/zed'
+    original = baseline_editor_path(target)
     if not original.is_file():
         raise ValueError('baseline executable is missing from its Cargo target')
     digest = hashlib.sha256(original.read_bytes()).hexdigest()
     if digest != record.get('binary_sha256'):
         raise ValueError('baseline executable changed before it could be preserved')
-    preserved = source / 'target/mzed-baseline-preserved/debug/zed'
+    preserved = source / 'target/mzed-baseline-preserved/debug' / original.name
     destination_components = [source / 'target', source / 'target/mzed-baseline-preserved',
                               source / 'target/mzed-baseline-preserved/debug']
     if any(component.is_symlink() for component in destination_components) or preserved.is_symlink():
@@ -246,7 +255,7 @@ def build(source, output, jobs, timeout, resume_target=False):
         record['exit_code'] = exit_code
         record['baseline_build'] = 'passed' if exit_code == 0 else 'failed'
         if exit_code == 0:
-            binary = target / 'debug/zed'
+            binary = baseline_editor_path(target)
             record['binary_sha256'] = hashlib.sha256(binary.read_bytes()).hexdigest()
             preserve_baseline_binary(source, record)
         verify_source(source)

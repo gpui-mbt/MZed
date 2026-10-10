@@ -11,9 +11,21 @@ import time
 import shutil
 import subprocess
 from baseline import LOCK, ROOT, run_bounded, select_metal_toolchain
+from build_native import load_msvc_environment
+
+
+def editor_binary_path(target, windows=None):
+    is_windows = os.name == 'nt' if windows is None else windows
+    return target / 'debug' / ('zed.exe' if is_windows else 'zed')
 
 
 def build_environment(native, target, metal_toolchain=None):
+    if os.name == 'nt':
+        env = load_msvc_environment()
+        env.update(CI='true', CARGO_TARGET_DIR=str(target), RUSTUP_TOOLCHAIN=LOCK['rust'],
+                   MZED_NATIVE_LIB_DIR=str(native),
+                   ZED_UPDATE_EXPLANATION='MZed bounded derived-source experiment')
+        return env
     names = ['PATH', 'HOME', 'USER', 'LOGNAME', 'LANG', 'LC_ALL', 'TMPDIR', 'TMP', 'TEMP',
              'CARGO_HOME', 'RUSTUP_HOME', 'SSL_CERT_FILE', 'SSL_CERT_DIR', 'BINDGEN_EXTRA_CLANG_ARGS',
              'TOOLCHAINS']
@@ -33,6 +45,31 @@ def build_environment(native, target, metal_toolchain=None):
     return env
 
 
+def run_build(argv, source, env, log, timeout, disk_path):
+    if os.name != 'nt':
+        return run_bounded(argv, source, env, log, timeout, disk_path)
+    process = subprocess.Popen(argv, cwd=source, env=env, stdout=log,
+                               stderr=subprocess.STDOUT, creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
+    deadline = time.monotonic() + timeout
+    try:
+        while process.poll() is None:
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f'build exceeded {timeout} seconds')
+            if shutil.disk_usage(disk_path).free < 2 * 1024**3:
+                raise OSError('build stopped with less than 2 GiB free; artifacts preserved')
+            time.sleep(1)
+        return process.returncode
+    finally:
+        if process.poll() is None:
+            subprocess.run(['taskkill.exe', '/T', '/F', '/PID', str(process.pid)],
+                           capture_output=True, check=False)
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+
+
 def build(source, native, output, reuse_target=None):
     output.mkdir(parents=True, exist_ok=False)
     default_target = source / 'target/mzed-island'
@@ -41,8 +78,8 @@ def build(source, native, output, reuse_target=None):
     if not target.resolve().is_relative_to(source.resolve()):
         raise ValueError('Cargo target must remain under the pinned Zed checkout')
     if reused:
-        if not (target / 'debug/zed').is_file():
-            raise ValueError('--reuse-target must name a prebuilt target containing debug/zed')
+        if not editor_binary_path(target).is_file():
+            raise ValueError('--reuse-target must name a prebuilt target containing the platform editor binary')
     elif target.exists():
         raise ValueError('preserve existing target; choose a fresh source attempt')
     record = {'schema': 1, 'harness_commit': subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip(), 'kind': 'derived-same-window-island', 'upstream_commit': LOCK['commit'],
@@ -65,10 +102,10 @@ def build(source, native, output, reuse_target=None):
         if shutil.disk_usage(source).free < 20 * 1024**3:
             raise OSError('less than 20 GiB free; existing work is preserved')
         with (output / 'cargo.log').open('w') as log:
-            result = run_bounded(argv, source, env, log, 5400, source)
+            result = run_build(argv, source, env, log, 5400, source)
         record['exit_code'] = result
         if result == 0:
-            binary = target / 'debug/zed'
+            binary = editor_binary_path(target)
             record.update(build='passed', binary=str(binary), binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest())
         return result
     finally:

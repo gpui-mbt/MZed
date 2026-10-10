@@ -1,6 +1,7 @@
 import argparse
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -12,6 +13,7 @@ smoke = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(smoke)
 
 
+@unittest.skipIf(os.name == 'nt', 'this evidence harness drives X11 with xdotool, ImageMagick and OCR')
 class SmokeHarnessTests(unittest.TestCase):
     def test_settings_path_and_final_newline_match_pinned_editor(self):
         with tempfile.TemporaryDirectory() as directory:
