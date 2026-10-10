@@ -78,6 +78,17 @@ class ProvenanceTests(unittest.TestCase):
         self.assertIn('core.eol=lf', argv)
 
 
+class PatchCheckoutTests(unittest.TestCase):
+    def test_downstream_patch_is_checked_out_as_lf(self):
+        relative = 'patches/native-island.patch'
+        attributes = subprocess.check_output(
+            ['git', '-C', str(baseline.ROOT), 'check-attr', 'eol', 'whitespace', '--', relative],
+            text=True)
+        self.assertIn(f'{relative}: eol: lf', attributes)
+        self.assertIn(f'{relative}: whitespace: -blank-at-eol', attributes)
+        self.assertNotIn(b'\r', (baseline.ROOT / relative).read_bytes())
+
+
 class EvidenceTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()

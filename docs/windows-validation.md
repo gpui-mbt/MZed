@@ -18,6 +18,9 @@ MoonBit toolchain and acquire the exact sources first. Use a new disposable
 directory for the Zed source on each attempt; acquisition pins the line-ending
 policy before checkout, then verifies the release commit, clean tree and locked
 file hashes. It refuses to overwrite or reset an existing source directory.
+The downstream patch is checked out with LF endings even when the Windows Git
+configuration requests CRLF, so `git apply --check` sees the same patch bytes
+on both platforms.
 
 ```powershell
 $env:MOON_HOME = 'C:\path\to\moonbit'
