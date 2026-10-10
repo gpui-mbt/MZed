@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import platform
 from pathlib import Path, PureWindowsPath
 import shutil
 import subprocess
@@ -141,6 +142,11 @@ def build_msvc(units, output, home):
 
 
 def build(source, output, mode):
+    system = platform.system()
+    if system not in ('Linux', 'Darwin', 'Windows'):
+        raise ValueError(f'unsupported native host: {system}')
+    if system == 'Darwin' and mode != 'normal':
+        raise ValueError('the UBSan and ASan ABI lanes are qualified on Linux only')
     if os.name == 'nt' and mode != 'normal':
         raise ValueError('MSVC native builds support mode=normal; sanitizer modes are Linux-only')
     actual = subprocess.check_output(['git', '-C', str(source), 'rev-parse', 'HEAD'], text=True).strip()
@@ -203,6 +209,7 @@ def build(source, output, mode):
     (output / 'build.json').write_text(json.dumps({'schema': 1, 'gpui_commit': actual,
         'harness_commit': harness_commit,
         'compiler': version, 'core_version': core_version, 'mode': mode, 'target': target,
+        'host_system': system, 'host_machine': platform.machine(),
         'c_compiler': c_compiler, 'native_library': str(archive)}, indent=2) + '\n')
 
 

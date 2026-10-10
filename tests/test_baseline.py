@@ -1,15 +1,23 @@
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
-SPEC = importlib.util.spec_from_file_location('baseline', Path(__file__).resolve().parents[1] / 'scripts/baseline.py')
+SCRIPTS = Path(__file__).resolve().parents[1] / 'scripts'
+sys.path.insert(0, str(SCRIPTS))
+SPEC = importlib.util.spec_from_file_location('baseline', SCRIPTS / 'baseline.py')
 baseline = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(baseline)
+BUILD_SPEC = importlib.util.spec_from_file_location('build_island', SCRIPTS / 'build_island.py')
+build_island = importlib.util.module_from_spec(BUILD_SPEC)
+BUILD_SPEC.loader.exec_module(build_island)
 
 
 class ProvenanceTests(unittest.TestCase):
@@ -96,6 +104,16 @@ class EvidenceTests(unittest.TestCase):
         self.output = Path(self.directory.name) / 'evidence'
         self.environment = {'tools': {'cargo': {'path': '/cargo'}}, 'packages': {}, 'free_disk_bytes': 30 * 1024**3}
 
+    def git_checkout(self, path):
+        path.mkdir(parents=True)
+        subprocess.run(['git', 'init', '-q', str(path)], check=True)
+        return path
+
+    def git_root_for(self, executable):
+        root = subprocess.check_output(['git', '-C', str(executable.parent),
+                                        'rev-parse', '--show-toplevel'], text=True).strip()
+        return Path(root).resolve()
+
     def run_build(self):
         with patch.object(baseline, 'verify_source'), patch.object(baseline, 'inspect_environment', return_value=self.environment), \
                 patch.object(baseline.shutil, 'disk_usage', return_value=type('Disk', (), {'free': self.environment['free_disk_bytes']})()):
@@ -143,6 +161,238 @@ class EvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'already exists'):
             self.run_build()
         self.assertEqual(sentinel.read_text(), 'old evidence')
+
+    def test_existing_baseline_target_requires_explicit_resume(self):
+        source = Path(self.directory.name) / 'source'
+        target = source / 'target/mzed-baseline'
+        target.mkdir(parents=True)
+        env = dict(self.environment, system_name='Linux')
+        with patch.object(baseline, 'verify_source'), patch.object(baseline, 'inspect_environment', return_value=env), \
+                patch.object(baseline.shutil, 'disk_usage', return_value=type('Disk', (), {'free': env['free_disk_bytes']})()), \
+                patch.object(baseline, 'run_bounded') as run:
+            code = baseline.build(source, self.output, 2, 30)
+        run.assert_not_called()
+        record = json.loads((self.output / 'build.json').read_text())
+        self.assertEqual(code, 2)
+        self.assertEqual(record['baseline_build'], 'blocked')
+        self.assertFalse(record.get('target_reused', False))
+
+    def test_resume_reuses_only_existing_target_under_checkout(self):
+        source = Path(self.directory.name) / 'source'
+        target = source / 'target/mzed-baseline'
+        target.mkdir(parents=True)
+        env = dict(self.environment, system_name='Linux')
+        with patch.object(baseline, 'verify_source'), patch.object(baseline, 'inspect_environment', return_value=env), \
+                patch.object(baseline.shutil, 'disk_usage', return_value=type('Disk', (), {'free': env['free_disk_bytes']})()), \
+                patch.object(baseline, 'run_bounded', return_value=17) as run:
+            code = baseline.build(source, self.output, 2, 30, resume_target=True)
+        self.assertEqual(code, 1)
+        self.assertEqual(run.call_args.args[2]['CARGO_TARGET_DIR'], str(target))
+        record = json.loads((self.output / 'build.json').read_text())
+        self.assertEqual(record['target_reused'], True)
+
+    def test_passed_baseline_build_preserves_executable_outside_reused_target(self):
+        source = self.git_checkout(Path(self.directory.name) / 'ordinary-worktree' / '_build' / 'zed')
+        target_binary = source / 'target/mzed-baseline/debug/zed'
+        env = dict(self.environment, system_name='Linux')
+        def build_fixture(_argv, build_source, _env, _log, _timeout, _disk_path):
+            binary = build_source / 'target/mzed-baseline/debug/zed'
+            binary.parent.mkdir(parents=True)
+            binary.write_bytes(b'pinned baseline executable')
+            return 0
+        with patch.object(baseline, 'verify_source'), patch.object(baseline, 'inspect_environment', return_value=env), \
+                patch.object(baseline.shutil, 'disk_usage', return_value=type('Disk', (), {'free': env['free_disk_bytes']})()), \
+                patch.object(baseline.platform, 'system', return_value='Linux'), \
+                patch.object(baseline, 'run_bounded', side_effect=build_fixture):
+            code = baseline.build(source, self.output, 2, 30)
+        record = json.loads((self.output / 'build.json').read_text())
+        self.assertEqual(code, 0)
+        self.assertEqual(record['target_binary'], str(target_binary))
+        preserved = Path(record['binary'])
+        self.assertEqual(preserved, source / 'target/mzed-baseline-preserved/debug/zed')
+        self.assertFalse(preserved.is_relative_to(target_binary.parents[1]))
+        self.assertEqual(self.git_root_for(preserved), source.resolve())
+        self.assertEqual(preserved.read_bytes(), b'pinned baseline executable')
+
+    def test_windows_baseline_binary_keeps_exe_name_when_preserved(self):
+        source = self.git_checkout(Path(self.directory.name) / 'windows-worktree' / 'zed')
+        original = source / 'target/mzed-baseline/debug/zed.exe'
+        original.parent.mkdir(parents=True)
+        original.write_bytes(b'pinned Windows baseline executable')
+        digest = hashlib.sha256(original.read_bytes()).hexdigest()
+        record = {'target_directory': str(source / 'target/mzed-baseline'),
+                  'binary_sha256': digest}
+        with patch.object(baseline.platform, 'system', return_value='Windows'):
+            preserved = baseline.preserve_baseline_binary(source, record)
+        runnable = Path(preserved['binary'])
+        self.assertEqual(preserved['target_binary'], str(original))
+        self.assertEqual(runnable, source / 'target/mzed-baseline-preserved/debug/zed.exe')
+        self.assertEqual(self.git_root_for(runnable), source.resolve())
+        self.assertEqual(hashlib.sha256(runnable.read_bytes()).hexdigest(), digest)
+
+    def test_existing_passed_baseline_binary_can_be_preserved(self):
+        source = self.git_checkout(Path(self.directory.name) / 'external-volume' / 'Developer' / 'zed')
+        original = source / 'target/mzed-baseline/debug/zed'
+        original.parent.mkdir(parents=True)
+        original.write_bytes(b'existing pinned baseline executable')
+        target = source / 'target/mzed-baseline'
+        digest = hashlib.sha256(original.read_bytes()).hexdigest()
+        record = {'baseline_build': 'passed', 'target_directory': str(target),
+                  'binary': str(original), 'binary_sha256': digest}
+        self.output.mkdir()
+        (self.output / 'build.json').write_text(json.dumps(record))
+        with patch.object(baseline.platform, 'system', return_value='Linux'), \
+                patch.object(baseline, 'verify_source'):
+            preserved = baseline.preserve_existing_baseline_binary(source, self.output)
+        self.assertEqual(preserved['target_binary'], str(original))
+        runnable = Path(preserved['binary'])
+        self.assertEqual(runnable, source / 'target/mzed-baseline-preserved/debug/zed')
+        self.assertEqual(self.git_root_for(runnable), source.resolve())
+        self.assertEqual(hashlib.sha256(runnable.read_bytes()).hexdigest(), digest)
+
+    def test_matching_preserved_binary_is_idempotent(self):
+        source = self.git_checkout(Path(self.directory.name) / 'source')
+        original = source / 'target/mzed-baseline/debug/zed'
+        original.parent.mkdir(parents=True)
+        original.write_bytes(b'pinned baseline executable')
+        target = source / 'target/mzed-baseline'
+        digest = hashlib.sha256(original.read_bytes()).hexdigest()
+        record = {'baseline_build': 'passed', 'target_directory': str(target),
+                  'binary': str(original), 'binary_sha256': digest}
+        preserved_path = source / 'target/mzed-baseline-preserved/debug/zed'
+        preserved_path.parent.mkdir(parents=True)
+        preserved_path.write_bytes(original.read_bytes())
+        self.output.mkdir()
+        (self.output / 'build.json').write_text(json.dumps(record))
+        with patch.object(baseline.platform, 'system', return_value='Linux'), \
+                patch.object(baseline, 'verify_source'):
+            preserved = baseline.preserve_existing_baseline_binary(source, self.output)
+        self.assertEqual(preserved['binary'], str(preserved_path))
+        self.assertEqual(hashlib.sha256(preserved_path.read_bytes()).hexdigest(), digest)
+
+    def test_different_preserved_binary_is_not_overwritten(self):
+        source = self.git_checkout(Path(self.directory.name) / 'source')
+        original = source / 'target/mzed-baseline/debug/zed'
+        original.parent.mkdir(parents=True)
+        original.write_bytes(b'pinned baseline executable')
+        target = source / 'target/mzed-baseline'
+        digest = hashlib.sha256(original.read_bytes()).hexdigest()
+        record = {'baseline_build': 'passed', 'target_directory': str(target),
+                  'binary': str(original), 'binary_sha256': digest}
+        preserved_path = source / 'target/mzed-baseline-preserved/debug/zed'
+        preserved_path.parent.mkdir(parents=True)
+        preserved_path.write_bytes(b'other evidence')
+        self.output.mkdir()
+        (self.output / 'build.json').write_text(json.dumps(record))
+        with patch.object(baseline.platform, 'system', return_value='Linux'), \
+                patch.object(baseline, 'verify_source'):
+            with self.assertRaisesRegex(ValueError, 'differs'):
+                baseline.preserve_existing_baseline_binary(source, self.output)
+        self.assertEqual(preserved_path.read_bytes(), b'other evidence')
+
+    def test_symlinked_preserved_baseline_is_rejected(self):
+        source = self.git_checkout(Path(self.directory.name) / 'source')
+        original = source / 'target/mzed-baseline/debug/zed'
+        original.parent.mkdir(parents=True)
+        original.write_bytes(b'pinned baseline executable')
+        preserved_path = source / 'target/mzed-baseline-preserved/debug/zed'
+        preserved_path.parent.mkdir(parents=True)
+        preserved_path.symlink_to(original)
+        digest = hashlib.sha256(original.read_bytes()).hexdigest()
+        record = {'target_directory': str(source / 'target/mzed-baseline'), 'binary_sha256': digest}
+        with patch.object(baseline.platform, 'system', return_value='Linux'):
+            with self.assertRaisesRegex(ValueError, 'symlink'):
+                baseline.preserve_baseline_binary(source, record)
+        self.assertTrue(preserved_path.is_symlink())
+
+
+class PlatformPrerequisiteTests(unittest.TestCase):
+    def test_macos_requires_xcode_sdk_without_linux_pkg_config_libraries(self):
+        environment = {
+            'system_name': 'Darwin',
+            'tools': {name: {'path': '/' + name} for name in
+                      ['git', 'rustc', 'cargo', 'clang', 'cmake', 'xcodebuild', 'xcrun', 'xcode-select']},
+            'packages': {'xcode_developer_dir': '/Applications/Xcode.app/Contents/Developer',
+                         'macos_sdk': '/Applications/Xcode.app/Contents/Developer/SDKs/MacOSX.sdk',
+                         'metal_toolchain': 'Apple metal version',
+                         'metal_toolchain_identifier': 'com.apple.dt.toolchain.Metal.test',
+                         'metal_toolchain_build_version': 'test'},
+        }
+        self.assertEqual(baseline.missing_prerequisites(environment), [])
+
+    def test_macos_missing_sdk_is_reported(self):
+        environment = {
+            'system_name': 'Darwin',
+            'tools': {'xcodebuild': {'path': '/usr/bin/xcodebuild'}},
+            'packages': {'macos_sdk': None, 'metal_toolchain': None},
+        }
+        self.assertEqual(baseline.missing_prerequisites(environment),
+                         ['xcode_developer_dir', 'macos_sdk', 'metal_toolchain'])
+
+    def test_installed_metal_component_is_selected_and_executed(self):
+        identifier = 'com.apple.dt.toolchain.Metal.test'
+        with patch.object(baseline, 'command', side_effect=[
+            json.dumps({'status': 'installed', 'toolchainIdentifier': identifier,
+                        'buildVersion': 'test-build'}),
+            'Apple metal version test',
+        ]) as run:
+            selected = baseline.select_metal_toolchain()
+        self.assertEqual(selected, {'identifier': identifier, 'build_version': 'test-build',
+                                    'version': 'Apple metal version test'})
+        metal_call = run.call_args_list[1]
+        self.assertEqual(metal_call.args[0], ['xcrun', 'metal', '--version'])
+        self.assertEqual(metal_call.kwargs['env']['TOOLCHAINS'], identifier)
+
+    def test_metal_component_metadata_alone_does_not_pass_preflight(self):
+        with patch.object(baseline, 'command', side_effect=[
+            json.dumps({'status': 'installed', 'toolchainIdentifier': 'com.apple.dt.toolchain.Metal.test'}),
+            subprocess.CalledProcessError(1, 'xcrun'),
+        ]):
+            selected = baseline.select_metal_toolchain()
+        self.assertIsNone(selected['version'])
+
+
+class DerivedBuildEnvironmentTests(unittest.TestCase):
+    def test_windows_reused_target_uses_exe_editor_path(self):
+        self.assertEqual(build_island.editor_binary_path(Path('/fixture/target'), windows=True),
+                         Path('/fixture/target/debug/zed.exe'))
+
+    def test_inherited_toolchains_survives_when_component_has_no_identifier(self):
+        requested = 'com.apple.dt.toolchain.Metal.caller-selected'
+        metal = {'identifier': None, 'build_version': None, 'version': 'Apple metal version test'}
+        native_path = Path('/native')
+        target_path = Path('/target')
+        host_os_name = os.name
+        with patch.object(build_island.platform, 'system', return_value='Darwin'), \
+                patch.object(build_island, 'os', SimpleNamespace(name='posix', environ=os.environ)), \
+                patch.dict(os.environ, {'PATH': '/usr/bin', 'TOOLCHAINS': requested}, clear=True), \
+                patch.object(build_island.subprocess, 'check_output', return_value='/fixture/MacOSX.sdk'), \
+                patch.object(build_island, 'select_metal_toolchain', return_value=metal):
+            env = build_island.build_environment(native_path, target_path, metal)
+        self.assertEqual(env['TOOLCHAINS'], requested)
+        self.assertEqual(env['BINDGEN_EXTRA_CLANG_ARGS'], '--sysroot=/fixture/MacOSX.sdk')
+        self.assertEqual(os.name, host_os_name)
+
+
+class MacQualificationDocsTests(unittest.TestCase):
+    def test_documented_derived_launch_matches_reused_target_and_lifecycle(self):
+        docs = (SCRIPTS.parent / 'docs/macos.md').read_text()
+        target = '_build/zed-island/target/mzed-baseline'
+        preserved = target + '-preserved/debug/zed'
+        self.assertIn('--reuse-target ' + target, docs)
+        self.assertIn('"$PWD/' + target + '/debug/zed"', docs)
+        self.assertIn('"$PWD/' + preserved + '"', docs)
+        self.assertIn('executable-relative asset lookup still reaches the', docs)
+        self.assertIn('correct `.git` root even when `_build` points to external storage', docs)
+        for step in (
+            'Click the scene twice',
+            'Click `M` to hide it, then click',
+            '`M` again to remount it',
+            'Click the scene once',
+            'then click `M` once more to disable it',
+            'produce native counters `[1, 2, 1]`, one remount, and two disables',
+        ):
+            self.assertIn(step, docs)
 
 
 if __name__ == '__main__':

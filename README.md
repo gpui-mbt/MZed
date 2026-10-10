@@ -15,6 +15,7 @@ exercises native file-open/edit/save. Inspect each lane's exact CI evidence
 before calling it qualified.
 
 - [Source pin and build procedure](docs/linux-baseline.md)
+- [macOS native ABI and same-window qualification path](docs/macos.md)
 - [Native seam investigation and remaining gates](docs/native-seam.md)
 - [Windows build and smoke procedure](docs/windows-validation.md)
 - [Machine-readable source lock](upstream.lock.json)

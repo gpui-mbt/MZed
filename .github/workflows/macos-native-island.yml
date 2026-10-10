@@ -1,0 +1,52 @@
+name: macOS native island ABI
+on:
+  pull_request:
+    paths:
+      - native/**
+      - scripts/build_native.py
+      - scripts/test_native.sh
+      - tests/**
+      - .github/workflows/macos-native-island.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native-abi:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: gpui-mbt/gpui.mbt
+          ref: bf965aebbeb1dfdfed26373d4a7a58bb51a5ad01
+          path: _build/gpui
+      - uses: hustcer/setup-moonbit@1522f9aef02a8ca0187dfc00a41f5dd6b16750f7
+        with:
+          version: 0.10.14+7d59c7ec9
+          core-version: 0.10.14+7d59c7ec9
+      - name: Install the pinned Rust test toolchain
+        run: rustup toolchain install 1.98.1 --profile minimal
+      - name: Check harness and macOS SDK preflight
+        run: |
+          python3 -m unittest discover -s tests -v
+          python3 -m py_compile scripts/*.py
+          xcodebuild -version
+          xcrun --show-sdk-path
+      - name: Build the pinned MoonBit image as a macOS static archive
+        run: python3 scripts/build_native.py --source _build/gpui --output _build/native-macos
+      - name: Run the Rust to MoonBit C ABI contract tests
+        run: |
+          set -o pipefail
+          bash scripts/test_native.sh _build/native-macos 2>&1 | tee _build/native-macos-test.log
+      - name: Preserve ABI evidence without publishing a binary
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: macos-native-island-${{ github.event.pull_request.head.sha || github.sha }}
+          path: |
+            _build/native-macos/build.json
+            _build/native-macos-test.log
+          retention-days: 14

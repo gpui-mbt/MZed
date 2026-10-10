@@ -14,7 +14,7 @@ another window, or change upstream Zed. It is not full roadmap issue 0019 accept
   GPL-3.0-or-later. The derived checkout retains upstream LICENSE-GPL,
   LICENSE-APACHE and component notices. No GPL application code is copied into
   the independent Apache gpui.mbt framework. `prepare_island.py` records source
-  and patch hashes. The README review marker is intentionally left for a human.
+  and patch hashes.
 
 ## Ownership and bounded contract
 
@@ -55,6 +55,12 @@ The existing `Pinned Linux baseline` workflow is unchanged. The separate
 links real native MoonBit, runs contract tests normally and with C/runtime
 UBSan and ASan+UBSan, then builds the editor. Rust is not sanitizer-instrumented;
 LeakSanitizer is disabled and no leak qualification is claimed.
+
+The separate [macOS ABI workflow](../.github/workflows/macos-native-island.yml)
+builds the same copied-value archive and runs its Rust protocol tests on Apple
+Silicon. It does not launch Zed or qualify the Mac UI. Follow the [macOS
+qualification path](macos.md) for the pinned editor build and same-window
+status-bar smoke; the Linux X11 lane remains unchanged.
 
 The `Windows native island` workflow builds the same copied-scene archive with
 MSVC, links and runs `native/protocol.rs` in one Rust process, builds the pinned
