@@ -3,7 +3,7 @@
 import argparse
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import shutil
 import subprocess
 import tempfile
@@ -59,13 +59,35 @@ def _environment_value(environment, name):
     return None
 
 
+def _msvc_tool_target_arch(executable):
+    path = PureWindowsPath(str(executable))
+    host = path.parent.parent.name.casefold()
+    target = path.parent.name.casefold()
+    if path.name.casefold() not in {'cl.exe', 'lib.exe'}:
+        return None
+    if host not in {'hostx64', 'hostx86'} or target not in {'x64', 'x86', 'arm64'}:
+        return None
+    return target
+
+
+def _x64_msvc_tools(environment):
+    path = _environment_value(environment, 'PATH')
+    if not path:
+        return None
+    compiler = shutil.which('cl.exe', path=path)
+    librarian = shutil.which('lib.exe', path=path)
+    if (compiler and librarian and _msvc_tool_target_arch(compiler) == 'x64'
+            and _msvc_tool_target_arch(librarian) == 'x64'):
+        return compiler, librarian
+    return None
+
+
 def load_msvc_environment():
     """Return the current process environment with the x64 MSVC tools loaded."""
     if os.name != 'nt':
         raise RuntimeError('the MSVC environment is available only on Windows')
     current = dict(os.environ)
-    current_path = _environment_value(current, 'PATH')
-    if shutil.which('cl.exe', path=current_path) and shutil.which('lib.exe', path=current_path):
+    if _x64_msvc_tools(current):
         return current
     devcmd = _vsdevcmd()
     with tempfile.NamedTemporaryFile('w', suffix='.cmd', encoding='ascii', newline='\r\n', delete=False) as script:
@@ -90,9 +112,8 @@ def load_msvc_environment():
             key = keys.get(name.casefold(), name)
             environment[key] = value
             keys[name.casefold()] = key
-    path = _environment_value(environment, 'PATH')
-    if not shutil.which('cl.exe', path=path) or not shutil.which('lib.exe', path=path):
-        raise RuntimeError('VsDevCmd did not expose both cl.exe and lib.exe')
+    if not _x64_msvc_tools(environment):
+        raise RuntimeError('VsDevCmd did not expose x64-target cl.exe and lib.exe')
     return environment
 
 
