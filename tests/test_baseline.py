@@ -22,7 +22,8 @@ class ProvenanceTests(unittest.TestCase):
             return baseline.command(['git', '-C', str(self.source), *args])
         self.git = git
         git('init', '-q')
-        (self.source / 'license').write_text('preserved\n')
+        git('config', 'core.autocrlf', 'false')
+        (self.source / 'license').write_bytes(b'preserved\n')
         git('add', 'license')
         git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'fixture')
         self.lock = {'commit': git('rev-parse', 'HEAD'), 'files_sha256': {'license': hashlib.sha256(b'preserved\n').hexdigest()}}
@@ -49,6 +50,22 @@ class ProvenanceTests(unittest.TestCase):
     def test_wrong_recorded_hash_rejected(self):
         with self.assertRaisesRegex(ValueError, 'provenance mismatch'):
             baseline.verify_source(self.source, dict(self.lock, files_sha256={'license': '0' * 64}))
+
+    def test_crlf_conversion_never_passes_source_verification(self):
+        self.git('config', 'core.autocrlf', 'true')
+        (self.source / 'license').write_bytes(b'preserved\r\n')
+        with self.assertRaises(ValueError):
+            baseline.verify_source(self.source, self.lock)
+        self.assertEqual((self.source / 'license').read_bytes(), b'preserved\r\n')
+
+    def test_new_checkout_pins_lf_before_files_are_written(self):
+        source = self.source / 'fresh'
+        with patch.object(baseline.subprocess, 'run') as clone, \
+                patch.object(baseline, 'verify_source'), patch.object(baseline, 'command'):
+            baseline.acquire(source)
+        argv = clone.call_args.args[0]
+        self.assertIn('core.autocrlf=false', argv)
+        self.assertIn('core.eol=lf', argv)
 
 
 class EvidenceTests(unittest.TestCase):
@@ -83,7 +100,7 @@ class EvidenceTests(unittest.TestCase):
     def test_build_failure_is_not_smoke_success(self):
         with patch.object(baseline, 'run_bounded', return_value=17) as run:
             code, record = self.run_build()
-        self.assertEqual(run.call_args.args[2]['CARGO_TARGET_DIR'], '/fixture/target/mzed-baseline')
+        self.assertEqual(run.call_args.args[2]['CARGO_TARGET_DIR'], str(Path('/fixture') / 'target/mzed-baseline'))
         self.assertEqual(run.call_args.args[5], Path('/fixture'))
         self.assertEqual(code, 1)
         self.assertEqual(record['exit_code'], 17)

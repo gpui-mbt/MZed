@@ -35,7 +35,11 @@ def verify_source(source, lock=LOCK):
 def acquire(source):
     if not source.exists():
         source.parent.mkdir(parents=True, exist_ok=True)
-        subprocess.run(['git', 'clone', '--depth=1', '--single-branch', '--branch', LOCK['release'],
+        # Pin the checkout policy before Git writes files. The source lock hashes
+        # raw bytes (including lockfiles, license text and script/linux), so a
+        # Windows user's global autocrlf setting must not rewrite those inputs.
+        subprocess.run(['git', 'clone', '-c', 'core.autocrlf=false', '-c', 'core.eol=lf',
+                        '--depth=1', '--single-branch', '--branch', LOCK['release'],
                         LOCK['repository'], str(source)], check=True, timeout=600)
     verify_source(source)
     # Prevent accidental pushes without changing the tracked source baseline.
