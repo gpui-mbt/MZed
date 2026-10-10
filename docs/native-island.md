@@ -56,6 +56,12 @@ links real native MoonBit, runs contract tests normally and with C/runtime
 UBSan and ASan+UBSan, then builds the editor. Rust is not sanitizer-instrumented;
 LeakSanitizer is disabled and no leak qualification is claimed.
 
+The separate [macOS ABI workflow](../.github/workflows/macos-native-island.yml)
+builds the same copied-value archive and runs its Rust protocol tests on Apple
+Silicon. It does not launch Zed or qualify the Mac UI. Follow the [macOS
+qualification path](macos.md) for the pinned editor build and same-window
+status-bar smoke; the Linux X11 lane remains unchanged.
+
 The declared local churn budget is 1,000 create/dispatch/copy/destroy cycles,
 maximum four live slots and one quad per snapshot. This is a bounded regression,
 not proof of an allocation ceiling or arbitrary callback execution budget.

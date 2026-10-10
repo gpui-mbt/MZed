@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import platform
 from pathlib import Path
 import subprocess
 import tomllib
@@ -18,6 +19,11 @@ def run(argv):
 
 
 def build(source, output, mode):
+    system = platform.system()
+    if system not in ('Linux', 'Darwin'):
+        raise ValueError(f'unsupported native host: {system}')
+    if system == 'Darwin' and mode != 'normal':
+        raise ValueError('the UBSan and ASan ABI lanes are qualified on Linux only')
     actual = subprocess.check_output(['git', '-C', str(source), 'rev-parse', 'HEAD'], text=True).strip()
     if actual != GPUI_COMMIT:
         raise ValueError('gpui.mbt source does not match reviewed pin')
@@ -68,7 +74,9 @@ def build(source, output, mode):
         objects.append(obj)
     run(['ar', 'crs', output / 'libmzed_native.a', *objects])
     (output / 'build.json').write_text(json.dumps({'schema': 1, 'gpui_commit': actual,
-        'compiler': version, 'core_version': core_version, 'mode': mode, 'native_library': str(output / 'libmzed_native.a')}, indent=2) + '\n')
+        'compiler': version, 'core_version': core_version, 'mode': mode,
+        'host_system': system, 'host_machine': platform.machine(),
+        'native_library': str(output / 'libmzed_native.a')}, indent=2) + '\n')
 
 
 if __name__ == '__main__':

@@ -3,6 +3,7 @@ set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 out="$(realpath "$1")"
 mode="${2:-normal}"
+system="$(uname -s)"
 flags=()
 case "$mode" in
  normal) ;;
@@ -10,8 +11,16 @@ case "$mode" in
  asan_ubsan) flags+=(-C link-arg=-lasan -C link-arg=-lubsan) ;;
  *) exit 2 ;;
 esac
-rustc --edition 2024 -D warnings --test "$root/native/protocol.rs" -L "native=$out" -l static=mzed_native "${flags[@]}" -o "$out/protocol-tests"
+if [[ "$system" == Darwin && "$mode" != normal ]]; then
+  echo 'UBSan and ASan ABI lanes are qualified on Linux only' >&2
+  exit 2
+fi
+rustc +1.98.1 --edition 2024 -D warnings --test "$root/native/protocol.rs" -L "native=$out" -l static=mzed_native "${flags[@]}" -o "$out/protocol-tests"
 if [[ "$mode" == asan_ubsan ]]; then
+ if [[ "$system" == Darwin ]]; then
+  echo 'ASan runtime preloading is Linux-specific' >&2
+  exit 2
+ fi
  LD_PRELOAD="$(cc -print-file-name=libasan.so)" ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 "$out/protocol-tests" --nocapture
 else
  "$out/protocol-tests" --nocapture

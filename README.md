@@ -13,6 +13,7 @@ provenance, builds the unchanged editor, and exercises native file-open/edit/sav
 The native CI result must be inspected before calling that baseline qualified.
 
 - [Source pin and build procedure](docs/linux-baseline.md)
+- [macOS native ABI and same-window qualification path](docs/macos.md)
 - [Native seam investigation and remaining gates](docs/native-seam.md)
 - [Machine-readable source lock](upstream.lock.json)
 
