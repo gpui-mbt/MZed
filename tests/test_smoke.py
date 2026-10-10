@@ -29,8 +29,8 @@ class SmokeHarnessTests(unittest.TestCase):
                 self.assertTrue(config['disable_ai'])
                 self.assertFalse(config['auto_update'])
                 self.assertFalse(config['auto_install_extensions']['html'])
-                self.assertEqual(kwargs['cwd'], root)
-                self.assertEqual(kwargs['env']['HOME'], str(output / 'home'))
+                self.assertEqual(kwargs['cwd'], root.resolve())
+                self.assertEqual(kwargs['env']['HOME'], str((output / 'home').resolve()))
                 self.assertEqual(kwargs['env']['ZED_ALLOW_EMULATED_GPU'], '1')
                 self.assertTrue(config['ensure_final_newline_on_save'])
                 return process
