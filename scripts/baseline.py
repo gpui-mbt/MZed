@@ -47,8 +47,15 @@ def verify_source(source, lock=LOCK):
     actual = command(['git', '-C', str(source), 'rev-parse', 'HEAD'])
     if actual != lock['commit']:
         raise ValueError(f"source mismatch: expected {lock['commit']}, got {actual}")
-    if command(['git', '-C', str(source), 'status', '--porcelain', '--untracked-files=all']):
-        raise ValueError('baseline source is dirty; preserve it and choose a fresh source directory')
+    status = command(['git', '-C', str(source), 'status', '--porcelain', '--untracked-files=all'])
+    if status:
+        changed = status.splitlines()
+        preview = '\n'.join(changed[:20])
+        remaining = len(changed) - 20
+        suffix = f'\n... and {remaining} more path(s)' if remaining > 0 else ''
+        raise ValueError(
+            'baseline source is dirty; preserve it and choose a fresh source directory. '
+            'Changed paths (up to 20):\n' + preview + suffix)
     for name, expected in lock['files_sha256'].items():
         if hashlib.sha256((source / name).read_bytes()).hexdigest() != expected:
             raise ValueError(f'provenance mismatch: {name}')

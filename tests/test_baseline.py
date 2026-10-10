@@ -51,9 +51,19 @@ class ProvenanceTests(unittest.TestCase):
 
     def test_untracked_source_rejected(self):
         (self.source / 'extra').write_text('keep me')
-        with self.assertRaisesRegex(ValueError, 'dirty'):
+        with self.assertRaisesRegex(ValueError, 'dirty') as error:
             baseline.verify_source(self.source, self.lock)
+        self.assertIn('extra', str(error.exception))
         self.assertTrue((self.source / 'extra').exists())
+
+    def test_dirty_source_diagnostic_is_bounded(self):
+        for index in range(25):
+            (self.source / f'extra-{index:02}.txt').write_text('preserve')
+        with self.assertRaisesRegex(ValueError, 'dirty') as error:
+            baseline.verify_source(self.source, self.lock)
+        self.assertIn('extra-00.txt', str(error.exception))
+        self.assertIn('and 5 more path(s)', str(error.exception))
+        self.assertTrue((self.source / 'extra-24.txt').exists())
 
     def test_wrong_recorded_hash_rejected(self):
         with self.assertRaisesRegex(ValueError, 'provenance mismatch'):
@@ -74,6 +84,17 @@ class ProvenanceTests(unittest.TestCase):
         argv = clone.call_args.args[0]
         self.assertIn('core.autocrlf=false', argv)
         self.assertIn('core.eol=lf', argv)
+
+
+class PatchCheckoutTests(unittest.TestCase):
+    def test_downstream_patch_is_checked_out_as_lf(self):
+        relative = 'patches/native-island.patch'
+        attributes = subprocess.check_output(
+            ['git', '-C', str(baseline.ROOT), 'check-attr', 'eol', 'whitespace', '--', relative],
+            text=True)
+        self.assertIn(f'{relative}: eol: lf', attributes)
+        self.assertIn(f'{relative}: whitespace: -blank-at-eol', attributes)
+        self.assertNotIn(b'\r', (baseline.ROOT / relative).read_bytes())
 
 
 class EvidenceTests(unittest.TestCase):
