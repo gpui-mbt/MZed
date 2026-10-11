@@ -508,5 +508,52 @@ class MacInputGuardTests(unittest.TestCase):
         self.assertIsNone(capture.owned_input)
 
 
+class MacEditSaveOrderingTests(unittest.TestCase):
+    def test_editor_waits_for_typed_text_visibility_before_command_save(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = Path(directory) / "fixture.txt"
+            fixture.write_text(smoke.FIXTURE)
+            capture = object.__new__(smoke.MacSmoke)
+            capture.fixture = fixture
+            capture.window_id = 456
+            capture.record = {"snapshots": [{"x": 10, "y": 20, "scale_x": 2,
+                                             "scale_y": 2}], "operations": []}
+            actions = []
+
+            def wait_for_ocr(stage, predicate, timeout=45):
+                actions.append(("wait", stage))
+                if stage == "ready-editor":
+                    observations = [{"text": "MZed pinned baseline fixture",
+                                     "x": 12, "y": 24, "width": 240, "height": 20}]
+                    observed_text = "mzed pinned baseline fixture"
+                else:
+                    observations = [{"text": smoke.ADDITION}]
+                    observed_text = smoke.ADDITION.casefold()
+                    self.assertFalse(predicate("mzed native edit save verifed"))
+                if not predicate(observed_text):
+                    raise AssertionError(f"unexpected OCR predicate for {stage}")
+                return observations
+
+            def key(key_code, flags, *, expected_focused_window_id=None):
+                actions.append(("key", key_code, flags, expected_focused_window_id))
+                if key_code == 1 and flags == "command":
+                    fixture.write_text(smoke.EXPECTED_FILE)
+
+            capture.wait_for_ocr = wait_for_ocr
+            capture.click = lambda _capture, _point: actions.append(("click",))
+            capture.key = key
+            capture.type_text = lambda text: actions.append(("type", text))
+            capture.capture = lambda stage: actions.append(("capture", stage))
+
+            capture.edit_and_save()
+
+            visible = actions.index(("wait", "typed-text-visible"))
+            self.assertIn(("key", 125, "command", 456), actions)
+            save = actions.index(("key", 1, "command", 456))
+            self.assertLess(visible, save)
+            self.assertEqual(fixture.read_text(), smoke.EXPECTED_FILE)
+            self.assertEqual(capture.record["typed_text_visible"], [smoke.ADDITION])
+
+
 if __name__ == "__main__":
     unittest.main()

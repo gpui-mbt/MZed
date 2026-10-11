@@ -139,8 +139,8 @@ native acknowledgement records the event flags immediately before posting and
 the separate value observed after posting; the harness validates the pre-post
 value because Core Graphics can annotate the event object during posting. This
 prevents a prior synthetic shortcut from changing the meaning of the next
-click or character. The saved bytes must be
-exactly:
+click or character. Before Command-S, the harness waits until OCR sees the
+complete added line in the editor, then checks the saved bytes exactly:
 
 ```text
 MZed pinned baseline fixture

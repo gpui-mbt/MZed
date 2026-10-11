@@ -772,9 +772,15 @@ class MacSmoke:
         capture = self.record["snapshots"][-1]
         self.click(capture, center_point)
         # On macOS Command-Down moves the insertion point to the document end.
-        self.key(125, "command")
+        self.key(125, "command", expected_focused_window_id=self.window_id)
         self.type_text(ADDITION)
-        self.key(1, "command")  # Command-S.
+        visible_text = self.wait_for_ocr(
+            "typed-text-visible", lambda text: ADDITION.casefold() in text
+            and "unrecognized project" not in text)
+        self.record["typed_text_visible"] = [item.get("text", "") for item in visible_text]
+        # Wait for the rendered text before saving; native events can be posted
+        # faster than the editor processes the final queued characters.
+        self.key(1, "command", expected_focused_window_id=self.window_id)  # Command-S.
         deadline = time.monotonic() + 12
         while time.monotonic() < deadline and self.fixture.read_text() != EXPECTED_FILE:
             time.sleep(0.15)
