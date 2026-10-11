@@ -1,0 +1,678 @@
+#!/usr/bin/env python3
+"""Local macOS same-window editor/island qualification; hosted CI stays ABI-only."""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import signal
+import subprocess
+import sys
+import time
+
+BLUE = (40, 96, 160)
+PINK = (200, 96, 160)
+SCENE_LOGICAL_SIZE = (120, 18)
+FIXTURE = "MZed pinned baseline fixture\n"
+ADDITION = "MZed native edit save verified"
+EXPECTED_FILE = FIXTURE + ADDITION + "\n"
+COUNTER_RE = re.compile(r"MZed island counter=(\d+)")
+FAILURE_MARKERS = (
+    "MZed island create failed",
+    "MZed island remount failed",
+    "MZed island scene failed",
+    "MZed island dispatch failed",
+)
+EDITOR_MINIMUM_SIZE = (700, 500)
+
+
+def run(argv: list[str], *, timeout: float = 30, cwd: Path | None = None,
+        env: dict[str, str] | None = None) -> str:
+    result = subprocess.run(argv, cwd=cwd, env=env, text=True, capture_output=True,
+                            timeout=timeout)
+    if result.returncode:
+        detail = result.stderr.strip() or result.stdout.strip()
+        raise RuntimeError(f"command failed ({result.returncode}): {argv!r}: {detail[-2000:]}")
+    return result.stdout.strip()
+
+
+def helper_json(binary: Path, *arguments: object, timeout: float = 30) -> dict:
+    output = run([str(binary), *(str(value) for value in arguments)], timeout=timeout)
+    try:
+        result = json.loads(output)
+    except json.JSONDecodeError as error:
+        raise RuntimeError(f"macOS helper returned invalid JSON for {arguments!r}: {output[:1000]}") from error
+    if not isinstance(result, dict):
+        raise RuntimeError(f"macOS helper returned a non-object for {arguments!r}")
+    return result
+
+
+def color_components(binary: Path, image: Path, color: tuple[int, int, int]) -> list[dict]:
+    result = helper_json(binary, "colors", image, *color)
+    components = result.get("components")
+    if not isinstance(components, list) or any(not isinstance(item, dict) for item in components):
+        raise RuntimeError(f"invalid color component evidence: {result!r}")
+    return components
+
+
+def scene_state(snapshot: dict) -> tuple[str, tuple[int, int, int, int] | None]:
+    blue = snapshot["colors"]["blue"]
+    pink = snapshot["colors"]["pink"]
+    if blue and pink:
+        raise RuntimeError("both native scene colors appear in one window capture")
+    if not blue and not pink:
+        return "off", None
+    color, components = ("blue", blue) if blue else ("pink", pink)
+    if len(components) != 1:
+        raise RuntimeError(f"expected one {color} scene component, got {components!r}")
+    item = components[0]
+    rect = (item["x"], item["y"], item["width"], item["height"])
+    if item["pixels"] != item["width"] * item["height"]:
+        raise RuntimeError(f"{color} pixels are not one solid bounded rectangle: {item!r}")
+    return color, rect
+
+
+def validate_scene_size(rect: tuple[int, int, int, int], scale_x: float,
+                        scale_y: float | None = None) -> tuple[int, int]:
+    if scale_y is None:
+        scale_y = scale_x
+    if scale_x <= 0 or scale_y <= 0 or abs(scale_x - scale_y) > 0.02:
+        raise RuntimeError(f"window screenshot has inconsistent or invalid scale: {scale_x}x{scale_y}")
+    _, _, width, height = rect
+    logical = (round(width / scale_x), round(height / scale_y))
+    if logical != SCENE_LOGICAL_SIZE or abs(width - logical[0] * scale_x) > 1.1 or abs(height - logical[1] * scale_y) > 1.1:
+        raise RuntimeError(
+            f"scene was not scaled exactly once to 120x18 logical points: {rect}, scale={scale_x}x{scale_y}")
+    return logical
+
+
+def screen_point(capture: dict, point: tuple[float, float]) -> tuple[float, float]:
+    return (capture["x"] + point[0] / capture["scale_x"],
+            capture["y"] + point[1] / capture["scale_y"])
+
+
+def center(rect: tuple[int, int, int, int]) -> tuple[float, float]:
+    x, y, width, height = rect
+    return (x + (width - 1) / 2, y + (height - 1) / 2)
+
+
+def counters(log: str) -> list[int]:
+    return [int(value) for value in COUNTER_RE.findall(log)]
+
+
+def is_fixture_editor(window: dict, fixture_name: str) -> bool:
+    title = str(window.get("title", ""))
+    return (fixture_name.casefold() in title.casefold()
+            and float(window.get("width", 0)) >= EDITOR_MINIMUM_SIZE[0]
+            and float(window.get("height", 0)) >= EDITOR_MINIMUM_SIZE[1]
+            and window.get("visible_on_screen", True) is True
+            and int(window.get("layer", 0)) == 0)
+
+
+def select_fixture_editor(windows: list[dict], fixture_name: str) -> dict | None:
+    matches = [window for window in windows if is_fixture_editor(window, fixture_name)]
+    if len(matches) > 1:
+        raise RuntimeError(f"ambiguous visible fixture editor windows for {fixture_name!r}: {matches!r}")
+    return matches[0] if matches else None
+
+
+def preflight_blocker(permissions: dict) -> str | None:
+    if permissions.get("session_locked") is True:
+        return "the active macOS console session is locked"
+    if permissions.get("on_console") is not True:
+        return "the invoking process is not in an unlocked foreground macOS console session"
+    if permissions.get("accessibility") is not True or permissions.get("screen_recording") is not True:
+        return "Accessibility and Screen Recording permissions must already be granted to the invoking terminal"
+    return None
+
+
+def assert_scene_unchanged(snapshot: dict, current: dict, color: str,
+                           expected_counts: list[int], expected_log_counts: list[int]) -> None:
+    actual_color, actual_rect = scene_state(current)
+    previous_color, previous_rect = scene_state(snapshot)
+    if actual_color != color or previous_color != color or actual_rect != previous_rect:
+        raise RuntimeError(f"scene changed during a canceled/stale press: {previous_color}/{previous_rect} -> {actual_color}/{actual_rect}")
+    if counters(current["log"]) != expected_counts or counters(snapshot["log"]) != expected_log_counts:
+        raise RuntimeError("native dispatch log changed during a canceled/stale press")
+
+
+class MacSmoke:
+    def __init__(self, helper: Path, output: Path, label: str, binary: Path, source: Path,
+                 island: bool, timeout: float):
+        self.helper = helper
+        self.output = output
+        self.label = label
+        self.binary = binary.resolve()
+        self.source = source.resolve()
+        self.island = island
+        self.timeout = timeout
+        self.fixture = output / f"{label}-fixture.txt"
+        self.data = output / "data"
+        self.home = output / "home"
+        self.process: subprocess.Popen | None = None
+        self.window_id: int | None = None
+        self.window_title: str | None = None
+        self.pid: int | None = None
+        self.record = {
+            "schema": 1,
+            "label": label,
+            "editor_smoke": "failed",
+            "same_window_island": "failed" if island else "not_applicable",
+            "binary": str(self.binary),
+            "binary_sha256": hashlib.sha256(self.binary.read_bytes()).hexdigest(),
+            "operations": [],
+            "snapshots": [],
+            "dispatch_log_copies": [],
+        }
+
+    def prepare(self) -> tuple[dict[str, str], Path]:
+        self.fixture.write_text(FIXTURE)
+        (self.data / "config").mkdir(parents=True)
+        self.home.mkdir()
+        (self.data / "config/settings.json").write_text(json.dumps({
+            "telemetry": {"diagnostics": False, "metrics": False},
+            "disable_ai": True,
+            "auto_update": False,
+            "auto_install_extensions": {"html": False},
+            "ensure_final_newline_on_save": True,
+            "languages": {"Plain Text": {"enable_language_server": False}},
+        }, indent=2) + "\n")
+        env = dict(os.environ)
+        env.update(HOME=str(self.home), XDG_CONFIG_HOME=str(self.output / "config"),
+                   XDG_DATA_HOME=str(self.output / "xdg-data"),
+                   XDG_CACHE_HOME=str(self.output / "cache"))
+        env.pop("MZED_NATIVE_ISLAND", None)
+        if self.island:
+            env["MZED_NATIVE_ISLAND"] = "1"
+        else:
+            env["MZED_NATIVE_ISLAND"] = "0"
+        return env, self.fixture
+
+    def launch(self) -> None:
+        if not self.binary.is_file():
+            raise RuntimeError(f"editor binary does not exist: {self.binary}")
+        env, fixture = self.prepare()
+        with (self.output / "editor.log").open("w") as log:
+            self.process = subprocess.Popen(
+                [str(self.binary), "--user-data-dir", str(self.data), str(fixture)],
+                cwd=self.source, env=env, stdout=log, stderr=subprocess.STDOUT,
+                start_new_session=True)
+        self.pid = self.process.pid
+        self.record["pid"] = self.pid
+        self.wait_for_window()
+        active = helper_json(self.helper, "activate", self.pid, self.window_id)
+        self.record["activation"] = active
+        if active.get("frontmost_pid") != self.pid:
+            raise RuntimeError(f"target app did not become frontmost: {active!r}")
+        self.assert_window_identity()
+        self.record["operations"].append(
+            "opened the uniquely fixture-titled visible editor window and recorded auxiliary process windows")
+
+    def current_windows(self, *, require_frontmost: bool = True) -> list[dict]:
+        assert self.pid is not None
+        result = helper_json(self.helper, "windows", self.pid)
+        if require_frontmost and result.get("frontmost_pid") != self.pid:
+            raise RuntimeError(f"editor lost foreground ownership: {result!r}")
+        windows = result.get("windows")
+        if not isinstance(windows, list):
+            raise RuntimeError(f"invalid process window evidence: {result!r}")
+        return windows
+
+    def wait_for_window(self) -> None:
+        assert self.process is not None and self.pid is not None
+        deadline = time.monotonic() + self.timeout
+        last = []
+        while time.monotonic() < deadline:
+            if self.process.poll() is not None:
+                raise RuntimeError(f"editor exited before a window appeared: {self.process.returncode}")
+            # Window enumeration is allowed before activation; interaction and
+            # capture methods require the app to be frontmost.
+            last = self.current_windows(require_frontmost=False)
+            selected = select_fixture_editor(last, self.fixture.name)
+            if selected is not None:
+                self.window_id = int(selected["window_id"])
+                self.window_title = str(selected.get("title", ""))
+                self.record["window_id"] = self.window_id
+                self.record["window_title"] = self.window_title
+                self.record["initial_window"] = selected
+                self.record["initial_process_windows"] = last
+                self.record["auxiliary_windows"] = [
+                    dict(window, role=("untitled auxiliary process-owned window"
+                                       if not str(window.get("title", ""))
+                                       else "additional process-owned window"))
+                    for window in last if int(window.get("window_id", -1)) != self.window_id
+                ]
+                return
+            time.sleep(0.25)
+        raise RuntimeError(f"no unique visible window for fixture {self.fixture.name!r}; last windows={last!r}")
+
+    def assert_window_identity(self) -> dict:
+        assert self.pid is not None and self.window_id is not None
+        windows = self.current_windows()
+        selected = select_fixture_editor(windows, self.fixture.name)
+        if selected is None:
+            raise RuntimeError(f"fixture editor is no longer a visible level-zero window: {windows!r}")
+        if int(selected.get("window_id", -1)) != self.window_id:
+            raise RuntimeError(
+                f"selected PID/window identity changed: PID={self.pid}, window={self.window_id}, now={selected!r}")
+        if self.window_title and self.fixture.name.casefold() not in str(selected.get("title", "")).casefold():
+            raise RuntimeError(f"selected window no longer identifies the isolated fixture: {selected!r}")
+        return selected
+
+    def capture(self, stage: str) -> dict:
+        window = self.assert_window_identity()
+        assert self.pid is not None and self.window_id is not None
+        image = self.output / f"{stage}.png"
+        capture = helper_json(self.helper, "capture", self.pid, self.window_id, image)
+        if capture.get("pid") != self.pid or capture.get("window_id") != self.window_id:
+            raise RuntimeError(f"capture identity does not match selected app window: {capture!r}")
+        if capture.get("title") != window.get("title"):
+            raise RuntimeError("window title changed during capture")
+        scale_x, scale_y = float(capture["scale_x"]), float(capture["scale_y"])
+        if not 0.9 <= scale_x <= 4.0 or abs(scale_x - scale_y) > 0.02:
+            raise RuntimeError(f"unsupported or inconsistent window screenshot scale: {capture!r}")
+        if abs(int(capture["pixel_width"]) / float(capture["width"]) - scale_x) > 0.01:
+            raise RuntimeError("window screenshot width was scaled inconsistently")
+        if abs(int(capture["pixel_height"]) / float(capture["height"]) - scale_y) > 0.01:
+            raise RuntimeError("window screenshot height was scaled inconsistently")
+        entry = dict(capture, stage=stage, image=str(image))
+        self.record["snapshots"].append(entry)
+        return entry
+
+    def snapshot(self, stage: str, *, expected: str | None = None,
+                 timeout: float = 8) -> dict:
+        deadline = time.monotonic() + timeout
+        last = None
+        while time.monotonic() < deadline:
+            capture = self.capture(stage)
+            colors = {
+                "blue": color_components(self.helper, Path(capture["path"]), BLUE),
+                "pink": color_components(self.helper, Path(capture["path"]), PINK),
+            }
+            last = dict(capture, colors=colors)
+            color, rect = scene_state(last)
+            if color != "off" and rect is not None:
+                validate_scene_size(rect, float(capture["scale_x"]), float(capture["scale_y"]))
+            if expected is None or color == expected:
+                last["scene"] = color
+                if rect is not None:
+                    last["scene_rect"] = list(rect)
+                return last
+            time.sleep(0.12)
+        raise RuntimeError(f"{stage}: expected scene={expected}, last evidence={last!r}")
+
+    def wait_for_ocr(self, stage: str, predicate, timeout: float = 45) -> list[dict]:
+        deadline = time.monotonic() + timeout
+        last: list[dict] = []
+        while time.monotonic() < deadline:
+            capture = self.capture(stage)
+            ocr = helper_json(self.helper, "ocr", capture["path"]).get("observations", [])
+            last = ocr
+            (self.output / f"{stage}.ocr.json").write_text(json.dumps(ocr, indent=2) + "\n")
+            text = " ".join(str(item.get("text", "")) for item in ocr).casefold()
+            if predicate(text):
+                return ocr
+            time.sleep(0.25)
+        raise RuntimeError(f"{stage}: expected OCR content not observed; last observations={last!r}")
+
+    def click(self, capture: dict, point: tuple[float, float]) -> None:
+        self.assert_window_identity()
+        assert self.pid is not None
+        x, y = screen_point(capture, point)
+        helper_json(self.helper, "click", self.pid, x, y)
+        time.sleep(0.2)
+
+    def mouse(self, action: str, capture: dict, point: tuple[float, float]) -> None:
+        self.assert_window_identity()
+        assert self.pid is not None
+        x, y = screen_point(capture, point)
+        helper_json(self.helper, action, self.pid, x, y)
+        time.sleep(0.12)
+
+    def key(self, key_code: int, flags: str = "none") -> None:
+        self.assert_window_identity()
+        assert self.pid is not None
+        helper_json(self.helper, "key", self.pid, key_code, flags)
+        time.sleep(0.12)
+
+    def type_text(self, text: str) -> None:
+        self.assert_window_identity()
+        assert self.pid is not None
+        helper_json(self.helper, "type", self.pid, text)
+        time.sleep(0.12)
+
+    def resize(self, width: float, height: float) -> dict:
+        self.assert_window_identity()
+        assert self.pid is not None and self.window_id is not None
+        return helper_json(self.helper, "resize", self.pid, self.window_id, width, height)
+
+    def log_path(self) -> Path:
+        candidates = list(self.output.rglob("Zed.log"))
+        if len(candidates) == 1:
+            return candidates[0]
+        likely = [self.data / "logs/Zed.log", self.home / "Library/Logs/Zed/Zed.log"]
+        existing = [path for path in likely if path.is_file()]
+        if len(existing) == 1:
+            return existing[0]
+        raise RuntimeError(f"expected one isolated Zed.log below {self.output}; found {candidates!r}")
+
+    def read_log(self) -> str:
+        return self.log_path().read_text(errors="replace")
+
+    def save_dispatch_log(self, stage: str, log: str | None = None) -> str:
+        log = self.read_log() if log is None else log
+        markers = (*FAILURE_MARKERS, "MZed island counter=",
+                   "MZed island disabled and native instance destroyed",
+                   "MZed island remounted")
+        selected = [line for line in log.splitlines() if any(marker in line for marker in markers)]
+        destination = self.output / "dispatch-logs" / f"{stage}.log"
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        text = "\n".join(selected) + ("\n" if selected else "")
+        destination.write_text(text)
+        self.record["dispatch_log_copies"].append({
+            "stage": stage,
+            "path": str(destination),
+            "sha256": hashlib.sha256(text.encode()).hexdigest(),
+            "counters": counters(log),
+        })
+        return log
+
+    def wait_for_counters(self, expected: list[int], timeout: float = 8) -> str:
+        deadline = time.monotonic() + timeout
+        last = ""
+        while time.monotonic() < deadline:
+            last = self.read_log()
+            actual = counters(last)
+            if actual == expected:
+                return last
+            if actual[:len(expected)] != expected or len(actual) > len(expected):
+                raise RuntimeError(f"unexpected native dispatch sequence: expected {expected}, got {actual}")
+            time.sleep(0.1)
+        raise RuntimeError(f"native dispatch log did not reach {expected}; got {counters(last)}")
+
+    def wait_for_window_size(self, expected: tuple[float, float], timeout: float = 8) -> dict:
+        deadline = time.monotonic() + timeout
+        last = None
+        while time.monotonic() < deadline:
+            last = self.assert_window_identity()
+            if abs(float(last["width"]) - expected[0]) <= 2 and abs(float(last["height"]) - expected[1]) <= 2:
+                return last
+            time.sleep(0.15)
+        raise RuntimeError(f"Accessibility resize did not reach requested size {expected}: {last!r}")
+
+    def wait_log_phrase_count(self, phrase: str, expected: int, timeout: float = 8) -> str:
+        deadline = time.monotonic() + timeout
+        last = ""
+        while time.monotonic() < deadline:
+            last = self.read_log()
+            if last.count(phrase) == expected:
+                return last
+            if last.count(phrase) > expected:
+                raise RuntimeError(f"expected {expected} {phrase!r} log entries; got {last.count(phrase)}")
+            time.sleep(0.1)
+        raise RuntimeError(f"expected {expected} {phrase!r} log entries; got {last.count(phrase)}")
+
+    def find_scene(self, snapshot: dict) -> tuple[int, int, int, int]:
+        color, rect = scene_state(snapshot)
+        if color == "off" or rect is None:
+            raise RuntimeError("native scene pixels are absent")
+        validate_scene_size(rect, float(snapshot["scale_x"]), float(snapshot["scale_y"]))
+        return rect
+
+    def edit_and_save(self) -> None:
+        observations = self.wait_for_ocr(
+            "ready-editor", lambda text: "mzed pinned baseline fixture" in text and "unrecognized project" not in text)
+        line = next((item for item in observations
+                     if "mzed pinned baseline fixture" in str(item.get("text", "")).casefold()), None)
+        if line is None:
+            raise RuntimeError("OCR saw the ready fixture text but did not return its click target")
+        center_point = (line["x"] + line["width"] / 2, line["y"] + line["height"] / 2)
+        capture = self.record["snapshots"][-1]
+        self.click(capture, center_point)
+        # On macOS Command-Down moves the insertion point to the document end.
+        self.key(125, "command")
+        self.type_text(ADDITION)
+        self.key(1, "command")  # Command-S.
+        deadline = time.monotonic() + 12
+        while time.monotonic() < deadline and self.fixture.read_text() != EXPECTED_FILE:
+            time.sleep(0.15)
+        actual = self.fixture.read_text()
+        self.record["fixture_content"] = actual
+        if actual != EXPECTED_FILE:
+            raise RuntimeError(f"native edit/save bytes differ from expectation: {actual!r}")
+        self.record["operations"].append("typed and saved the exact expected fixture bytes through native keyboard input")
+        self.capture("after-edit-save")
+        self.record["editor_smoke"] = "passed"
+
+    def run_editor_smoke(self) -> None:
+        self.launch()
+        modal = self.wait_for_ocr(
+            "startup-modal", lambda text: "unrecognized project" in text and "unsupported gpu" not in text)
+        self.record["startup_modal_text"] = [item.get("text", "") for item in modal]
+        # Pinned MZed macOS shortcut to stay in Restricted Mode: Control-Command-S.
+        self.key(1, "command,control")
+        self.record["operations"].append("dismissed the untrusted-project prompt into Restricted Mode")
+        self.wait_for_ocr("ready-editor", lambda text: "mzed pinned baseline fixture" in text
+                          and "unrecognized project" not in text)
+        if self.island:
+            self.exercise_island()
+        self.edit_and_save()
+        self.record["log_path"] = str(self.log_path())
+        self.record["editor_smoke"] = "passed"
+        if self.island:
+            self.record["same_window_island"] = "passed"
+
+    def exercise_island(self) -> None:
+        initial = self.snapshot("island-initial", expected="blue")
+        self.record["initial_scene_rect"] = list(self.find_scene(initial))
+        initial_log = self.wait_for_counters([])
+        self.save_dispatch_log("initial", initial_log)
+        initial["log"] = initial_log
+
+        # A normal click paints pink/count 1; press ownership survives redraw and
+        # an accessibility-driven resize without a dispatch until the matching up.
+        self.click(initial, center(self.find_scene(initial)))
+        pink = self.snapshot("island-first-click", expected="pink")
+        pink_log = self.wait_for_counters([1])
+        self.save_dispatch_log("first-click", pink_log)
+        pink["log"] = pink_log
+        self.mouse("down", pink, center(self.find_scene(pink)))
+        before_resize_log = self.read_log()
+        old_window = self.assert_window_identity()
+        first_target = (float(old_window["width"]) + 80, float(old_window["height"]) + 60)
+        self.resize(*first_target)
+        first_resized = self.wait_for_window_size(first_target)
+        first_held = self.snapshot("island-held-after-first-resize", expected="pink")
+        first_log = self.read_log()
+        self.save_dispatch_log("held-after-first-resize", first_log)
+        first_held["log"] = first_log
+
+        second_target = (float(old_window["width"]) + 120, float(old_window["height"]) + 30)
+        self.resize(*second_target)
+        second_resized = self.wait_for_window_size(second_target)
+        held = self.snapshot("island-held-after-second-resize", expected="pink")
+        held_log = self.read_log()
+        self.save_dispatch_log("held-after-second-resize", held_log)
+        held["log"] = held_log
+        before_logical = validate_scene_size(
+            tuple(pink["scene_rect"]), float(pink["scale_x"]), float(pink["scale_y"]))
+        first_logical = validate_scene_size(
+            tuple(first_held["scene_rect"]), float(first_held["scale_x"]), float(first_held["scale_y"]))
+        after_logical = validate_scene_size(
+            tuple(held["scene_rect"]), float(held["scale_x"]), float(held["scale_y"]))
+        if counters(first_log) != [1] or counters(held_log) != [1] or counters(before_resize_log) != [1]:
+            raise RuntimeError("window resize changed native dispatches while the press was held")
+        if first_logical != before_logical or abs(float(pink["scale_x"]) - float(first_held["scale_x"])) > 0.01:
+            raise RuntimeError("first window resize changed the scene's logical bounds or screenshot scale")
+        if before_logical != after_logical or abs(float(pink["scale_x"]) - float(held["scale_x"])) > 0.01:
+            raise RuntimeError("second window resize changed the scene's logical bounds or screenshot scale")
+        self.record["resize"] = {
+            "before": {key: old_window[key] for key in ("x", "y", "width", "height")},
+            "first_after": {key: first_resized[key] for key in ("x", "y", "width", "height")},
+            "second_after": {key: second_resized[key] for key in ("x", "y", "width", "height")},
+            "scene_rect_before": pink["scene_rect"],
+            "scene_rect_after_first": first_held["scene_rect"],
+            "scene_rect_after_second": held["scene_rect"],
+            "logical_scene_size_before": list(before_logical),
+            "logical_scene_size_after_first": list(first_logical),
+            "logical_scene_size_after": list(after_logical),
+            "dispatches_unchanged_across_both_resizes": True,
+        }
+        self.record["operations"].append("held scene press across two same-window AX resizes; pixels and dispatch count stayed stable")
+        self.mouse("move", held, center(self.find_scene(held)))
+        self.mouse("up", held, center(self.find_scene(held)))
+        blue = self.snapshot("island-resize-release", expected="blue")
+        blue_log = self.wait_for_counters([1, 2])
+        self.save_dispatch_log("resize-release", blue_log)
+        blue["log"] = blue_log
+        self.record["operations"].append("released owned press at the resized scene and verified one dispatch")
+
+        # An owned release outside the scene is canceled by the editor contract.
+        self.mouse("down", blue, center(self.find_scene(blue)))
+        outside = (float(blue["pixel_width"]) / 2, float(blue["pixel_height"]) / 2)
+        rect = self.find_scene(blue)
+        sx, sy = outside
+        if rect[0] <= sx < rect[0] + rect[2] and rect[1] <= sy < rect[1] + rect[3]:
+            outside = (float(blue["pixel_width"]) / 2, max(0, rect[1] - 2))
+        self.mouse("move", blue, outside)
+        self.mouse("up", blue, outside)
+        after_outside = self.snapshot("island-outside-release", expected="blue")
+        current_log = self.read_log()
+        self.save_dispatch_log("outside-release", current_log)
+        after_outside["log"] = current_log
+        assert_scene_unchanged(blue, after_outside, "blue", [1, 2], [1, 2])
+        if counters(current_log) != [1, 2]:
+            raise RuntimeError(f"outside release dispatched unexpectedly: {counters(current_log)}")
+        self.record["operations"].append("owned release outside the scene preserved blue pixels and dispatches")
+
+        # Disable while a scene press is owned, release late, remount, then send
+        # a second bare release: neither stale up may affect the fresh instance.
+        self.mouse("down", after_outside, center(self.find_scene(after_outside)))
+        toggle = (self.find_scene(after_outside)[0] - 18 * float(after_outside["scale_x"]),
+                  center(self.find_scene(after_outside))[1])
+        self.click(after_outside, toggle)
+        disabled = self.snapshot("island-disabled", expected="off")
+        log = self.wait_log_phrase_count("MZed island disabled and native instance destroyed", 1)
+        self.save_dispatch_log("disabled", log)
+        if counters(log) != [1, 2]:
+            raise RuntimeError("disabling the island changed the native dispatch sequence")
+        self.mouse("up", after_outside, center(self.find_scene(after_outside)))
+        still_disabled = self.snapshot("island-disabled-late-release", expected="off")
+        log = self.read_log()
+        self.save_dispatch_log("disabled-late-release", log)
+        if counters(log) != [1, 2]:
+            raise RuntimeError("bare release after disable dispatched into native state")
+
+        self.click(disabled, toggle)
+        remounted = self.snapshot("island-remounted", expected="blue")
+        log = self.wait_log_phrase_count("MZed island remounted", 1)
+        self.save_dispatch_log("remounted", log)
+        if counters(log) != [1, 2]:
+            raise RuntimeError("remount began with an unexpected dispatch")
+        self.mouse("up", remounted, center(self.find_scene(remounted)))
+        after_remount_release = self.snapshot("island-remount-late-release", expected="blue")
+        log = self.read_log()
+        self.save_dispatch_log("remount-late-release", log)
+        if counters(log) != [1, 2]:
+            raise RuntimeError("bare release after remount dispatched into fresh native state")
+
+        self.click(after_remount_release, center(self.find_scene(after_remount_release)))
+        last_click = self.snapshot("island-fresh-click", expected="pink")
+        final_click_log = self.wait_for_counters([1, 2, 1])
+        self.save_dispatch_log("fresh-click", final_click_log)
+        self.click(last_click, toggle)
+        final_off = self.snapshot("island-final-disabled", expected="off")
+        final_log = self.wait_log_phrase_count("MZed island disabled and native instance destroyed", 2)
+        self.save_dispatch_log("final-disabled", final_log)
+        self.wait_log_phrase_count("MZed island remounted", 1)
+        if counters(final_log) != [1, 2, 1]:
+            raise RuntimeError(f"final native counter sequence is not [1, 2, 1]: {counters(final_log)}")
+        for marker in FAILURE_MARKERS:
+            if marker in final_log:
+                raise RuntimeError(f"native island log contains failure marker {marker!r}")
+        self.record["dispatch_counters"] = counters(final_log)
+        self.record["disable_count"] = final_log.count("MZed island disabled and native instance destroyed")
+        self.record["remount_count"] = final_log.count("MZed island remounted")
+        self.record["final_scene"] = scene_state(final_off)[0]
+        self.record["operations"].append("disabled, rejected late releases before and after remount, verified fresh counter 1, disabled again")
+        self.assert_window_identity()
+
+    def stop(self) -> None:
+        if self.process is not None and self.process.poll() is None:
+            os.killpg(self.process.pid, signal.SIGTERM)
+            try:
+                self.process.wait(timeout=12)
+            except subprocess.TimeoutExpired:
+                os.killpg(self.process.pid, signal.SIGKILL)
+                self.process.wait()
+
+
+def run_one(helper: Path, output: Path, label: str, binary: Path, source: Path,
+            island: bool, timeout: float) -> dict:
+    root = output / label
+    root.mkdir(parents=False, exist_ok=False)
+    smoke = MacSmoke(helper, root, label, binary, source, island, timeout)
+    try:
+        smoke.run_editor_smoke()
+    except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+        smoke.record["error"] = str(error)
+    finally:
+        try:
+            smoke.record["log_path"] = str(smoke.log_path())
+            log = smoke.read_log()
+            smoke.record["native_log_sha256"] = hashlib.sha256(log.encode()).hexdigest()
+        except (OSError, RuntimeError):
+            pass
+        smoke.stop()
+        (root / "smoke.json").write_text(json.dumps(smoke.record, indent=2) + "\n")
+    return smoke.record
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--baseline", required=True, type=Path)
+    parser.add_argument("--derived", required=True, type=Path)
+    parser.add_argument("--source", required=True, type=Path)
+    parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--timeout", type=float, default=90,
+                        help="seconds to wait for a visible fixture window")
+    args = parser.parse_args()
+    if sys.platform != "darwin":
+        parser.error("the macOS UI qualification requires a local macOS desktop")
+    output = args.output.resolve()
+    output.mkdir(parents=True, exist_ok=False)
+    helper = output / "macos-ui-helper"
+    records: dict = {"schema": 1, "status": "failed", "host": sys.platform, "runs": {}}
+    try:
+        run(["swiftc", "-O", "-framework", "AppKit", "-framework", "ApplicationServices",
+             "-framework", "Vision", "-framework", "ImageIO",
+             str(Path(__file__).with_name("macos_ui.swift")), "-o", str(helper)], timeout=180)
+        permissions = helper_json(helper, "permissions")
+        records["permissions"] = permissions
+        blocker = preflight_blocker(permissions)
+        if blocker:
+            records.update(status="blocked", error=(
+                f"{blocker}; the harness does not unlock the session, open permission prompts, or bypass TCC"))
+            raise RuntimeError(records["error"])
+        for label, binary, island in (
+            ("baseline", args.baseline, False),
+            ("derived", args.derived, True),
+        ):
+            records["runs"][label] = run_one(helper, output, label, binary, args.source, island, args.timeout)
+            if records["runs"][label]["editor_smoke"] != "passed":
+                raise RuntimeError(f"{label} editor smoke failed: {records['runs'][label].get('error')}")
+            if island and records["runs"][label]["same_window_island"] != "passed":
+                raise RuntimeError(f"{label} same-window island smoke failed: {records['runs'][label].get('error')}")
+        records["status"] = "passed"
+    except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+        records.setdefault("error", str(error))
+    (output / "qualification.json").write_text(json.dumps(records, indent=2) + "\n")
+    print(json.dumps(records, indent=2))
+    return 0 if records["status"] == "passed" else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

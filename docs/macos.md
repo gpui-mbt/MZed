@@ -94,9 +94,7 @@ If a build is interrupted or times out, keep its target and evidence. Start a
 new attempt with a fresh output path and `--resume-target`; the script records
 that it reused the target and applies the selected Metal toolchain again.
 
-Open a synthetic fixture in the baseline editor and verify native edit/save
-before marking the baseline passed. Use a separate empty profile for this run.
-After preserving that baseline evidence, patch only this derived checkout and
+After preserving the baseline executable, patch only this derived checkout and
 reuse its exact Cargo target so unchanged crates do not need a second full
 compile:
 
@@ -114,53 +112,54 @@ python3 scripts/build_island.py \
   --reuse-target _build/zed-island/target/mzed-baseline
 ```
 
-Create a new profile and plain-text fixture, then launch the derived binary from
-the pinned source checkout:
+### Run the local same-window qualification
+
+Run the executable harness against the preserved baseline and derived binaries
+from a fresh output directory:
 
 ```sh
-mkdir -p _build/macos-smoke/data/config _build/macos-smoke/home
-printf 'MZed pinned baseline fixture\n' > _build/macos-smoke/fixture.txt
-cat > _build/macos-smoke/data/config/settings.json <<'JSON'
-{
-  "telemetry": { "diagnostics": false, "metrics": false },
-  "disable_ai": true,
-  "auto_update": false,
-  "auto_install_extensions": { "html": false },
-  "ensure_final_newline_on_save": true,
-  "languages": { "Plain Text": { "enable_language_server": false } }
-}
-JSON
-HOME="$PWD/_build/macos-smoke/home" \
-  MZED_NATIVE_ISLAND=1 \
-  "$PWD/_build/zed-island/target/mzed-baseline/debug/zed" \
-  --user-data-dir "$PWD/_build/macos-smoke/data" \
-  "$PWD/_build/macos-smoke/fixture.txt"
+python3 scripts/smoke_macos.py \
+  --baseline _build/zed-island/target/mzed-baseline-preserved/debug/zed \
+  --derived _build/zed-island/target/mzed-baseline/debug/zed \
+  --source _build/zed-island \
+  --output _build/macos-ui-round1
 ```
 
-In the opened Zed window, leave the untrusted fixture in Restricted Mode with
-the pinned macOS shortcut `Control-Command-S`. Confirm that the `M` control and
-blue MoonBit scene appear in that same status bar. Click the scene twice and
-confirm that its color changes and returns. Click `M` to hide it, then click
-`M` again to remount it. Click the scene once and confirm the fresh instance
-changes color, then click `M` once more to disable it. This sequence should
-produce native counters `[1, 2, 1]`, one remount, and two disables. Type
-`MZed native edit save verified` at the end of the fixture and save with
-`Command-S`. The saved bytes must be exactly:
+The harness first checks that the invoking process is on an unlocked console
+session and already has Accessibility and Screen Recording permission. If the
+console is locked or either permission is absent, it stops before launching an
+editor, sending input or capturing a window. Unlock the Mac or grant permission
+through macOS System Settings and rerun. The harness does not unlock the session,
+open permission prompts or bypass TCC. It captures only the selected editor
+window by its WindowServer ID, not the whole display. Both binaries receive
+fresh isolated profiles and the same untrusted fixture, then the harness
+exercises native keyboard input and saves the file through the editor. The saved
+bytes must be exactly:
 
 ```text
 MZed pinned baseline fixture
 MZed native edit save verified
 ```
 
-Capture the window before and after the island interactions with macOS
-`screencapture`, and preserve `_build/macos-smoke/data/logs/Zed.log` together
-with those images and the fixture. Require log dispatches `1, 2, 1`, one
-remount, two disables, and no native failure before marking the island passed.
-Screen Recording and Accessibility permissions are required for automated
-capture/input; if macOS has not granted them, stop and mark the UI run blocked
-instead of inferring a pass from successful compilation or ABI tests.
+The harness selects the unique visible level-zero process-owned window whose
+title contains the isolated fixture name and whose size is at least 700×500
+logical points. It records other process-owned windows separately, including
+the small untitled auxiliary window used by this app. It rejects ambiguous
+fixture windows, a missing or changed selected WindowServer ID, and any loss of
+frontmost ownership before each capture or input. For the derived run, it also
+checks solid blue/pink pixels, 120×18 logical scene bounds scaled once, a held
+press across two repeated same-window resizes with unchanged dispatches,
+outside-release cancellation, and late bare releases after disable and after
+remount. It requires fresh remount state and native dispatch counters `[1, 2,
+1]`, one remount, two disables, no native failure, and the same exact edited
+file bytes. A pass writes `qualification.json`, one `smoke.json` per binary,
+the isolated editor logs, OCR records, fixtures and window-only PNGs under the
+chosen output directory. That directory must not already exist; use a new path
+for each attempt so earlier evidence stays intact.
 
-This local UI procedure proves one native open/edit/save sequence and one
-status-bar island lifecycle on the tested macOS machine. It does not claim
-general Metal performance, accessibility support, IME behavior, multi-window
-ownership, or full-frame rendering qualification.
+This local UI procedure proves one native open/edit/save sequence and the
+listed status-bar interaction gates on the tested macOS machine. Hosted macOS CI
+remains ABI-only and must not be described as GUI evidence. The local smoke
+does not qualify focus-loss/minimize cancellation, multiple editor windows or displays,
+general accessibility support, IME behavior, hardware performance or full-frame
+rendering.
