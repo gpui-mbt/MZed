@@ -73,7 +73,8 @@ func focusedWindowGuardAllows(expectedWindowID: Int?, currentWindowID: Int?) -> 
 func axPressGuardAllows(targetPID: pid_t, focusedPID: pid_t?, expectedFocusedWindowID: Int,
                         currentFocusedWindowID: Int?, buttonPID: pid_t?,
                         expectedButtonTitle: String, actualButtonTitle: String?,
-                        buttonEnabled: Bool, matchingButtonCount: Int) -> Bool {
+                        buttonEnabled: Bool, matchingButtonCount: Int,
+                        traversalComplete: Bool) -> Bool {
     focusedPID == targetPID
         && focusedWindowGuardAllows(expectedWindowID: expectedFocusedWindowID,
                                     currentWindowID: currentFocusedWindowID)
@@ -81,6 +82,7 @@ func axPressGuardAllows(targetPID: pid_t, focusedPID: pid_t?, expectedFocusedWin
         && actualButtonTitle == expectedButtonTitle
         && buttonEnabled
         && matchingButtonCount == 1
+        && traversalComplete
 }
 
 func eventGuardError(pid: pid_t, windowID: CGWindowID, fixtureName: String,
@@ -409,43 +411,111 @@ func axStringAttribute(_ element: AXUIElement, _ name: String) -> String? {
     return raw as? String
 }
 
-func axChildren(_ element: AXUIElement) -> [AXUIElement] {
-    var raw: CFTypeRef?
-    guard AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &raw) == .success,
-          let children = raw as? [AXUIElement] else { return [] }
-    return children
-}
-
 func axElementPID(_ element: AXUIElement) -> pid_t? {
     var pid: pid_t = 0
     guard AXUIElementGetPid(element, &pid) == .success else { return nil }
     return pid
 }
 
-func axButtonRecords(in root: AXUIElement, targetPID: pid_t) -> [[String: Any]] {
-    var stack: [(AXUIElement, Int)] = [(root, 0)]
-    var records = [[String: Any]]()
-    var visited = 0
-    while let (element, depth) = stack.popLast(), visited < 512 {
-        visited += 1
-        guard axElementPID(element) == targetPID else { continue }
-        let role = axStringAttribute(element, kAXRoleAttribute as String) ?? ""
-        if role == (kAXButtonRole as String) {
-            var enabledRaw: CFTypeRef?
-            let enabled = AXUIElementCopyAttributeValue(element, kAXEnabledAttribute as CFString,
-                                                        &enabledRaw) == .success
-                && (enabledRaw as? Bool == true)
-            records.append([
-                "title": axStringAttribute(element, kAXTitleAttribute as String) ?? "",
-                "role": role,
-                "enabled": enabled,
-            ])
+struct BoundedTreeTraversal<Node> {
+    let nodes: [Node]
+    let complete: Bool
+}
+
+func boundedDepthFirst<Node>(root: Node, maxNodes: Int = 512, maxDepth: Int = 8,
+                             children: (Node) -> [Node]?) -> BoundedTreeTraversal<Node> {
+    var stack: [(Node, Int)] = [(root, 0)]
+    var nodes = [Node]()
+    var complete = true
+    while let (node, depth) = stack.popLast() {
+        guard nodes.count < maxNodes else {
+            complete = false
+            break
         }
-        if depth < 8 {
-            stack.append(contentsOf: axChildren(element).map { ($0, depth + 1) })
+        nodes.append(node)
+        guard let descendants = children(node) else {
+            complete = false
+            continue
         }
+        if depth >= maxDepth {
+            if !descendants.isEmpty {
+                complete = false
+            }
+            continue
+        }
+        stack.append(contentsOf: descendants.map { ($0, depth + 1) })
     }
-    return records
+    return BoundedTreeTraversal(nodes: nodes, complete: complete)
+}
+
+// These AX roles are controls/text leaves for which AppKit commonly reports
+// AXError.attributeUnsupported instead of an empty AXChildren array. Other
+// roles must expose a readable child list before uniqueness can be claimed.
+let axLeafRoles: Set<String> = [
+    "AXButton", "AXCheckBox", "AXImage", "AXLink", "AXProgressIndicator",
+    "AXRadioButton", "AXSeparator", "AXSlider", "AXStaticText", "AXTextArea",
+    "AXTextField", "AXValueIndicator",
+]
+
+func axChildrenForScan(_ element: AXUIElement, targetPID: pid_t) -> [AXUIElement]? {
+    guard axElementPID(element) == targetPID,
+          let role = axStringAttribute(element, kAXRoleAttribute as String) else { return nil }
+    var raw: CFTypeRef?
+    let result = AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &raw)
+    if result == .success {
+        guard let children = raw as? [AXUIElement] else { return nil }
+        guard children.allSatisfy({ axElementPID($0) == targetPID }) else { return nil }
+        return children
+    }
+    if (result == .attributeUnsupported || result == .noValue) && axLeafRoles.contains(role) {
+        return []
+    }
+    return nil
+}
+
+struct AXButtonCandidate {
+    let element: AXUIElement
+    let title: String?
+    let enabled: Bool?
+}
+
+struct AXButtonScan {
+    let candidates: [AXButtonCandidate]
+    let complete: Bool
+}
+
+func axButtonScan(in root: AXUIElement, targetPID: pid_t) -> AXButtonScan {
+    let traversal = boundedDepthFirst(root: root) { axChildrenForScan($0, targetPID: targetPID) }
+    var complete = traversal.complete
+    var candidates = [AXButtonCandidate]()
+    for element in traversal.nodes {
+        guard axElementPID(element) == targetPID,
+              let role = axStringAttribute(element, kAXRoleAttribute as String) else {
+            complete = false
+            continue
+        }
+        guard role == (kAXButtonRole as String) else { continue }
+        let title = axStringAttribute(element, kAXTitleAttribute as String)
+        var enabledRaw: CFTypeRef?
+        let enabled: Bool? = AXUIElementCopyAttributeValue(
+            element, kAXEnabledAttribute as CFString, &enabledRaw) == .success
+            ? enabledRaw as? Bool : nil
+        if title == nil || enabled == nil {
+            complete = false
+        }
+        candidates.append(AXButtonCandidate(element: element, title: title, enabled: enabled))
+    }
+    return AXButtonScan(candidates: candidates, complete: complete)
+}
+
+func axButtonRecords(_ scan: AXButtonScan) -> [[String: Any]] {
+    scan.candidates.map { candidate in
+        [
+            "title": candidate.title as Any? ?? NSNull(),
+            "role": kAXButtonRole as String,
+            "enabled": candidate.enabled as Any? ?? NSNull(),
+        ]
+    }
 }
 
 func focusedAXWindow(pid: pid_t) -> AXUIElement? {
@@ -469,11 +539,15 @@ func pressFocusedButton(pid: pid_t, windowID: CGWindowID, fixtureName: String,
     guard focusedDescription["window_id"] as? Int == expectedFocusedWindowID else {
         fail("focused window identity changed: expected \(expectedFocusedWindowID), got \(focusedDescription)")
     }
-    let matches = axButtonMatches(in: focused, targetPID: pid, title: buttonTitle)
+    let scan = axButtonScan(in: focused, targetPID: pid)
+    guard scan.complete else {
+        fail("Accessibility button traversal was incomplete; refusing to claim \(buttonTitle.debugDescription) is unique")
+    }
+    let matches = scan.candidates.filter { $0.title == buttonTitle && $0.enabled == true }
     guard matches.count == 1 else {
         fail("expected exactly one enabled target-owned button named \(buttonTitle.debugDescription) in focused window; found \(matches.count)")
     }
-    let button = matches[0]
+    let button = matches[0].element
     _ = requireEventTarget(pid: pid, windowID: windowID, fixtureName: fixtureName)
     let focusedID = focusedAXWindowID(pid: pid)
     let focusedPID = axElementPID(focused)
@@ -485,7 +559,8 @@ func pressFocusedButton(pid: pid_t, windowID: CGWindowID, fixtureName: String,
                              expectedFocusedWindowID: expectedFocusedWindowID,
                              currentFocusedWindowID: focusedID, buttonPID: buttonPID,
                              expectedButtonTitle: buttonTitle, actualButtonTitle: actualTitle,
-                             buttonEnabled: buttonEnabled, matchingButtonCount: matches.count) else {
+                             buttonEnabled: buttonEnabled, matchingButtonCount: matches.count,
+                             traversalComplete: scan.complete) else {
         fail("focused window or exact enabled button changed before Accessibility press")
     }
     let result = AXUIElementPerformAction(button, kAXPressAction as CFString)
@@ -498,25 +573,6 @@ func axElementIsEnabled(_ element: AXUIElement) -> Bool {
     var raw: CFTypeRef?
     return AXUIElementCopyAttributeValue(element, kAXEnabledAttribute as CFString, &raw) == .success
         && (raw as? Bool == true)
-}
-
-func axButtonMatches(in root: AXUIElement, targetPID: pid_t, title: String) -> [AXUIElement] {
-    var stack: [(AXUIElement, Int)] = [(root, 0)]
-    var matches = [AXUIElement]()
-    var visited = 0
-    while let (element, depth) = stack.popLast(), visited < 512 {
-        visited += 1
-        guard axElementPID(element) == targetPID else { continue }
-        if axStringAttribute(element, kAXRoleAttribute as String) == (kAXButtonRole as String),
-           axStringAttribute(element, kAXTitleAttribute as String) == title,
-           axElementIsEnabled(element) {
-            matches.append(element)
-        }
-        if depth < 8 {
-            stack.append(contentsOf: axChildren(element).map { ($0, depth + 1) })
-        }
-    }
-    return matches
 }
 
 func describeAXWindow(_ element: AXUIElement, processWindows: [[String: Any]]) -> [String: Any] {
@@ -569,6 +625,8 @@ func axWindowState(pid: pid_t, windowID: CGWindowID, fixtureName: String) -> [St
     guard selected["window_id"] as? Int == Int(windowID) else {
         fail("Accessibility selected window does not map to the requested WindowServer identity")
     }
+    let focused = focusedAXWindow(pid: pid)
+    let focusedButtons = focused.map { axButtonScan(in: $0, targetPID: pid) }
     func windowAttribute(_ name: String) -> Any {
         var raw: CFTypeRef?
         guard AXUIElementCopyAttributeValue(app, name as CFString, &raw) == .success,
@@ -585,7 +643,8 @@ func axWindowState(pid: pid_t, windowID: CGWindowID, fixtureName: String) -> [St
         "focused_window": windowAttribute(kAXFocusedWindowAttribute as String),
         "main_window": windowAttribute(kAXMainWindowAttribute as String),
         "windows": windows.map { describeAXWindow($0, processWindows: processWindows) },
-        "focused_buttons": focusedAXWindow(pid: pid).map { axButtonRecords(in: $0, targetPID: pid) } ?? [],
+        "focused_buttons": focusedButtons.map(axButtonRecords) ?? [],
+        "focused_buttons_complete": focusedButtons?.complete ?? false,
     ]
 }
 
@@ -618,6 +677,114 @@ func sessionFlags(_ session: [String: Any]?) -> [String: Any] {
 
 func consoleSessionFlags() -> [String: Any] {
     sessionFlags(CGSessionCopyCurrentDictionary() as? [String: Any])
+}
+
+final class AXButtonFixtureNode {
+    let role: String
+    let title: String?
+    let enabled: Bool?
+    let children: [AXButtonFixtureNode]?
+
+    init(role: String, title: String? = nil, enabled: Bool? = nil,
+         children: [AXButtonFixtureNode]? = []) {
+        self.role = role
+        self.title = title
+        self.enabled = enabled
+        self.children = children
+    }
+}
+
+func scanAXButtonFixture(_ root: AXButtonFixtureNode) -> (matches: Int, complete: Bool) {
+    let traversal = boundedDepthFirst(root: root) { node -> [AXButtonFixtureNode]? in
+        if let children = node.children {
+            return children
+        }
+        return axLeafRoles.contains(node.role) ? [] : nil
+    }
+    var complete = traversal.complete
+    var matches = 0
+    for node in traversal.nodes where node.role == (kAXButtonRole as String) {
+        guard let title = node.title, let enabled = node.enabled else {
+            complete = false
+            continue
+        }
+        if title == "No" && enabled {
+            matches += 1
+        }
+    }
+    return (matches, complete)
+}
+
+func validateAXButtonTraversalFixtures() {
+    let oneButton = scanAXButtonFixture(AXButtonFixtureNode(
+        role: "AXWindow", children: [AXButtonFixtureNode(role: "AXButton", title: "No", enabled: true)]
+    ))
+    guard oneButton.complete, oneButton.matches == 1 else {
+        fail("one-button traversal fixture did not prove a unique enabled button")
+    }
+
+    let twoButtons = scanAXButtonFixture(AXButtonFixtureNode(
+        role: "AXWindow", children: [
+            AXButtonFixtureNode(role: "AXButton", title: "No", enabled: true),
+            AXButtonFixtureNode(role: "AXButton", title: "No", enabled: true),
+        ]
+    ))
+    guard twoButtons.complete, twoButtons.matches == 2 else {
+        fail("two-button traversal fixture did not observe both enabled matches")
+    }
+
+    // Match the reviewed 512-node LIFO counterexample: the first No is left
+    // pending after the later No and 510 leaf groups consume the scan budget.
+    var breadthChildren = [AXButtonFixtureNode(role: "AXButton", title: "No", enabled: true)]
+    breadthChildren.append(contentsOf: (0..<510).map { _ in AXButtonFixtureNode(role: "AXGroup", children: []) })
+    breadthChildren.append(AXButtonFixtureNode(role: "AXButton", title: "No", enabled: true))
+    let breadth = scanAXButtonFixture(AXButtonFixtureNode(role: "AXWindow", children: breadthChildren))
+    guard !breadth.complete, breadth.matches == 1 else {
+        fail("512-node breadth truncation fixture did not reject partial uniqueness")
+    }
+
+    var deepButton = AXButtonFixtureNode(role: "AXButton", title: "No", enabled: true)
+    for _ in 0..<9 {
+        deepButton = AXButtonFixtureNode(role: "AXGroup", children: [deepButton])
+    }
+    let depth = scanAXButtonFixture(AXButtonFixtureNode(role: "AXWindow", children: [
+        deepButton,
+        AXButtonFixtureNode(role: "AXButton", title: "No", enabled: true),
+    ]))
+    guard !depth.complete, depth.matches == 1 else {
+        fail("depth truncation fixture did not reject partial uniqueness")
+    }
+
+    let unreadableContainer = scanAXButtonFixture(AXButtonFixtureNode(
+        role: "AXWindow", children: [AXButtonFixtureNode(role: "AXGroup", children: nil)]
+    ))
+    guard !unreadableContainer.complete else {
+        fail("unreadable container fixture was incorrectly treated as an empty subtree")
+    }
+    let routineLeaf = scanAXButtonFixture(AXButtonFixtureNode(
+        role: "AXWindow", children: [AXButtonFixtureNode(role: "AXStaticText", children: nil)]
+    ))
+    guard routineLeaf.complete else {
+        fail("routine leaf without AXChildren was incorrectly treated as an unreadable subtree")
+    }
+    let unreadableButton = scanAXButtonFixture(AXButtonFixtureNode(
+        role: "AXWindow", children: [AXButtonFixtureNode(role: "AXButton", enabled: true)]
+    ))
+    guard !unreadableButton.complete else {
+        fail("button with an unreadable title was treated as incapable of matching the exact action")
+    }
+    guard !axPressGuardAllows(targetPID: 123, focusedPID: 123, expectedFocusedWindowID: 19304,
+                              currentFocusedWindowID: 19304, buttonPID: 123,
+                              expectedButtonTitle: "No", actualButtonTitle: "No",
+                              buttonEnabled: true, matchingButtonCount: 1,
+                              traversalComplete: breadth.complete),
+          !axPressGuardAllows(targetPID: 123, focusedPID: 123, expectedFocusedWindowID: 19304,
+                              currentFocusedWindowID: 19304, buttonPID: 123,
+                              expectedButtonTitle: "No", actualButtonTitle: "No",
+                              buttonEnabled: true, matchingButtonCount: 1,
+                              traversalComplete: depth.complete) else {
+        fail("AXPress accepted a partial traversal with an unexamined possible duplicate")
+    }
 }
 
 func validateSessionFlagFixtures() {
@@ -668,31 +835,38 @@ func validateSessionFlagFixtures() {
     guard axPressGuardAllows(targetPID: 123, focusedPID: 123, expectedFocusedWindowID: 19304,
                              currentFocusedWindowID: 19304, buttonPID: 123,
                              expectedButtonTitle: "No", actualButtonTitle: "No",
-                             buttonEnabled: true, matchingButtonCount: 1),
+                             buttonEnabled: true, matchingButtonCount: 1,
+                             traversalComplete: true),
           !axPressGuardAllows(targetPID: 123, focusedPID: 999, expectedFocusedWindowID: 19304,
                               currentFocusedWindowID: 19304, buttonPID: 123,
                               expectedButtonTitle: "No", actualButtonTitle: "No",
-                              buttonEnabled: true, matchingButtonCount: 1),
+                              buttonEnabled: true, matchingButtonCount: 1,
+                              traversalComplete: true),
           !axPressGuardAllows(targetPID: 123, focusedPID: 123, expectedFocusedWindowID: 19304,
                               currentFocusedWindowID: nil, buttonPID: 123,
                               expectedButtonTitle: "No", actualButtonTitle: "No",
-                              buttonEnabled: true, matchingButtonCount: 1),
+                              buttonEnabled: true, matchingButtonCount: 1,
+                              traversalComplete: true),
           !axPressGuardAllows(targetPID: 123, focusedPID: 123, expectedFocusedWindowID: 19304,
                               currentFocusedWindowID: 19304, buttonPID: 999,
                               expectedButtonTitle: "No", actualButtonTitle: "No",
-                              buttonEnabled: true, matchingButtonCount: 1),
+                              buttonEnabled: true, matchingButtonCount: 1,
+                              traversalComplete: true),
           !axPressGuardAllows(targetPID: 123, focusedPID: 123, expectedFocusedWindowID: 19304,
                               currentFocusedWindowID: 19304, buttonPID: 123,
                               expectedButtonTitle: "No", actualButtonTitle: "Yes",
-                              buttonEnabled: true, matchingButtonCount: 1),
+                              buttonEnabled: true, matchingButtonCount: 1,
+                              traversalComplete: true),
           !axPressGuardAllows(targetPID: 123, focusedPID: 123, expectedFocusedWindowID: 19304,
                               currentFocusedWindowID: 19304, buttonPID: 123,
                               expectedButtonTitle: "No", actualButtonTitle: "No",
-                              buttonEnabled: false, matchingButtonCount: 1),
+                              buttonEnabled: false, matchingButtonCount: 1,
+                              traversalComplete: true),
           !axPressGuardAllows(targetPID: 123, focusedPID: 123, expectedFocusedWindowID: 19304,
                               currentFocusedWindowID: 19304, buttonPID: 123,
                               expectedButtonTitle: "No", actualButtonTitle: "No",
-                              buttonEnabled: true, matchingButtonCount: 2) else {
+                              buttonEnabled: true, matchingButtonCount: 2,
+                              traversalComplete: true) else {
         fail("AXPress fixtures did not reject changed PID, focus, label, enabled state or ambiguity")
     }
 }
@@ -834,8 +1008,10 @@ case "permissions":
     emit(result)
 case "guard-fixtures":
     validateSessionFlagFixtures()
+    validateAXButtonTraversalFixtures()
     emit(["session_fixtures": "passed", "frontmost_guard_fixtures": "passed",
-          "focused_window_guard_fixtures": "passed", "ax_press_guard_fixtures": "passed"])
+          "focused_window_guard_fixtures": "passed", "ax_press_guard_fixtures": "passed",
+          "ax_traversal_fixtures": "passed"])
 case "windows":
     guard arguments.count == 2 else { fail("windows requires PID") }
     let pid = integer(arguments[1], "PID")

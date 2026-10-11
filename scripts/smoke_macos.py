@@ -459,6 +459,8 @@ class MacSmoke:
                 f"focused launch sheet does not map to one stable untitled same-PID auxiliary window: "
                 f"initial={original_auxiliary!r}, current={current_auxiliary!r}")
         controls = state.get("focused_buttons")
+        if state.get("focused_buttons_complete") is not True:
+            raise RuntimeError(f"focused same-process AX button tree is incomplete: {state!r}")
         no_buttons = [item for item in controls if isinstance(item, dict)
                       and item.get("title") == "No" and item.get("enabled") is True] \
             if isinstance(controls, list) else []
@@ -963,7 +965,8 @@ def main() -> int:
         if (records["guard_fixtures"].get("session_fixtures") != "passed"
                 or records["guard_fixtures"].get("frontmost_guard_fixtures") != "passed"
                 or records["guard_fixtures"].get("focused_window_guard_fixtures") != "passed"
-                or records["guard_fixtures"].get("ax_press_guard_fixtures") != "passed"):
+                or records["guard_fixtures"].get("ax_press_guard_fixtures") != "passed"
+                or records["guard_fixtures"].get("ax_traversal_fixtures") != "passed"):
             raise RuntimeError("macOS UI guard fixtures did not pass")
         permissions = helper_json(helper, "permissions")
         records["permissions"] = permissions

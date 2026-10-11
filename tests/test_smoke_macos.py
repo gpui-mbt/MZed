@@ -302,7 +302,8 @@ class MacInputGuardTests(unittest.TestCase):
         capture, _window, _ = event_controller()
         startup_ocr = [{"text": "Move Zed to Applications?"}, {"text": "No"},
                        {"text": "Unrecognized Project"}]
-        state = {"focused_window": {"window_id": 456, "role": "AXWindow"}}
+        state = {"focused_window": {"window_id": 456, "role": "AXWindow"},
+                 "focused_buttons_complete": True}
         with patch.object(capture, "capture", return_value={"path": "selected-window.png"}), \
                 patch.object(capture, "accessibility_state", return_value=state), \
                 patch.object(smoke, "helper_json", return_value={"observations": startup_ocr}) as helper:
@@ -310,6 +311,31 @@ class MacInputGuardTests(unittest.TestCase):
                 capture.dismiss_move_to_applications_notice(startup_ocr)
 
         self.assertEqual(helper.call_count, 1)
+        self.assertEqual(helper.call_args.args[1:], ("ocr", "selected-window.png"))
+        self.assertNotIn("move_to_applications_notice", capture.record)
+
+    def test_move_notice_ax_press_refuses_incomplete_button_tree(self):
+        capture, _window, _ = event_controller()
+        capture.record["auxiliary_windows"] = [{
+            "window_id": 455, "title": "", "role": "untitled auxiliary process-owned window",
+        }]
+        startup_ocr = [{"text": "Move Zed to Applications?"}, {"text": "No"},
+                       {"text": "Unrecognized Project"}]
+        state = {
+            "focused_window": {"window_id": 455, "role": "AXSheet"},
+            "focused_buttons": [{"title": "No", "enabled": True}],
+            "focused_buttons_complete": False,
+        }
+        observations = [{"text": "Move Zed to Applications?"}, {"text": "No"}]
+        with patch.object(capture, "capture", return_value={"path": "selected-window.png"}), \
+                patch.object(capture, "accessibility_state", return_value=state), \
+                patch.object(capture, "current_windows", return_value=[{
+                    "window_id": 455, "title": "",
+                }]), \
+                patch.object(smoke, "helper_json", return_value={"observations": observations}) as helper:
+            with self.assertRaisesRegex(RuntimeError, "button tree is incomplete"):
+                capture.dismiss_move_to_applications_notice(startup_ocr)
+
         self.assertEqual(helper.call_args.args[1:], ("ocr", "selected-window.png"))
         self.assertNotIn("move_to_applications_notice", capture.record)
 
