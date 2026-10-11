@@ -115,6 +115,18 @@ class MacSceneEvidenceTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "lost foreground ownership"):
                 capture.current_windows()
 
+    def test_accessibility_state_is_bound_to_the_selected_frontmost_fixture(self):
+        capture, _window, _image = event_controller()
+        state = {"pid": 123, "selected_window_id": 456, "frontmost_pid": 123,
+                 "focused_window": {"window_id": 455, "title": ""},
+                 "main_window": {"window_id": 456, "title": "fixture.txt — fixture.txt"}}
+        with patch.object(smoke, "helper_json", return_value=state) as helper:
+            self.assertEqual(capture.accessibility_state(), state)
+        self.assertEqual(helper.call_args.args[1:], ("ax-state", 123, 456, "fixture.txt"))
+        with patch.object(smoke, "helper_json", return_value=dict(state, selected_window_id=457)):
+            with self.assertRaisesRegex(RuntimeError, "does not identify the active fixture window"):
+                capture.accessibility_state()
+
     def test_fixture_window_selection_accepts_auxiliary_window_but_requires_unique_editor(self):
         editor = {"pid": 123, "window_id": 456,
                   "title": "fixture.txt — fixture.txt", "width": 1384, "height": 621,
@@ -274,6 +286,32 @@ class MacInputGuardTests(unittest.TestCase):
         self.assertEqual(capture.record["input_cleanup"][0]["ownership_state"],
                          "down_pending_ack")
         self.assertIsNone(capture.owned_input)
+
+    def test_key_can_bind_down_event_to_expected_ax_focus(self):
+        capture, window, _ = event_controller()
+        with patch.object(capture, "checked_window_identity", return_value=window), \
+                patch.object(smoke, "helper_json", return_value={"posted": True}) as helper, \
+                patch.object(smoke.time, "sleep"):
+            capture.key(53, expected_focused_window_id=455)
+
+        calls = [call.args[1:] for call in helper.call_args_list]
+        self.assertEqual(calls[0], ("key-event", 123, 456, "fixture.txt", "down", 53, "none", 455))
+        self.assertEqual(calls[1], ("key-event", 123, 456, "fixture.txt", "up", 53, "none"))
+
+    def test_move_notice_ax_press_fails_closed_when_focus_is_not_its_sheet(self):
+        capture, _window, _ = event_controller()
+        startup_ocr = [{"text": "Move Zed to Applications?"}, {"text": "No"},
+                       {"text": "Unrecognized Project"}]
+        state = {"focused_window": {"window_id": 456, "role": "AXWindow"}}
+        with patch.object(capture, "capture", return_value={"path": "selected-window.png"}), \
+                patch.object(capture, "accessibility_state", return_value=state), \
+                patch.object(smoke, "helper_json", return_value={"observations": startup_ocr}) as helper:
+            with self.assertRaisesRegex(RuntimeError, "not the focused same-process AX sheet"):
+                capture.dismiss_move_to_applications_notice(startup_ocr)
+
+        self.assertEqual(helper.call_count, 1)
+        self.assertEqual(helper.call_args.args[1:], ("ocr", "selected-window.png"))
+        self.assertNotIn("move_to_applications_notice", capture.record)
 
     def test_text_down_ack_failure_still_attempts_targeted_release(self):
         capture, window, _ = event_controller()

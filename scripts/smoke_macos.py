@@ -214,6 +214,8 @@ class MacSmoke:
                 f"target app did not become frontmost: activation={active!r}, "
                 f"fresh windows observation={self.record['activation_fresh_observation']!r}")
         self.checked_window_identity()
+        ax_state = self.accessibility_state()
+        self.record["ax_state_after_activation"] = ax_state
         self.record["operations"].append(
             "opened the uniquely fixture-titled visible editor window and recorded auxiliary process windows")
 
@@ -224,6 +226,15 @@ class MacSmoke:
         if not isinstance(windows, list):
             raise RuntimeError(f"invalid process window evidence: {result!r}")
         return result
+
+    def accessibility_state(self) -> dict:
+        assert self.pid is not None and self.window_id is not None
+        state = helper_json(self.helper, "ax-state", self.pid, self.window_id,
+                            self.fixture.name)
+        if (state.get("pid") != self.pid or state.get("selected_window_id") != self.window_id
+                or state.get("frontmost_pid") != self.pid):
+            raise RuntimeError(f"Accessibility state does not identify the active fixture window: {state!r}")
+        return state
 
     def current_windows(self, *, require_frontmost: bool = True) -> list[dict]:
         result = self.current_window_snapshot()
@@ -398,6 +409,121 @@ class MacSmoke:
             time.sleep(0.25)
         raise RuntimeError(f"{stage}: expected OCR content not observed; last observations={last!r}")
 
+    @staticmethod
+    def ocr_text(observations: list[dict]) -> str:
+        return " ".join(str(item.get("text", "")) for item in observations).casefold()
+
+    def require_focused_main_window(self, stage: str) -> dict:
+        state = self.accessibility_state()
+        focused = state.get("focused_window")
+        if (not isinstance(focused, dict) or focused.get("window_id") != self.window_id
+                or focused.get("role") != "AXWindow"):
+            raise RuntimeError(f"{stage}: focused Accessibility window is not the selected editor main window: {state!r}")
+        return state
+
+    def dismiss_move_to_applications_notice(self, startup_ocr: list[dict]) -> None:
+        text = self.ocr_text(startup_ocr)
+        if "move zed to applications?" not in text:
+            self.record["move_to_applications_notice"] = {"status": "not_present"}
+            return
+        if "unrecognized project" not in text or "no" not in text:
+            raise RuntimeError("launch notice appeared without the expected Restricted Mode prompt and No action")
+        assert self.pid is not None and self.window_id is not None
+
+        capture = self.capture("move-notice-before-press")
+        observations = helper_json(self.helper, "ocr", capture["path"]).get("observations", [])
+        text = self.ocr_text(observations)
+        if "move zed to applications?" not in text or "no" not in text:
+            raise RuntimeError("fresh selected-window capture no longer shows the exact cancelable launch notice")
+
+        state = self.accessibility_state()
+        focused = state.get("focused_window")
+        if (not isinstance(focused, dict) or focused.get("role") != "AXSheet"
+                or not isinstance(focused.get("window_id"), int)
+                or focused.get("window_id") == self.window_id):
+            raise RuntimeError(f"launch notice is not the focused same-process AX sheet: {state!r}")
+        focused_id = int(focused["window_id"])
+        original_auxiliary = [
+            window for window in self.record.get("auxiliary_windows", [])
+            if int(window.get("window_id", -1)) == focused_id
+            and not str(window.get("title", ""))
+            and window.get("role") == "untitled auxiliary process-owned window"
+        ]
+        current_auxiliary = [
+            window for window in self.current_windows()
+            if int(window.get("window_id", -1)) == focused_id
+            and not str(window.get("title", ""))
+        ]
+        if len(original_auxiliary) != 1 or len(current_auxiliary) != 1:
+            raise RuntimeError(
+                f"focused launch sheet does not map to one stable untitled same-PID auxiliary window: "
+                f"initial={original_auxiliary!r}, current={current_auxiliary!r}")
+        controls = state.get("focused_buttons")
+        no_buttons = [item for item in controls if isinstance(item, dict)
+                      and item.get("title") == "No" and item.get("enabled") is True] \
+            if isinstance(controls, list) else []
+        if len(no_buttons) != 1:
+            raise RuntimeError(f"focused launch sheet does not expose exactly one enabled No button: {state!r}")
+
+        result = helper_json(self.helper, "ax-press", self.pid, self.window_id,
+                             self.fixture.name, focused_id, "No")
+        if result.get("ax_press_error") != 0 or result.get("focused_window_id") != focused_id:
+            raise RuntimeError(f"Accessibility did not confirm the exact No button action: {result!r}")
+        evidence = {
+            "status": "pressed_exact_no_button",
+            "pid": self.pid,
+            "selected_window_id": self.window_id,
+            "focused_sheet_window_id": focused_id,
+            "focused_sheet_role": focused.get("role"),
+            "button": no_buttons[0],
+            "before_capture": capture,
+            "before_ocr": observations,
+            "ax_press": result,
+        }
+        deadline = time.monotonic() + 12
+        last = {}
+        while time.monotonic() < deadline:
+            after_capture = self.capture("move-notice-after-press")
+            after_ocr = helper_json(self.helper, "ocr", after_capture["path"]).get("observations", [])
+            after_state = self.accessibility_state()
+            remaining = [window for window in self.current_windows()
+                         if int(window.get("window_id", -1)) == focused_id]
+            after_text = self.ocr_text(after_ocr)
+            after_focus = after_state.get("focused_window")
+            last = {"capture": after_capture, "ocr": after_ocr,
+                    "ax_state": after_state, "old_sheet_windows": remaining}
+            if ("move zed to applications?" not in after_text
+                    and "unrecognized project" in after_text
+                    and isinstance(after_focus, dict)
+                    and after_focus.get("window_id") == self.window_id
+                    and after_focus.get("role") == "AXWindow"
+                    and not remaining):
+                evidence["after"] = last
+                self.record["move_to_applications_notice"] = evidence
+                self.record["operations"].append(
+                    "dismissed only the isolated editor's focused Move Zed notice through its exact AX No button")
+                return
+            time.sleep(0.2)
+        evidence["last_after"] = last
+        self.record["move_to_applications_notice"] = evidence
+        raise RuntimeError(f"launch notice dismissal was not verified by capture and AX identity: {last!r}")
+
+    def verify_ready_editor(self) -> None:
+        capture = self.capture("ready-editor-confirmation")
+        observations = helper_json(self.helper, "ocr", capture["path"]).get("observations", [])
+        text = self.ocr_text(observations)
+        if ("mzed pinned baseline fixture" not in text
+                or "unrecognized project" in text
+                or "move zed to applications?" in text):
+            raise RuntimeError(f"editor did not reach a clean ready state: {observations!r}")
+        state = self.require_focused_main_window("ready editor verification")
+        self.record["ready_editor_verification"] = {
+            "capture": capture,
+            "ocr": observations,
+            "ax_state": state,
+            "ready": True,
+        }
+
     def click(self, capture: dict, point: tuple[float, float]) -> None:
         self.mouse("down", capture, point)
         time.sleep(0.06)
@@ -444,7 +570,8 @@ class MacSmoke:
             "bounds": {key: window[key] for key in ("x", "y", "width", "height")},
         })
 
-    def key(self, key_code: int, flags: str = "none") -> None:
+    def key(self, key_code: int, flags: str = "none", *,
+            expected_focused_window_id: int | None = None) -> None:
         if self.owned_input is not None:
             raise RuntimeError(f"cannot start keyboard input while another synthetic input is owned: {self.owned_input!r}")
         assert self.pid is not None and self.window_id is not None
@@ -455,8 +582,11 @@ class MacSmoke:
             self.owned_input = {"kind": "key", "pid": self.pid, "window_id": self.window_id,
                                 "key_code": key_code, "flags": flags,
                                 "state": "down_pending_ack"}
-            helper_json(self.helper, "key-event", self.pid, self.window_id,
-                        self.fixture.name, "down", key_code, flags)
+            down_event: list[object] = ["key-event", self.pid, self.window_id,
+                                        self.fixture.name, "down", key_code, flags]
+            if expected_focused_window_id is not None:
+                down_event.append(expected_focused_window_id)
+            helper_json(self.helper, *down_event)
             self.owned_input["state"] = "down_acknowledged"
             self.checked_window_identity()
             helper_json(self.helper, "key-event", self.pid, self.window_id,
@@ -610,11 +740,20 @@ class MacSmoke:
         modal = self.wait_for_ocr(
             "startup-modal", lambda text: "unrecognized project" in text and "unsupported gpu" not in text)
         self.record["startup_modal_text"] = [item.get("text", "") for item in modal]
+        self.dismiss_move_to_applications_notice(modal)
+        modal = self.wait_for_ocr(
+            "restricted-mode-modal",
+            lambda text: "unrecognized project" in text and "move zed to applications?" not in text)
+        self.record["restricted_mode_modal_text"] = [item.get("text", "") for item in modal]
+        self.require_focused_main_window("Restricted Mode prompt before action")
         # Pinned MZed macOS shortcut to stay in Restricted Mode: Control-Command-S.
-        self.key(1, "command,control")
+        assert self.window_id is not None
+        self.key(1, "command,control", expected_focused_window_id=self.window_id)
         self.record["operations"].append("dismissed the untrusted-project prompt into Restricted Mode")
         self.wait_for_ocr("ready-editor", lambda text: "mzed pinned baseline fixture" in text
-                          and "unrecognized project" not in text)
+                          and "unrecognized project" not in text
+                          and "move zed to applications?" not in text)
+        self.verify_ready_editor()
         if self.island:
             self.exercise_island()
         self.edit_and_save()
@@ -822,7 +961,9 @@ def main() -> int:
              str(Path(__file__).with_name("macos_ui.swift")), "-o", str(helper)], timeout=180)
         records["guard_fixtures"] = helper_json(helper, "guard-fixtures")
         if (records["guard_fixtures"].get("session_fixtures") != "passed"
-                or records["guard_fixtures"].get("frontmost_guard_fixtures") != "passed"):
+                or records["guard_fixtures"].get("frontmost_guard_fixtures") != "passed"
+                or records["guard_fixtures"].get("focused_window_guard_fixtures") != "passed"
+                or records["guard_fixtures"].get("ax_press_guard_fixtures") != "passed"):
             raise RuntimeError("macOS UI guard fixtures did not pass")
         permissions = helper_json(helper, "permissions")
         records["permissions"] = permissions

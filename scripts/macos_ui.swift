@@ -66,6 +66,23 @@ func frontmostGuardAllows(targetPID: pid_t, currentFrontmostPID: pid_t?, require
     !required || currentFrontmostPID == targetPID
 }
 
+func focusedWindowGuardAllows(expectedWindowID: Int?, currentWindowID: Int?) -> Bool {
+    expectedWindowID == nil || expectedWindowID == currentWindowID
+}
+
+func axPressGuardAllows(targetPID: pid_t, focusedPID: pid_t?, expectedFocusedWindowID: Int,
+                        currentFocusedWindowID: Int?, buttonPID: pid_t?,
+                        expectedButtonTitle: String, actualButtonTitle: String?,
+                        buttonEnabled: Bool, matchingButtonCount: Int) -> Bool {
+    focusedPID == targetPID
+        && focusedWindowGuardAllows(expectedWindowID: expectedFocusedWindowID,
+                                    currentWindowID: currentFocusedWindowID)
+        && buttonPID == targetPID
+        && actualButtonTitle == expectedButtonTitle
+        && buttonEnabled
+        && matchingButtonCount == 1
+}
+
 func eventGuardError(pid: pid_t, windowID: CGWindowID, fixtureName: String,
                      requireFrontmost: Bool = true) -> String? {
     guard AXIsProcessTrusted() else {
@@ -280,7 +297,8 @@ func postMouseEvent(pid: pid_t, windowID: CGWindowID, fixtureName: String,
 }
 
 func postKeyEvent(pid: pid_t, windowID: CGWindowID, fixtureName: String,
-                  action: String, keyCode: Int, flags: CGEventFlags) {
+                  action: String, keyCode: Int, flags: CGEventFlags,
+                  expectedFocusedWindowID: Int? = nil) {
     guard action == "down" || action == "up" else { fail("key action must be down or up") }
     guard (0...Int(UInt16.max)).contains(keyCode),
           let event = CGEvent(keyboardEventSource: nil, virtualKey: UInt16(keyCode), keyDown: action == "down") else {
@@ -288,8 +306,20 @@ func postKeyEvent(pid: pid_t, windowID: CGWindowID, fixtureName: String,
     }
     event.flags = flags
     _ = requireEventTarget(pid: pid, windowID: windowID, fixtureName: fixtureName)
+    if expectedFocusedWindowID != nil {
+        let focusedID = focusedAXWindowID(pid: pid)
+        guard focusedWindowGuardAllows(expectedWindowID: expectedFocusedWindowID,
+                                       currentWindowID: focusedID) else {
+            fail("focused Accessibility window changed before guarded key event: expected \(expectedFocusedWindowID!), got \(String(describing: focusedID))")
+        }
+    }
+    _ = requireEventTarget(pid: pid, windowID: windowID, fixtureName: fixtureName)
     event.post(tap: .cghidEventTap)
-    emit(["pid": Int(pid), "window_id": Int(windowID), "event": "key-\(action)", "posted": true])
+    var result: [String: Any] = ["pid": Int(pid), "window_id": Int(windowID), "event": "key-\(action)", "posted": true]
+    if let expectedFocusedWindowID {
+        result["expected_focused_window_id"] = expectedFocusedWindowID
+    }
+    emit(result)
 }
 
 func postTextEvent(pid: pid_t, windowID: CGWindowID, fixtureName: String,
@@ -355,6 +385,208 @@ func accessibilityWindow(pid: pid_t, windowID: CGWindowID, fixtureName: String) 
         return geometryMatches[0]
     }
     fail("Accessibility did not expose window \(windowID) with matching identity or geometry for PID \(pid)")
+}
+
+func axWindowBounds(_ element: AXUIElement) -> CGRect? {
+    var positionRaw: CFTypeRef?
+    var sizeRaw: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &positionRaw) == .success,
+          AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &sizeRaw) == .success,
+          let positionRaw, let sizeRaw else { return nil }
+    let position = unsafeBitCast(positionRaw, to: AXValue.self)
+    let size = unsafeBitCast(sizeRaw, to: AXValue.self)
+    guard AXValueGetType(position) == .cgPoint, AXValueGetType(size) == .cgSize else { return nil }
+    var point = CGPoint.zero
+    var dimensions = CGSize.zero
+    guard AXValueGetValue(position, .cgPoint, &point),
+          AXValueGetValue(size, .cgSize, &dimensions) else { return nil }
+    return CGRect(origin: point, size: dimensions)
+}
+
+func axStringAttribute(_ element: AXUIElement, _ name: String) -> String? {
+    var raw: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(element, name as CFString, &raw) == .success else { return nil }
+    return raw as? String
+}
+
+func axChildren(_ element: AXUIElement) -> [AXUIElement] {
+    var raw: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &raw) == .success,
+          let children = raw as? [AXUIElement] else { return [] }
+    return children
+}
+
+func axElementPID(_ element: AXUIElement) -> pid_t? {
+    var pid: pid_t = 0
+    guard AXUIElementGetPid(element, &pid) == .success else { return nil }
+    return pid
+}
+
+func axButtonRecords(in root: AXUIElement, targetPID: pid_t) -> [[String: Any]] {
+    var stack: [(AXUIElement, Int)] = [(root, 0)]
+    var records = [[String: Any]]()
+    var visited = 0
+    while let (element, depth) = stack.popLast(), visited < 512 {
+        visited += 1
+        guard axElementPID(element) == targetPID else { continue }
+        let role = axStringAttribute(element, kAXRoleAttribute as String) ?? ""
+        if role == (kAXButtonRole as String) {
+            var enabledRaw: CFTypeRef?
+            let enabled = AXUIElementCopyAttributeValue(element, kAXEnabledAttribute as CFString,
+                                                        &enabledRaw) == .success
+                && (enabledRaw as? Bool == true)
+            records.append([
+                "title": axStringAttribute(element, kAXTitleAttribute as String) ?? "",
+                "role": role,
+                "enabled": enabled,
+            ])
+        }
+        if depth < 8 {
+            stack.append(contentsOf: axChildren(element).map { ($0, depth + 1) })
+        }
+    }
+    return records
+}
+
+func focusedAXWindow(pid: pid_t) -> AXUIElement? {
+    let app = AXUIElementCreateApplication(pid)
+    var raw: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(app, kAXFocusedWindowAttribute as CFString, &raw) == .success,
+          let raw, CFGetTypeID(raw) == AXUIElementGetTypeID() else { return nil }
+    let focused = unsafeBitCast(raw, to: AXUIElement.self)
+    guard axElementPID(focused) == pid else { return nil }
+    return focused
+}
+
+func pressFocusedButton(pid: pid_t, windowID: CGWindowID, fixtureName: String,
+                        expectedFocusedWindowID: Int, buttonTitle: String) {
+    _ = requireEventTarget(pid: pid, windowID: windowID, fixtureName: fixtureName)
+    guard let focused = focusedAXWindow(pid: pid) else {
+        fail("Accessibility did not expose a focused window owned by target PID \(pid)")
+    }
+    let processWindows = windowRecords().filter { ($0["pid"] as? Int) == Int(pid) }
+    let focusedDescription = describeAXWindow(focused, processWindows: processWindows)
+    guard focusedDescription["window_id"] as? Int == expectedFocusedWindowID else {
+        fail("focused window identity changed: expected \(expectedFocusedWindowID), got \(focusedDescription)")
+    }
+    let matches = axButtonMatches(in: focused, targetPID: pid, title: buttonTitle)
+    guard matches.count == 1 else {
+        fail("expected exactly one enabled target-owned button named \(buttonTitle.debugDescription) in focused window; found \(matches.count)")
+    }
+    let button = matches[0]
+    _ = requireEventTarget(pid: pid, windowID: windowID, fixtureName: fixtureName)
+    let focusedID = focusedAXWindowID(pid: pid)
+    let focusedPID = axElementPID(focused)
+    let buttonPID = axElementPID(button)
+    let actualTitle = axStringAttribute(button, kAXTitleAttribute as String)
+    let buttonEnabled = axElementIsEnabled(button)
+    guard axStringAttribute(button, kAXRoleAttribute as String) == (kAXButtonRole as String),
+          axPressGuardAllows(targetPID: pid, focusedPID: focusedPID,
+                             expectedFocusedWindowID: expectedFocusedWindowID,
+                             currentFocusedWindowID: focusedID, buttonPID: buttonPID,
+                             expectedButtonTitle: buttonTitle, actualButtonTitle: actualTitle,
+                             buttonEnabled: buttonEnabled, matchingButtonCount: matches.count) else {
+        fail("focused window or exact enabled button changed before Accessibility press")
+    }
+    let result = AXUIElementPerformAction(button, kAXPressAction as CFString)
+    emit(["pid": Int(pid), "window_id": Int(windowID),
+          "focused_window_id": expectedFocusedWindowID,
+          "button_title": buttonTitle, "ax_press_error": result.rawValue])
+}
+
+func axElementIsEnabled(_ element: AXUIElement) -> Bool {
+    var raw: CFTypeRef?
+    return AXUIElementCopyAttributeValue(element, kAXEnabledAttribute as CFString, &raw) == .success
+        && (raw as? Bool == true)
+}
+
+func axButtonMatches(in root: AXUIElement, targetPID: pid_t, title: String) -> [AXUIElement] {
+    var stack: [(AXUIElement, Int)] = [(root, 0)]
+    var matches = [AXUIElement]()
+    var visited = 0
+    while let (element, depth) = stack.popLast(), visited < 512 {
+        visited += 1
+        guard axElementPID(element) == targetPID else { continue }
+        if axStringAttribute(element, kAXRoleAttribute as String) == (kAXButtonRole as String),
+           axStringAttribute(element, kAXTitleAttribute as String) == title,
+           axElementIsEnabled(element) {
+            matches.append(element)
+        }
+        if depth < 8 {
+            stack.append(contentsOf: axChildren(element).map { ($0, depth + 1) })
+        }
+    }
+    return matches
+}
+
+func describeAXWindow(_ element: AXUIElement, processWindows: [[String: Any]]) -> [String: Any] {
+    var detail: [String: Any] = [
+        "title": axStringAttribute(element, kAXTitleAttribute as String) ?? "",
+        "role": axStringAttribute(element, kAXRoleAttribute as String) ?? "",
+        "subrole": axStringAttribute(element, kAXSubroleAttribute as String) ?? "",
+    ]
+    if let bounds = axWindowBounds(element) {
+        detail["bounds"] = [
+            "x": Double(bounds.origin.x), "y": Double(bounds.origin.y),
+            "width": Double(bounds.width), "height": Double(bounds.height),
+        ]
+        let matches = processWindows.filter { record in
+            guard let x = record["x"] as? Double, let y = record["y"] as? Double,
+                  let width = record["width"] as? Double, let height = record["height"] as? Double else {
+                return false
+            }
+            return abs(x - Double(bounds.origin.x)) <= 2
+                && abs(y - Double(bounds.origin.y)) <= 2
+                && abs(width - Double(bounds.width)) <= 2
+                && abs(height - Double(bounds.height)) <= 2
+        }
+        if matches.count == 1, let windowID = matches[0]["window_id"] {
+            detail["window_id"] = windowID
+        }
+    }
+    return detail
+}
+
+func focusedAXWindowID(pid: pid_t) -> Int? {
+    guard let focused = focusedAXWindow(pid: pid) else { return nil }
+    let processWindows = windowRecords().filter { ($0["pid"] as? Int) == Int(pid) }
+    return describeAXWindow(focused, processWindows: processWindows)["window_id"] as? Int
+}
+
+func axWindowState(pid: pid_t, windowID: CGWindowID, fixtureName: String) -> [String: Any] {
+    _ = requireEventTarget(pid: pid, windowID: windowID, fixtureName: fixtureName)
+    let app = AXUIElementCreateApplication(pid)
+    var windowsRaw: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &windowsRaw) == .success,
+          let windows = windowsRaw as? [AXUIElement] else {
+        fail("Accessibility did not expose the target application's window list")
+    }
+    let processWindows = windowRecords().filter { ($0["pid"] as? Int) == Int(pid) }
+    let selected = describeAXWindow(
+        accessibilityWindow(pid: pid, windowID: windowID, fixtureName: fixtureName),
+        processWindows: processWindows
+    )
+    guard selected["window_id"] as? Int == Int(windowID) else {
+        fail("Accessibility selected window does not map to the requested WindowServer identity")
+    }
+    func windowAttribute(_ name: String) -> Any {
+        var raw: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(app, name as CFString, &raw) == .success,
+              let raw, CFGetTypeID(raw) == AXUIElementGetTypeID() else { return NSNull() }
+        let element = unsafeBitCast(raw, to: AXUIElement.self)
+        return describeAXWindow(element, processWindows: processWindows)
+    }
+    return [
+        "pid": Int(pid),
+        "selected_window_id": Int(windowID),
+        "frontmost_pid": Int(NSWorkspace.shared.frontmostApplication?.processIdentifier ?? -1),
+        "session": consoleSessionFlags(),
+        "selected_window": selected,
+        "focused_window": windowAttribute(kAXFocusedWindowAttribute as String),
+        "main_window": windowAttribute(kAXMainWindowAttribute as String),
+        "windows": windows.map { describeAXWindow($0, processWindows: processWindows) },
+        "focused_buttons": focusedAXWindow(pid: pid).map { axButtonRecords(in: $0, targetPID: pid) } ?? [],
+    ]
 }
 
 func sessionFlags(_ session: [String: Any]?) -> [String: Any] {
@@ -426,6 +658,42 @@ func validateSessionFlagFixtures() {
           !frontmostGuardAllows(targetPID: 123, currentFrontmostPID: 999, required: true),
           frontmostGuardAllows(targetPID: 123, currentFrontmostPID: 123, required: true) else {
         fail("activation and regular-event frontmost guard fixtures did not preserve their policies")
+    }
+    guard focusedWindowGuardAllows(expectedWindowID: nil, currentWindowID: nil),
+          focusedWindowGuardAllows(expectedWindowID: 19304, currentWindowID: 19304),
+          !focusedWindowGuardAllows(expectedWindowID: 19304, currentWindowID: 19303),
+          !focusedWindowGuardAllows(expectedWindowID: 19304, currentWindowID: nil) else {
+        fail("expected focused-window fixture did not reject changed or unknown AX focus")
+    }
+    guard axPressGuardAllows(targetPID: 123, focusedPID: 123, expectedFocusedWindowID: 19304,
+                             currentFocusedWindowID: 19304, buttonPID: 123,
+                             expectedButtonTitle: "No", actualButtonTitle: "No",
+                             buttonEnabled: true, matchingButtonCount: 1),
+          !axPressGuardAllows(targetPID: 123, focusedPID: 999, expectedFocusedWindowID: 19304,
+                              currentFocusedWindowID: 19304, buttonPID: 123,
+                              expectedButtonTitle: "No", actualButtonTitle: "No",
+                              buttonEnabled: true, matchingButtonCount: 1),
+          !axPressGuardAllows(targetPID: 123, focusedPID: 123, expectedFocusedWindowID: 19304,
+                              currentFocusedWindowID: nil, buttonPID: 123,
+                              expectedButtonTitle: "No", actualButtonTitle: "No",
+                              buttonEnabled: true, matchingButtonCount: 1),
+          !axPressGuardAllows(targetPID: 123, focusedPID: 123, expectedFocusedWindowID: 19304,
+                              currentFocusedWindowID: 19304, buttonPID: 999,
+                              expectedButtonTitle: "No", actualButtonTitle: "No",
+                              buttonEnabled: true, matchingButtonCount: 1),
+          !axPressGuardAllows(targetPID: 123, focusedPID: 123, expectedFocusedWindowID: 19304,
+                              currentFocusedWindowID: 19304, buttonPID: 123,
+                              expectedButtonTitle: "No", actualButtonTitle: "Yes",
+                              buttonEnabled: true, matchingButtonCount: 1),
+          !axPressGuardAllows(targetPID: 123, focusedPID: 123, expectedFocusedWindowID: 19304,
+                              currentFocusedWindowID: 19304, buttonPID: 123,
+                              expectedButtonTitle: "No", actualButtonTitle: "No",
+                              buttonEnabled: false, matchingButtonCount: 1),
+          !axPressGuardAllows(targetPID: 123, focusedPID: 123, expectedFocusedWindowID: 19304,
+                              currentFocusedWindowID: 19304, buttonPID: 123,
+                              expectedButtonTitle: "No", actualButtonTitle: "No",
+                              buttonEnabled: true, matchingButtonCount: 2) else {
+        fail("AXPress fixtures did not reject changed PID, focus, label, enabled state or ambiguity")
     }
 }
 
@@ -552,7 +820,7 @@ func colorComponents(_ path: String, red: UInt8, green: UInt8, blue: UInt8) -> [
 }
 
 guard CommandLine.arguments.count >= 2 else {
-    fail("usage: macos_ui.swift permissions|guard-fixtures|windows PID|activate PID WINDOW_ID FIXTURE|capture PID WINDOW_ID FIXTURE PNG|mouse-event PID WINDOW_ID FIXTURE ACTION X Y|key-event PID WINDOW_ID FIXTURE ACTION CODE FLAGS|text-event PID WINDOW_ID FIXTURE ACTION TEXT|cleanup-mouse PID X Y|cleanup-key PID CODE FLAGS|cleanup-text PID TEXT|resize PID WINDOW_ID FIXTURE WIDTH HEIGHT|ocr PNG|colors PNG RED GREEN BLUE")
+    fail("usage: macos_ui.swift permissions|guard-fixtures|windows PID|ax-state PID WINDOW_ID FIXTURE|ax-press PID WINDOW_ID FIXTURE FOCUSED_WINDOW_ID BUTTON_TITLE|activate PID WINDOW_ID FIXTURE|capture PID WINDOW_ID FIXTURE PNG|mouse-event PID WINDOW_ID FIXTURE ACTION X Y|key-event PID WINDOW_ID FIXTURE ACTION CODE FLAGS|text-event PID WINDOW_ID FIXTURE ACTION TEXT|cleanup-mouse PID X Y|cleanup-key PID CODE FLAGS|cleanup-text PID TEXT|resize PID WINDOW_ID FIXTURE WIDTH HEIGHT|ocr PNG|colors PNG RED GREEN BLUE")
 }
 
 let arguments = Array(CommandLine.arguments.dropFirst())
@@ -566,12 +834,25 @@ case "permissions":
     emit(result)
 case "guard-fixtures":
     validateSessionFlagFixtures()
-    emit(["session_fixtures": "passed", "frontmost_guard_fixtures": "passed"])
+    emit(["session_fixtures": "passed", "frontmost_guard_fixtures": "passed",
+          "focused_window_guard_fixtures": "passed", "ax_press_guard_fixtures": "passed"])
 case "windows":
     guard arguments.count == 2 else { fail("windows requires PID") }
     let pid = integer(arguments[1], "PID")
     let frontmost = NSWorkspace.shared.frontmostApplication?.processIdentifier ?? -1
     emit(["frontmost_pid": Int(frontmost), "windows": windowRecords().filter { ($0["pid"] as? Int) == pid }])
+case "ax-state":
+    guard arguments.count == 4 else { fail("ax-state requires PID WINDOW_ID FIXTURE") }
+    let pid = pid_t(integer(arguments[1], "PID"))
+    let windowID = CGWindowID(integer(arguments[2], "window ID"))
+    emit(axWindowState(pid: pid, windowID: windowID, fixtureName: arguments[3]))
+case "ax-press":
+    guard arguments.count == 6 else { fail("ax-press requires PID WINDOW_ID FIXTURE FOCUSED_WINDOW_ID BUTTON_TITLE") }
+    let pid = pid_t(integer(arguments[1], "PID"))
+    let windowID = CGWindowID(integer(arguments[2], "window ID"))
+    pressFocusedButton(pid: pid, windowID: windowID, fixtureName: arguments[3],
+                       expectedFocusedWindowID: integer(arguments[4], "focused window ID"),
+                       buttonTitle: arguments[5])
 case "activate":
     guard arguments.count == 4 else { fail("activate requires PID WINDOW_ID FIXTURE") }
     let pid = pid_t(integer(arguments[1], "PID"))
@@ -664,12 +945,13 @@ case "mouse-event":
     postMouseEvent(pid: pid, windowID: windowID, fixtureName: arguments[3],
                    action: arguments[4], x: number(arguments[5], "X"), y: number(arguments[6], "Y"))
 case "key-event":
-    guard arguments.count == 7 else { fail("key-event requires PID WINDOW_ID FIXTURE ACTION CODE FLAGS") }
+    guard arguments.count == 7 || arguments.count == 8 else { fail("key-event requires PID WINDOW_ID FIXTURE ACTION CODE FLAGS [EXPECTED_FOCUSED_WINDOW_ID]") }
     let pid = pid_t(integer(arguments[1], "PID"))
     let windowID = CGWindowID(integer(arguments[2], "window ID"))
     postKeyEvent(pid: pid, windowID: windowID, fixtureName: arguments[3],
                  action: arguments[4], keyCode: integer(arguments[5], "key code"),
-                 flags: eventFlags(arguments[6]))
+                 flags: eventFlags(arguments[6]),
+                 expectedFocusedWindowID: arguments.count == 8 ? integer(arguments[7], "expected focused window ID") : nil)
 case "text-event":
     guard arguments.count == 6 else { fail("text-event requires PID WINDOW_ID FIXTURE ACTION TEXT") }
     let pid = pid_t(integer(arguments[1], "PID"))
