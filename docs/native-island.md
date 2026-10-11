@@ -73,16 +73,21 @@ the trailing release against stable pixels and dispatch logs while the same
 top-level window stays foreground. Its minimize cancellation case waits for an
 app-side owned-press acknowledgment, then probes a bare release after restore
 before any new press.
-The exact-source hosted run [38041917899](https://github.com/gpui-mbt/MZed/actions/runs/38041917899)
-passed on 2026-10-10 for harness commit
-`40069b99460ba9b16e6aba9a130711d2c7acc5f9`. It qualifies this bounded
-Windows 2022 primary-monitor scenario at 96 DPI: one visible process-owned
-editor window, scene pixels and native input/lifecycle checks, plus the saved
-fixture, but predates the added GPUI focus-loss check above. See the
+The exact-source hosted run [38115696033](https://github.com/gpui-mbt/MZed/actions/runs/38115696033)
+passed on 2026-10-11 for harness commit
+`1da6973a3fbb8d059e620aa6e347f514deb9bc5a`, including the Windows native ABI
+and full editor-smoke jobs. The smoke reported one visible process-owned window
+on a 1024×728 primary-monitor work area at 96 DPI, with the expected 120×18
+scene pixels. It observed one GPUI focus-loss cancellation acknowledgment and
+four unchanged late-release captures; the separate minimize check observed
+three unchanged captures. Dispatches were `[1, 2, 1]`, and native keyboard
+input saved the expected fixture. This qualifies the added focus-loss check
+for that bounded Windows scenario. It does not qualify another DPI scale or a
+monitor transition. See the
 [Windows evidence record](windows-validation.md#hosted-windows-qualification)
-for the exact source pins and outcomes. The full editor build and UI smoke
-remain unrun locally because the available disk space is below the build
-preflight requirement.
+for exact source pins and outcomes. The full editor build and UI smoke remain
+unrun locally because the available disk space is below the build preflight
+requirement.
 
 The declared local churn budget is 1,000 create/dispatch/copy/destroy cycles,
 maximum four live slots and one quad per snapshot. This is a bounded regression,

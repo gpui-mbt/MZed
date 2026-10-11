@@ -74,36 +74,33 @@ not itself a Mooncakes package and has no registry publish step.
 
 ## Hosted Windows qualification
 
-On 2026-10-10, the full hosted workflow [run 38041917899](https://github.com/gpui-mbt/MZed/actions/runs/38041917899)
-passed for MZed harness commit `40069b99460ba9b16e6aba9a130711d2c7acc5f9`.
-The run used the pinned Zed v1.22.0 source at
+On 2026-10-11, the exact-source hosted workflow [run 38115696033](https://github.com/gpui-mbt/MZed/actions/runs/38115696033)
+passed for MZed harness commit `1da6973a3fbb8d059e620aa6e347f514deb9bc5a`.
+Both `windows-native-abi` and `windows-editor-smoke` succeeded. The run used
+the pinned Zed v1.22.0 source at
 `76659a55a8c10ed355a070f8764a0b1733e3c115` and gpui.mbt at
-`bf965aebbeb1dfdfed26373d4a7a58bb51a5ad01`. The Windows 2022 runner built
-without reusing a Cargo target cache; the editor build took 1,993.578 seconds.
-It used MoonBit compiler/core `0.10.14+7d59c7ec9`, Rust `1.98.1`, and MSVC C
-toolset `14.44.35207` for `x86_64-pc-windows-msvc`. The derived editor binary
-SHA-256 was
-`ff24d54330fb3a6b147e99aec2783989c6048042ccbf6f58e310208accc4e399`.
-The native ABI harness passed both protocol tests; the hosted portable suite
-ran 71 tests with 14 expected platform-specific skips. The previously
-recorded local suite result remains separate at 69 tests with 14 skipped; the
-two additional hosted tests cover the taskbar-safe work-area geometry added
-for this candidate.
+`bf965aebbeb1dfdfed26373d4a7a58bb51a5ad01`. It used MoonBit compiler/core
+`0.10.14+7d59c7ec9`, Rust `1.98.1`, and MSVC C toolset `14.44.35207` for
+`x86_64-pc-windows-msvc`. The clean hosted build produced editor binary
+SHA-256 `48121d2564f267b0ce567987a0c155290321c20d9e1f376fe476c7e15cd0bd67`.
+The native ABI harness and full editor smoke passed; build, smoke, ABI, fixture,
+log and screenshot artifacts are attached to the run.
 
-The editor smoke passed on one primary-monitor work area of 1024×728 pixels at
-96 DPI. It captured the scene at its expected 120×18-pixel size, drove
-same-window Win32 input, and its before/after checks found one process-owned
-top-level window. Right click, modified left click, and wheel input left the
-scene unchanged; resize and one plain left click changed it once; outside release
-and minimize cancellation did not activate it. The minimize test observed the
-late-release oracle three times. Disable, inactive-region click, remount,
-late release, and a fresh click produced the expected lifecycle and dispatch
-sequence `[1, 2, 1]`. Finally, native keyboard input saved the fixture as
+The smoke passed on a 1024×728 primary-monitor work area at 96 DPI (`scale=1`),
+with one visible process-owned top-level window and a 120×18-pixel scene. Right
+click, modified left click, and wheel input left the scene unchanged; one plain
+left release after resize changed it once; outside release and minimize
+cancellation did not activate it. The new command-palette case recorded one
+fresh GPUI focus-loss cancellation acknowledgment and four unchanged
+late-release observations while the editor stayed foreground. Minimize
+cancellation recorded three unchanged observations. Disable, inactive-region
+click, remount, late release, and a fresh click produced dispatches `[1, 2, 1]`.
+Native keyboard input saved the fixture as
 `MZed pinned Windows fixture\nMZed native edit save verified\n`.
-`smoke.json`, `Zed.log`, build metadata, ABI logs, fixture bytes and screenshots
-are attached to the exact run. This qualifies only the bounded hosted
-primary-monitor scenario; local full-editor build and UI execution remain
-unrun for the disk-space reason below.
+This run qualifies the focus-loss case for the bounded primary-monitor scenario
+at 96 DPI. It provides no evidence for another DPI scale or a monitor transition.
+The full editor build and UI smoke remain unrun locally because available disk
+space is below the build preflight requirement.
 
 ## Local evidence
 
