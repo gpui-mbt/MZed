@@ -133,8 +133,12 @@ through macOS System Settings and rerun. The harness does not unlock the session
 open permission prompts or bypass TCC. It captures only the selected editor
 window by its WindowServer ID, not the whole display. Both binaries receive
 fresh isolated profiles and the same untrusted fixture, then the harness
-exercises native keyboard input and saves the file through the editor. The saved
-bytes must be exactly:
+exercises native keyboard input and saves the file through the editor. Plain
+pointer and Unicode events explicitly clear inherited modifier flags. Each
+native acknowledgement records its flags, and the harness stops if a plain
+event retains any modifier; this prevents a prior synthetic shortcut from
+changing the meaning of the next click or character. The saved bytes must be
+exactly:
 
 ```text
 MZed pinned baseline fixture

@@ -216,6 +216,34 @@ func eventFlags(_ names: String) -> CGEventFlags {
     return flags
 }
 
+func resetUnmodifiedInputFlags(_ event: CGEvent) {
+    // CGEvent sources can carry modifier state from an earlier synthetic
+    // shortcut. Plain pointer and Unicode events must not inherit it.
+    event.flags = CGEventFlags()
+}
+
+func validatePlainInputFlagFixtures() {
+    var inherited = CGEventFlags()
+    inherited.insert(.maskCommand)
+    inherited.insert(.maskControl)
+
+    guard let mouse = CGEvent(mouseEventSource: CGEventSource(stateID: .hidSystemState),
+                              mouseType: .leftMouseDown, mouseCursorPosition: .zero,
+                              mouseButton: .left) else {
+        fail("cannot construct plain mouse flag fixture")
+    }
+    mouse.flags = inherited
+    resetUnmodifiedInputFlags(mouse)
+    guard mouse.flags.rawValue == 0 else { fail("plain mouse event retained inherited modifiers") }
+
+    guard let text = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true) else {
+        fail("cannot construct plain Unicode flag fixture")
+    }
+    text.flags = inherited
+    resetUnmodifiedInputFlags(text)
+    guard text.flags.rawValue == 0 else { fail("plain Unicode event retained inherited modifiers") }
+}
+
 func cleanupGuardError(pid: pid_t) -> String? {
     guard AXIsProcessTrusted() else {
         return "Accessibility permission was revoked before targeted release cleanup"
@@ -241,11 +269,14 @@ func postCleanupMouseRelease(pid: pid_t, x: Double, y: Double) {
     ) else {
         fail("cannot create targeted mouse-up cleanup event")
     }
+    resetUnmodifiedInputFlags(event)
     if let error = cleanupGuardError(pid: pid) { fail(error) }
+    guard event.flags.rawValue == 0 else { fail("targeted mouse-up cleanup retained modifier flags") }
     // Cleanup is a release only and goes directly to the PID that received the
     // owned down. It never enters the global event stream or reactivates the app.
     event.postToPid(pid)
-    emit(["pid": Int(pid), "cleanup": "targeted-mouse-up", "posted_to_target_pid": true])
+    emit(["pid": Int(pid), "cleanup": "targeted-mouse-up", "posted_to_target_pid": true,
+          "event_flags_raw": event.flags.rawValue])
 }
 
 func postCleanupKeyRelease(pid: pid_t, keyCode: Int, flags: CGEventFlags) {
@@ -257,7 +288,8 @@ func postCleanupKeyRelease(pid: pid_t, keyCode: Int, flags: CGEventFlags) {
     event.flags = flags
     if let error = cleanupGuardError(pid: pid) { fail(error) }
     event.postToPid(pid)
-    emit(["pid": Int(pid), "cleanup": "targeted-key-up", "posted_to_target_pid": true])
+    emit(["pid": Int(pid), "cleanup": "targeted-key-up", "posted_to_target_pid": true,
+          "event_flags_raw": event.flags.rawValue, "key_code": keyCode])
 }
 
 func postCleanupTextRelease(pid: pid_t, text: String) {
@@ -269,9 +301,13 @@ func postCleanupTextRelease(pid: pid_t, text: String) {
     units.withUnsafeBufferPointer { buffer in
         event.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: buffer.baseAddress)
     }
+    resetUnmodifiedInputFlags(event)
     if let error = cleanupGuardError(pid: pid) { fail(error) }
+    guard event.flags.rawValue == 0 else { fail("targeted Unicode cleanup retained modifier flags") }
     event.postToPid(pid)
-    emit(["pid": Int(pid), "cleanup": "targeted-text-key-up", "posted_to_target_pid": true])
+    emit(["pid": Int(pid), "cleanup": "targeted-text-key-up", "posted_to_target_pid": true,
+          "event_flags_raw": event.flags.rawValue, "key_code": 0,
+          "unicode_utf16_units": units])
 }
 
 func postMouseEvent(pid: pid_t, windowID: CGWindowID, fixtureName: String,
@@ -293,9 +329,12 @@ func postMouseEvent(pid: pid_t, windowID: CGWindowID, fixtureName: String,
     ) else {
         fail("cannot create mouse event")
     }
+    resetUnmodifiedInputFlags(event)
     _ = requireEventTarget(pid: pid, windowID: windowID, fixtureName: fixtureName)
+    guard event.flags.rawValue == 0 else { fail("plain mouse event retained modifier flags") }
     event.post(tap: .cghidEventTap)
-    emit(["pid": Int(pid), "window_id": Int(windowID), "event": action, "posted": true])
+    emit(["pid": Int(pid), "window_id": Int(windowID), "event": action, "posted": true,
+          "event_flags_raw": event.flags.rawValue])
 }
 
 func postKeyEvent(pid: pid_t, windowID: CGWindowID, fixtureName: String,
@@ -317,7 +356,9 @@ func postKeyEvent(pid: pid_t, windowID: CGWindowID, fixtureName: String,
     }
     _ = requireEventTarget(pid: pid, windowID: windowID, fixtureName: fixtureName)
     event.post(tap: .cghidEventTap)
-    var result: [String: Any] = ["pid": Int(pid), "window_id": Int(windowID), "event": "key-\(action)", "posted": true]
+    var result: [String: Any] = ["pid": Int(pid), "window_id": Int(windowID),
+                                "event": "key-\(action)", "posted": true,
+                                "event_flags_raw": event.flags.rawValue, "key_code": keyCode]
     if let expectedFocusedWindowID {
         result["expected_focused_window_id"] = expectedFocusedWindowID
     }
@@ -334,9 +375,13 @@ func postTextEvent(pid: pid_t, windowID: CGWindowID, fixtureName: String,
     units.withUnsafeBufferPointer { buffer in
         event.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: buffer.baseAddress)
     }
+    resetUnmodifiedInputFlags(event)
     _ = requireEventTarget(pid: pid, windowID: windowID, fixtureName: fixtureName)
+    guard event.flags.rawValue == 0 else { fail("plain Unicode event retained modifier flags") }
     event.post(tap: .cghidEventTap)
-    emit(["pid": Int(pid), "window_id": Int(windowID), "event": "text-\(action)", "posted": true])
+    emit(["pid": Int(pid), "window_id": Int(windowID), "event": "text-\(action)", "posted": true,
+          "event_flags_raw": event.flags.rawValue, "key_code": 0,
+          "unicode_utf16_units": units])
 }
 
 func accessibilityWindow(pid: pid_t, windowID: CGWindowID, fixtureName: String) -> AXUIElement {
@@ -1009,9 +1054,10 @@ case "permissions":
 case "guard-fixtures":
     validateSessionFlagFixtures()
     validateAXButtonTraversalFixtures()
+    validatePlainInputFlagFixtures()
     emit(["session_fixtures": "passed", "frontmost_guard_fixtures": "passed",
           "focused_window_guard_fixtures": "passed", "ax_press_guard_fixtures": "passed",
-          "ax_traversal_fixtures": "passed"])
+          "ax_traversal_fixtures": "passed", "plain_input_flags_fixtures": "passed"])
 case "windows":
     guard arguments.count == 2 else { fail("windows requires PID") }
     let pid = integer(arguments[1], "PID")

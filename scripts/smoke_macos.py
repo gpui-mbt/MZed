@@ -129,6 +129,12 @@ def preflight_blocker(permissions: dict) -> str | None:
     return None
 
 
+def require_unmodified_input_flags(result: dict, action: str) -> None:
+    flags = result.get("event_flags_raw")
+    if flags != 0:
+        raise RuntimeError(f"plain {action} retained synthetic modifier flags: {flags!r}")
+
+
 def assert_scene_unchanged(snapshot: dict, current: dict, color: str,
                            expected_counts: list[int], expected_log_counts: list[int]) -> None:
     actual_color, actual_rect = scene_state(current)
@@ -168,6 +174,7 @@ class MacSmoke:
             "snapshots": [],
             "dispatch_log_copies": [],
             "input_cleanup": [],
+            "input_event_acks": [],
         }
 
     def prepare(self) -> tuple[dict[str, str], Path]:
@@ -304,6 +311,8 @@ class MacSmoke:
             result = helper_json(self.helper, *command, timeout=8)
             if result.get("posted_to_target_pid") is not True:
                 raise RuntimeError(f"targeted release was not confirmed: {result!r}")
+            if kind in ("mouse", "text"):
+                require_unmodified_input_flags(result, f"{kind} cleanup")
             attempt["outcome"] = "release_posted_to_original_pid"
             attempt["result"] = result
             self.record["input_cleanup"].append(attempt)
@@ -550,8 +559,11 @@ class MacSmoke:
             # still triggers a confined release attempt.
             self.owned_input = pending
         try:
-            helper_json(self.helper, "mouse-event", self.pid, self.window_id,
-                        self.fixture.name, action, x, y)
+            result = helper_json(self.helper, "mouse-event", self.pid, self.window_id,
+                                 self.fixture.name, action, x, y)
+            if result.get("posted") is not True:
+                raise RuntimeError(f"native mouse event was not confirmed: {result!r}")
+            require_unmodified_input_flags(result, "mouse event")
         except Exception as error:
             cleanup_error = self.release_owned_input(f"native mouse {action} event failed")
             if cleanup_error:
@@ -570,6 +582,11 @@ class MacSmoke:
             "visible_window": True,
             "frontmost": True,
             "bounds": {key: window[key] for key in ("x", "y", "width", "height")},
+            "acknowledgement": result,
+        })
+        self.record.setdefault("input_event_acks", []).append({
+            "kind": "mouse", "action": action, "pid": self.pid,
+            "window_id": self.window_id, "result": result,
         })
 
     def key(self, key_code: int, flags: str = "none", *,
@@ -588,11 +605,25 @@ class MacSmoke:
                                         self.fixture.name, "down", key_code, flags]
             if expected_focused_window_id is not None:
                 down_event.append(expected_focused_window_id)
-            helper_json(self.helper, *down_event)
+            down_result = helper_json(self.helper, *down_event)
+            if down_result.get("posted") is not True:
+                raise RuntimeError(f"native key-down was not confirmed: {down_result!r}")
+            self.record.setdefault("input_event_acks", []).append({
+                "kind": "key", "action": "down", "pid": self.pid,
+                "window_id": self.window_id, "key_code": key_code,
+                "modifier_flags": flags, "result": down_result,
+            })
             self.owned_input["state"] = "down_acknowledged"
             self.checked_window_identity()
-            helper_json(self.helper, "key-event", self.pid, self.window_id,
-                        self.fixture.name, "up", key_code, flags)
+            up_result = helper_json(self.helper, "key-event", self.pid, self.window_id,
+                                    self.fixture.name, "up", key_code, flags)
+            if up_result.get("posted") is not True:
+                raise RuntimeError(f"native key-up was not confirmed: {up_result!r}")
+            self.record.setdefault("input_event_acks", []).append({
+                "kind": "key", "action": "up", "pid": self.pid,
+                "window_id": self.window_id, "key_code": key_code,
+                "modifier_flags": flags, "result": up_result,
+            })
             self.owned_input = None
         except Exception as error:
             cleanup_error = self.release_owned_input(f"native key {key_code} sequence failed")
@@ -613,12 +644,28 @@ class MacSmoke:
                 self.owned_input = {"kind": "text", "pid": self.pid,
                                     "window_id": self.window_id, "text": character,
                                     "state": "down_pending_ack"}
-                helper_json(self.helper, "text-event", self.pid, self.window_id,
-                            self.fixture.name, "down", character)
+                down_result = helper_json(self.helper, "text-event", self.pid, self.window_id,
+                                          self.fixture.name, "down", character)
+                if down_result.get("posted") is not True:
+                    raise RuntimeError(f"native text-down was not confirmed: {down_result!r}")
+                require_unmodified_input_flags(down_result, "Unicode event")
+                self.record.setdefault("input_event_acks", []).append({
+                    "kind": "text", "action": "down", "pid": self.pid,
+                    "window_id": self.window_id, "text": character,
+                    "result": down_result,
+                })
                 self.owned_input["state"] = "down_acknowledged"
                 self.checked_window_identity()
-                helper_json(self.helper, "text-event", self.pid, self.window_id,
-                            self.fixture.name, "up", character)
+                up_result = helper_json(self.helper, "text-event", self.pid, self.window_id,
+                                        self.fixture.name, "up", character)
+                if up_result.get("posted") is not True:
+                    raise RuntimeError(f"native text-up was not confirmed: {up_result!r}")
+                require_unmodified_input_flags(up_result, "Unicode event")
+                self.record.setdefault("input_event_acks", []).append({
+                    "kind": "text", "action": "up", "pid": self.pid,
+                    "window_id": self.window_id, "text": character,
+                    "result": up_result,
+                })
                 self.owned_input = None
             except Exception as error:
                 cleanup_error = self.release_owned_input("native text event sequence failed")
@@ -966,7 +1013,8 @@ def main() -> int:
                 or records["guard_fixtures"].get("frontmost_guard_fixtures") != "passed"
                 or records["guard_fixtures"].get("focused_window_guard_fixtures") != "passed"
                 or records["guard_fixtures"].get("ax_press_guard_fixtures") != "passed"
-                or records["guard_fixtures"].get("ax_traversal_fixtures") != "passed"):
+                or records["guard_fixtures"].get("ax_traversal_fixtures") != "passed"
+                or records["guard_fixtures"].get("plain_input_flags_fixtures") != "passed"):
             raise RuntimeError("macOS UI guard fixtures did not pass")
         permissions = helper_json(helper, "permissions")
         records["permissions"] = permissions

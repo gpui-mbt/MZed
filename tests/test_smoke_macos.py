@@ -202,7 +202,7 @@ def event_controller():
     capture.fixture = Path("fixture.txt")
     capture.window_title = "fixture.txt — fixture.txt"
     capture.owned_input = None
-    capture.record = {"input_cleanup": [], "window_event_checks": []}
+    capture.record = {"input_cleanup": [], "window_event_checks": [], "input_event_acks": []}
     window = {"pid": 123, "window_id": 456, "title": capture.window_title,
               "x": 10.0, "y": 20.0, "width": 800.0, "height": 600.0,
               "layer": 0, "visible_on_screen": True}
@@ -233,18 +233,63 @@ def injected_native_helper(window, *, after_event=None):
             emitted.append((command, action, *payload))
             if after_event is not None:
                 after_event(state, command, action, payload)
-            return {"posted": True}
+            return {"posted": True, "event_flags_raw": 0}
         if command in ("cleanup-mouse", "cleanup-key", "cleanup-text"):
             cleanup_attempts.append(arguments)
             if state["session_locked"] or not state["on_console"]:
                 raise RuntimeError("injected cleanup guard refused release while locked/off-console")
-            return {"posted_to_target_pid": True}
+            return {"posted_to_target_pid": True, "event_flags_raw": 0}
         raise AssertionError(f"unexpected helper command: {arguments!r}")
 
     return state, emitted, cleanup_attempts, helper
 
 
 class MacInputGuardTests(unittest.TestCase):
+    def test_plain_input_ack_rejects_inherited_command_and_control_flags(self):
+        smoke.require_unmodified_input_flags({"event_flags_raw": 0}, "Unicode event")
+        with self.assertRaisesRegex(RuntimeError, "retained synthetic modifier flags: 538181632"):
+            smoke.require_unmodified_input_flags({"event_flags_raw": 0x20140000}, "Unicode event")
+
+    def test_mouse_with_inherited_modifiers_is_released_and_fails_closed(self):
+        capture, window, image = event_controller()
+        _state, emitted, cleanup_attempts, injected = injected_native_helper(window)
+
+        def contaminated_mouse(_binary, *arguments, **_kwargs):
+            result = injected(_binary, *arguments)
+            if arguments[0] == "mouse-event":
+                return {**result, "event_flags_raw": 0x20140000}
+            return result
+
+        with patch.object(smoke, "helper_json", side_effect=contaminated_mouse):
+            with self.assertRaisesRegex(RuntimeError, "plain mouse event retained synthetic modifier flags"):
+                capture.mouse("down", image, (5.0, 6.0))
+
+        self.assertEqual([event[:2] for event in emitted], [("mouse-event", "down")])
+        self.assertEqual(cleanup_attempts[0][0], "cleanup-mouse")
+        self.assertEqual(capture.record["input_cleanup"][0]["outcome"],
+                         "release_posted_to_original_pid")
+        self.assertIsNone(capture.owned_input)
+
+    def test_unicode_with_inherited_modifiers_is_released_and_fails_closed(self):
+        capture, window, _ = event_controller()
+        _state, emitted, cleanup_attempts, injected = injected_native_helper(window)
+
+        def contaminated_text(_binary, *arguments, **_kwargs):
+            result = injected(_binary, *arguments)
+            if arguments[0] == "text-event":
+                return {**result, "event_flags_raw": 0x20140000}
+            return result
+
+        with patch.object(smoke, "helper_json", side_effect=contaminated_text):
+            with self.assertRaisesRegex(RuntimeError, "plain Unicode event retained synthetic modifier flags"):
+                capture.type_text("a")
+
+        self.assertEqual(emitted, [("text-event", "down", "a")])
+        self.assertEqual(cleanup_attempts[0][0], "cleanup-text")
+        self.assertEqual(capture.record["input_cleanup"][0]["outcome"],
+                         "release_posted_to_original_pid")
+        self.assertIsNone(capture.owned_input)
+
     def test_mouse_down_ack_failure_still_attempts_targeted_release(self):
         capture, window, image = event_controller()
 
