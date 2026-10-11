@@ -138,10 +138,12 @@ def require_unmodified_input_flags(result: dict, action: str) -> None:
 
 
 def require_keyboard_sender_settle(result: dict, action: str) -> None:
+    requested = result.get("sender_runloop_settle_requested_ms")
     elapsed = result.get("sender_runloop_settle_ms")
-    if type(elapsed) is not int or elapsed < 90:
+    if requested != 100 or type(elapsed) is not int or elapsed < 90:
         raise RuntimeError(
-            f"{action} helper acknowledgement lacks the required keyboard sender RunLoop settle: {elapsed!r}ms")
+            f"{action} helper acknowledgement lacks the required keyboard sender RunLoop settle: "
+            f"requested={requested!r}ms, observed={elapsed!r}ms")
 
 
 def assert_scene_unchanged(snapshot: dict, current: dict, color: str,

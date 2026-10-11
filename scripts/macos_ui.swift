@@ -5,6 +5,9 @@ import Foundation
 import ImageIO
 import Vision
 
+let keyboardSenderSettleRequestedMS = 100
+let keyboardSenderSettleMinimumMS = 90
+
 func fail(_ message: String) -> Never {
     fputs("macOS UI helper: \(message)\n", stderr)
     exit(2)
@@ -244,21 +247,35 @@ func validatePlainInputFlagFixtures() {
     guard text.flags.rawValue == 0 else { fail("plain Unicode event retained inherited modifiers") }
 }
 
-func settleKeyboardSenderAfterPost() -> Int {
+func settleKeyboardSenderAfterPost() -> (requestedMilliseconds: Int, elapsedMilliseconds: Int) {
     let startedAt = ProcessInfo.processInfo.systemUptime
-    RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.1))
+    let requiredSeconds = Double(keyboardSenderSettleRequestedMS) / 1000
+    let deadline = startedAt + requiredSeconds
+    let runLoop = RunLoop.current
+    let completionTimer = Timer(
+        fire: Date(timeIntervalSinceNow: requiredSeconds + 0.005),
+        interval: 0,
+        repeats: false
+    ) { _ in }
+    runLoop.add(completionTimer, forMode: .default)
+    while ProcessInfo.processInfo.systemUptime < deadline {
+        let remaining = deadline - ProcessInfo.processInfo.systemUptime
+        _ = runLoop.run(mode: .default, before: Date(timeIntervalSinceNow: remaining))
+    }
+    withExtendedLifetime(completionTimer) {}
     let elapsedMilliseconds = Int((ProcessInfo.processInfo.systemUptime - startedAt) * 1000)
-    guard elapsedMilliseconds >= 90 else {
+    guard elapsedMilliseconds >= keyboardSenderSettleMinimumMS else {
         fail("keyboard sender RunLoop settled for only \(elapsedMilliseconds)ms")
     }
-    return elapsedMilliseconds
+    return (keyboardSenderSettleRequestedMS, elapsedMilliseconds)
 }
 
-func validateKeyboardSenderSettleFixture() {
-    let elapsedMilliseconds = settleKeyboardSenderAfterPost()
-    guard elapsedMilliseconds >= 90 else {
-        fail("keyboard sender RunLoop fixture observed only \(elapsedMilliseconds)ms")
+func validateKeyboardSenderSettleFixture() -> (requestedMilliseconds: Int, elapsedMilliseconds: Int) {
+    let settle = settleKeyboardSenderAfterPost()
+    guard settle.elapsedMilliseconds >= keyboardSenderSettleMinimumMS else {
+        fail("keyboard sender RunLoop fixture observed only \(settle.elapsedMilliseconds)ms")
     }
+    return settle
 }
 
 func cleanupGuardError(pid: pid_t) -> String? {
@@ -309,13 +326,14 @@ func postCleanupKeyRelease(pid: pid_t, keyCode: Int, flags: CGEventFlags) {
     if let error = cleanupGuardError(pid: pid) { fail(error) }
     let flagsBeforePost = event.flags.rawValue
     event.postToPid(pid)
-    let senderSettleMS = settleKeyboardSenderAfterPost()
+    let senderSettle = settleKeyboardSenderAfterPost()
     emit(["pid": Int(pid), "cleanup": "targeted-key-up", "posted_to_target_pid": true,
           "event_flags_before_post_raw": flagsBeforePost,
           "event_flags_raw": flagsBeforePost,
           "event_flags_after_post_raw": event.flags.rawValue,
           "key_code": keyCode,
-          "sender_runloop_settle_ms": senderSettleMS])
+          "sender_runloop_settle_requested_ms": senderSettle.requestedMilliseconds,
+          "sender_runloop_settle_ms": senderSettle.elapsedMilliseconds])
 }
 
 func postCleanupTextRelease(pid: pid_t, text: String) {
@@ -332,14 +350,15 @@ func postCleanupTextRelease(pid: pid_t, text: String) {
     guard event.flags.rawValue == 0 else { fail("targeted Unicode cleanup retained modifier flags") }
     let flagsBeforePost = event.flags.rawValue
     event.postToPid(pid)
-    let senderSettleMS = settleKeyboardSenderAfterPost()
+    let senderSettle = settleKeyboardSenderAfterPost()
     emit(["pid": Int(pid), "cleanup": "targeted-text-key-up", "posted_to_target_pid": true,
           "event_flags_before_post_raw": flagsBeforePost,
           "event_flags_raw": flagsBeforePost,
           "event_flags_after_post_raw": event.flags.rawValue,
           "key_code": 0,
           "unicode_utf16_units": units,
-          "sender_runloop_settle_ms": senderSettleMS])
+          "sender_runloop_settle_requested_ms": senderSettle.requestedMilliseconds,
+          "sender_runloop_settle_ms": senderSettle.elapsedMilliseconds])
 }
 
 func postMouseEvent(pid: pid_t, windowID: CGWindowID, fixtureName: String,
@@ -392,14 +411,15 @@ func postKeyEvent(pid: pid_t, windowID: CGWindowID, fixtureName: String,
     _ = requireEventTarget(pid: pid, windowID: windowID, fixtureName: fixtureName)
     let flagsBeforePost = event.flags.rawValue
     event.post(tap: .cghidEventTap)
-    let senderSettleMS = settleKeyboardSenderAfterPost()
+    let senderSettle = settleKeyboardSenderAfterPost()
     var result: [String: Any] = ["pid": Int(pid), "window_id": Int(windowID),
                                 "event": "key-\(action)", "posted": true,
                                 "event_flags_before_post_raw": flagsBeforePost,
                                 "event_flags_raw": flagsBeforePost,
                                 "event_flags_after_post_raw": event.flags.rawValue,
                                 "key_code": keyCode,
-                                "sender_runloop_settle_ms": senderSettleMS]
+                                "sender_runloop_settle_requested_ms": senderSettle.requestedMilliseconds,
+                                "sender_runloop_settle_ms": senderSettle.elapsedMilliseconds]
     if let expectedFocusedWindowID {
         result["expected_focused_window_id"] = expectedFocusedWindowID
     }
@@ -421,14 +441,15 @@ func postTextEvent(pid: pid_t, windowID: CGWindowID, fixtureName: String,
     guard event.flags.rawValue == 0 else { fail("plain Unicode event retained modifier flags") }
     let flagsBeforePost = event.flags.rawValue
     event.post(tap: .cghidEventTap)
-    let senderSettleMS = settleKeyboardSenderAfterPost()
+    let senderSettle = settleKeyboardSenderAfterPost()
     emit(["pid": Int(pid), "window_id": Int(windowID), "event": "text-\(action)", "posted": true,
           "event_flags_before_post_raw": flagsBeforePost,
           "event_flags_raw": flagsBeforePost,
           "event_flags_after_post_raw": event.flags.rawValue,
           "key_code": 0,
           "unicode_utf16_units": units,
-          "sender_runloop_settle_ms": senderSettleMS])
+          "sender_runloop_settle_requested_ms": senderSettle.requestedMilliseconds,
+          "sender_runloop_settle_ms": senderSettle.elapsedMilliseconds])
 }
 
 func accessibilityWindow(pid: pid_t, windowID: CGWindowID, fixtureName: String) -> AXUIElement {
@@ -1102,11 +1123,13 @@ case "guard-fixtures":
     validateSessionFlagFixtures()
     validateAXButtonTraversalFixtures()
     validatePlainInputFlagFixtures()
-    validateKeyboardSenderSettleFixture()
+    let keyboardSenderSettle = validateKeyboardSenderSettleFixture()
     emit(["session_fixtures": "passed", "frontmost_guard_fixtures": "passed",
           "focused_window_guard_fixtures": "passed", "ax_press_guard_fixtures": "passed",
           "ax_traversal_fixtures": "passed", "plain_input_flags_fixtures": "passed",
-          "keyboard_sender_settle_fixtures": "passed"])
+          "keyboard_sender_settle_fixtures": "passed",
+          "keyboard_sender_settle_requested_ms": keyboardSenderSettle.requestedMilliseconds,
+          "keyboard_sender_settle_ms": keyboardSenderSettle.elapsedMilliseconds])
 case "windows":
     guard arguments.count == 2 else { fail("windows requires PID") }
     let pid = integer(arguments[1], "PID")

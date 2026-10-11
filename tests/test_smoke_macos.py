@@ -236,6 +236,7 @@ def injected_native_helper(window, *, after_event=None):
             result = {"posted": True, "event_flags_before_post_raw": 0,
                       "event_flags_raw": 0, "event_flags_after_post_raw": 0}
             if command in ("key-event", "text-event"):
+                result["sender_runloop_settle_requested_ms"] = 100
                 result["sender_runloop_settle_ms"] = 100
             return result
         if command in ("cleanup-mouse", "cleanup-key", "cleanup-text"):
@@ -245,6 +246,7 @@ def injected_native_helper(window, *, after_event=None):
             result = {"posted_to_target_pid": True, "event_flags_before_post_raw": 0,
                       "event_flags_raw": 0, "event_flags_after_post_raw": 0}
             if command in ("cleanup-key", "cleanup-text"):
+                result["sender_runloop_settle_requested_ms"] = 100
                 result["sender_runloop_settle_ms"] = 100
             return result
         raise AssertionError(f"unexpected helper command: {arguments!r}")
@@ -254,11 +256,21 @@ def injected_native_helper(window, *, after_event=None):
 
 class MacInputGuardTests(unittest.TestCase):
     def test_keyboard_sender_settle_requires_measured_minimum(self):
-        smoke.require_keyboard_sender_settle({"sender_runloop_settle_ms": 90}, "key-up")
-        for value in (None, 89, True, 90.0, "100"):
-            with self.subTest(value=value), self.assertRaisesRegex(
+        smoke.require_keyboard_sender_settle({
+            "sender_runloop_settle_requested_ms": 100,
+            "sender_runloop_settle_ms": 90,
+        }, "key-up")
+        invalid = (
+            {"sender_runloop_settle_requested_ms": 100},
+            {"sender_runloop_settle_requested_ms": 100, "sender_runloop_settle_ms": 89},
+            {"sender_runloop_settle_requested_ms": 100, "sender_runloop_settle_ms": True},
+            {"sender_runloop_settle_requested_ms": 100, "sender_runloop_settle_ms": 90.0},
+            {"sender_runloop_settle_requested_ms": 99, "sender_runloop_settle_ms": 100},
+        )
+        for result in invalid:
+            with self.subTest(result=result), self.assertRaisesRegex(
                     RuntimeError, "lacks the required keyboard sender RunLoop settle"):
-                smoke.require_keyboard_sender_settle({"sender_runloop_settle_ms": value}, "key-up")
+                smoke.require_keyboard_sender_settle(result, "key-up")
 
     def test_plain_input_ack_rejects_inherited_command_and_control_flags(self):
         smoke.require_unmodified_input_flags({"event_flags_before_post_raw": 0,
@@ -430,7 +442,8 @@ class MacInputGuardTests(unittest.TestCase):
         capture, window, _ = event_controller()
         with patch.object(capture, "checked_window_identity", return_value=window), \
                 patch.object(smoke, "helper_json", return_value={
-                    "posted": True, "sender_runloop_settle_ms": 100,
+                    "posted": True, "sender_runloop_settle_requested_ms": 100,
+                    "sender_runloop_settle_ms": 100,
                 }) as helper, \
                 patch.object(smoke.time, "sleep"):
             capture.key(53, expected_focused_window_id=455)
