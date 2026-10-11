@@ -139,10 +139,11 @@ native acknowledgement records the event flags immediately before posting and
 the separate value observed after posting; the harness validates the pre-post
 value because Core Graphics can annotate the event object during posting. This
 prevents a prior synthetic shortcut from changing the meaning of the next
-click or character. After each keyboard event, including PID-targeted keyboard
-cleanup, the helper retains the event while servicing its RunLoop for 100 ms;
+click or character. After each synthetic pointer, keyboard or Unicode event,
+including PID-targeted cleanup, the helper retains the event while servicing
+its RunLoop for 100 ms;
 its acknowledgement records the requested and measured elapsed times, and the
-smoke rejects a keyboard event with less than 90 ms of settle. A retained timer
+smoke rejects an input event with less than 90 ms of settle. A retained timer
 keeps the RunLoop alive through the monotonic minimum even when no other source
 is registered. This is a bounded local delivery window, not a general guarantee
 about keyboard layouts or IME behavior. Before
