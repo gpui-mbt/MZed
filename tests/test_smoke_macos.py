@@ -233,20 +233,33 @@ def injected_native_helper(window, *, after_event=None):
             emitted.append((command, action, *payload))
             if after_event is not None:
                 after_event(state, command, action, payload)
-            return {"posted": True, "event_flags_before_post_raw": 0,
-                    "event_flags_raw": 0, "event_flags_after_post_raw": 0}
+            result = {"posted": True, "event_flags_before_post_raw": 0,
+                      "event_flags_raw": 0, "event_flags_after_post_raw": 0}
+            if command in ("key-event", "text-event"):
+                result["sender_runloop_settle_ms"] = 100
+            return result
         if command in ("cleanup-mouse", "cleanup-key", "cleanup-text"):
             cleanup_attempts.append(arguments)
             if state["session_locked"] or not state["on_console"]:
                 raise RuntimeError("injected cleanup guard refused release while locked/off-console")
-            return {"posted_to_target_pid": True, "event_flags_before_post_raw": 0,
-                    "event_flags_raw": 0, "event_flags_after_post_raw": 0}
+            result = {"posted_to_target_pid": True, "event_flags_before_post_raw": 0,
+                      "event_flags_raw": 0, "event_flags_after_post_raw": 0}
+            if command in ("cleanup-key", "cleanup-text"):
+                result["sender_runloop_settle_ms"] = 100
+            return result
         raise AssertionError(f"unexpected helper command: {arguments!r}")
 
     return state, emitted, cleanup_attempts, helper
 
 
 class MacInputGuardTests(unittest.TestCase):
+    def test_keyboard_sender_settle_requires_measured_minimum(self):
+        smoke.require_keyboard_sender_settle({"sender_runloop_settle_ms": 90}, "key-up")
+        for value in (None, 89, True, 90.0, "100"):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                    RuntimeError, "lacks the required keyboard sender RunLoop settle"):
+                smoke.require_keyboard_sender_settle({"sender_runloop_settle_ms": value}, "key-up")
+
     def test_plain_input_ack_rejects_inherited_command_and_control_flags(self):
         smoke.require_unmodified_input_flags({"event_flags_before_post_raw": 0,
                                               "event_flags_after_post_raw": 0x20000000},
@@ -370,10 +383,55 @@ class MacInputGuardTests(unittest.TestCase):
                          "down_pending_ack")
         self.assertIsNone(capture.owned_input)
 
+    def test_keyboard_ack_without_settle_fails_and_releases_pending_key(self):
+        capture, window, _ = event_controller()
+        _state, emitted, cleanup_attempts, injected = injected_native_helper(window)
+
+        def lose_settle(_binary, *arguments, **kwargs):
+            result = injected(_binary, *arguments, **kwargs)
+            if arguments[0] == "key-event" and arguments[4] == "down":
+                return {key: value for key, value in result.items()
+                        if key != "sender_runloop_settle_ms"}
+            return result
+
+        with patch.object(smoke, "helper_json", side_effect=lose_settle):
+            with self.assertRaisesRegex(RuntimeError, "lacks the required keyboard sender RunLoop settle"):
+                capture.key(1)
+
+        self.assertEqual(emitted, [("key-event", "down", 1, "none")])
+        self.assertEqual(cleanup_attempts, [("cleanup-key", 123, 1, "none")])
+        self.assertEqual(capture.record["input_cleanup"][0]["outcome"],
+                         "release_posted_to_original_pid")
+        self.assertIsNone(capture.owned_input)
+
+    def test_targeted_keyboard_cleanup_requires_sender_settle(self):
+        capture, window, _ = event_controller()
+        _state, _emitted, cleanup_attempts, injected = injected_native_helper(window)
+        capture.owned_input = {"kind": "key", "pid": 123, "window_id": 456,
+                               "key_code": 1, "flags": "none",
+                               "state": "down_pending_ack"}
+
+        def lose_cleanup_settle(_binary, *arguments, **kwargs):
+            result = injected(_binary, *arguments, **kwargs)
+            if arguments[0] == "cleanup-key":
+                return {key: value for key, value in result.items()
+                        if key != "sender_runloop_settle_ms"}
+            return result
+
+        with patch.object(smoke, "helper_json", side_effect=lose_cleanup_settle):
+            error = capture.release_owned_input("test missing cleanup settle")
+
+        self.assertIn("lacks the required keyboard sender RunLoop settle", error)
+        self.assertEqual(cleanup_attempts, [("cleanup-key", 123, 1, "none")])
+        self.assertEqual(capture.record["input_cleanup"][0]["outcome"], "failed")
+        self.assertIsNone(capture.owned_input)
+
     def test_key_can_bind_down_event_to_expected_ax_focus(self):
         capture, window, _ = event_controller()
         with patch.object(capture, "checked_window_identity", return_value=window), \
-                patch.object(smoke, "helper_json", return_value={"posted": True}) as helper, \
+                patch.object(smoke, "helper_json", return_value={
+                    "posted": True, "sender_runloop_settle_ms": 100,
+                }) as helper, \
                 patch.object(smoke.time, "sleep"):
             capture.key(53, expected_focused_window_id=455)
 

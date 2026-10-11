@@ -139,8 +139,13 @@ native acknowledgement records the event flags immediately before posting and
 the separate value observed after posting; the harness validates the pre-post
 value because Core Graphics can annotate the event object during posting. This
 prevents a prior synthetic shortcut from changing the meaning of the next
-click or character. Before Command-S, the harness waits until OCR sees the
-complete added line in the editor, then checks the saved bytes exactly:
+click or character. After each keyboard event, including PID-targeted keyboard
+cleanup, the helper retains the event while servicing its RunLoop for 100 ms;
+its acknowledgement records measured elapsed time and the smoke rejects a
+keyboard event with less than 90 ms of settle. This is a bounded local delivery
+window, not a general guarantee about keyboard layouts or IME behavior. Before
+Command-S, the harness waits until OCR sees the complete added line in the
+editor, then checks the saved bytes exactly:
 
 ```text
 MZed pinned baseline fixture

@@ -137,6 +137,13 @@ def require_unmodified_input_flags(result: dict, action: str) -> None:
         raise RuntimeError(f"plain {action} retained synthetic modifier flags: {flags!r}")
 
 
+def require_keyboard_sender_settle(result: dict, action: str) -> None:
+    elapsed = result.get("sender_runloop_settle_ms")
+    if type(elapsed) is not int or elapsed < 90:
+        raise RuntimeError(
+            f"{action} helper acknowledgement lacks the required keyboard sender RunLoop settle: {elapsed!r}ms")
+
+
 def assert_scene_unchanged(snapshot: dict, current: dict, color: str,
                            expected_counts: list[int], expected_log_counts: list[int]) -> None:
     actual_color, actual_rect = scene_state(current)
@@ -315,6 +322,8 @@ class MacSmoke:
                 raise RuntimeError(f"targeted release was not confirmed: {result!r}")
             if kind in ("mouse", "text"):
                 require_unmodified_input_flags(result, f"{kind} cleanup")
+            if kind in ("key", "text"):
+                require_keyboard_sender_settle(result, f"{kind} cleanup")
             attempt["outcome"] = "release_posted_to_original_pid"
             attempt["result"] = result
             self.record["input_cleanup"].append(attempt)
@@ -610,6 +619,7 @@ class MacSmoke:
             down_result = helper_json(self.helper, *down_event)
             if down_result.get("posted") is not True:
                 raise RuntimeError(f"native key-down was not confirmed: {down_result!r}")
+            require_keyboard_sender_settle(down_result, "key-down")
             self.record.setdefault("input_event_acks", []).append({
                 "kind": "key", "action": "down", "pid": self.pid,
                 "window_id": self.window_id, "key_code": key_code,
@@ -621,6 +631,7 @@ class MacSmoke:
                                     self.fixture.name, "up", key_code, flags)
             if up_result.get("posted") is not True:
                 raise RuntimeError(f"native key-up was not confirmed: {up_result!r}")
+            require_keyboard_sender_settle(up_result, "key-up")
             self.record.setdefault("input_event_acks", []).append({
                 "kind": "key", "action": "up", "pid": self.pid,
                 "window_id": self.window_id, "key_code": key_code,
@@ -650,6 +661,7 @@ class MacSmoke:
                                           self.fixture.name, "down", character)
                 if down_result.get("posted") is not True:
                     raise RuntimeError(f"native text-down was not confirmed: {down_result!r}")
+                require_keyboard_sender_settle(down_result, "text-down")
                 require_unmodified_input_flags(down_result, "Unicode event")
                 self.record.setdefault("input_event_acks", []).append({
                     "kind": "text", "action": "down", "pid": self.pid,
@@ -662,6 +674,7 @@ class MacSmoke:
                                         self.fixture.name, "up", character)
                 if up_result.get("posted") is not True:
                     raise RuntimeError(f"native text-up was not confirmed: {up_result!r}")
+                require_keyboard_sender_settle(up_result, "text-up")
                 require_unmodified_input_flags(up_result, "Unicode event")
                 self.record.setdefault("input_event_acks", []).append({
                     "kind": "text", "action": "up", "pid": self.pid,
