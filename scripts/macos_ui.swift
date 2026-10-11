@@ -125,8 +125,13 @@ func waitForFrontmost(pid: pid_t, windowID: CGWindowID, fixtureName: String,
         if NSWorkspace.shared.frontmostApplication?.processIdentifier == pid {
             return true
         }
-        if Date() >= deadline { return false }
-        usleep(50_000)
+        let remaining = deadline.timeIntervalSinceNow
+        if remaining <= 0 { return false }
+        // NSWorkspace's frontmostApplication value is updated through app
+        // activation notifications. Service those notifications between
+        // bounded checks; revalidate session and selected-window ownership on
+        // the next iteration before accepting the refreshed foreground state.
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: min(0.05, remaining)))
     } while true
 }
 
