@@ -62,33 +62,57 @@ func windowRecords() -> [[String: Any]] {
     }
 }
 
-func targetWindow(pid: pid_t, windowID: CGWindowID) -> [String: Any] {
+func eventGuardError(pid: pid_t, windowID: CGWindowID, fixtureName: String,
+                     requireFrontmost: Bool = true) -> String? {
+    guard AXIsProcessTrusted() else {
+        return "Accessibility permission is not granted to this terminal/helper"
+    }
+    let session = consoleSessionFlags()
+    guard let locked = session["session_locked"] as? Bool, !locked else {
+        return "console session is locked or its state is unavailable"
+    }
+    guard let onConsole = session["on_console"] as? Bool, onConsole else {
+        return "invoking process is not on the foreground console"
+    }
+    guard NSRunningApplication(processIdentifier: pid) != nil else {
+        return "target process PID \(pid) is no longer running"
+    }
+    let owned = windowRecords().filter { ($0["pid"] as? Int) == Int(pid) }
+    let fixtureWindows = owned.filter { record in
+        let title = record["title"] as? String ?? ""
+        let width = record["width"] as? Double ?? 0
+        let height = record["height"] as? Double ?? 0
+        return title.localizedCaseInsensitiveContains(fixtureName) && width >= 700 && height >= 500
+    }
+    guard fixtureWindows.count == 1,
+          (fixtureWindows[0]["window_id"] as? Int) == Int(windowID) else {
+        return "selected visible fixture window \(windowID) is missing, ambiguous, or changed for PID \(pid)"
+    }
+    guard !requireFrontmost || NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else {
+        return "target application PID \(pid) is not frontmost; refusing UI interaction"
+    }
+    return nil
+}
+
+func requireEventTarget(pid: pid_t, windowID: CGWindowID, fixtureName: String,
+                        requireFrontmost: Bool = true) -> [String: Any] {
+    if let error = eventGuardError(pid: pid, windowID: windowID,
+                                   fixtureName: fixtureName, requireFrontmost: requireFrontmost) {
+        fail(error)
+    }
     guard let record = windowRecords().first(where: {
         ($0["pid"] as? Int) == Int(pid) && ($0["window_id"] as? Int) == Int(windowID)
     }) else {
-        fail("window \(windowID) is not a visible level-zero window owned by PID \(pid)")
+        fail("selected visible fixture window \(windowID) disappeared for PID \(pid)")
     }
     return record
 }
 
-func requireFrontmost(pid: pid_t) {
-    guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else {
-        fail("target application PID \(pid) is not frontmost; refusing UI interaction")
-    }
-}
-
-func requireAccessibility() {
-    guard AXIsProcessTrusted() else {
-        fail("Accessibility permission is not granted to this terminal/helper")
-    }
-}
-
-func captureWindow(pid: pid_t, windowID: CGWindowID, path: String) {
+func captureWindow(pid: pid_t, windowID: CGWindowID, fixtureName: String, path: String) {
     guard CGPreflightScreenCaptureAccess() else {
         fail("Screen Recording permission is not granted to this terminal/helper")
     }
-    let window = targetWindow(pid: pid, windowID: windowID)
-    requireFrontmost(pid: pid)
+    let window = requireEventTarget(pid: pid, windowID: windowID, fixtureName: fixtureName)
     let wx = window["x"] as! Double
     let wy = window["y"] as! Double
     let ww = window["width"] as! Double
@@ -100,6 +124,7 @@ func captureWindow(pid: pid_t, windowID: CGWindowID, path: String) {
     task.arguments = ["-x", "-o", "-l\(windowID)", path]
     let errors = Pipe()
     task.standardError = errors
+    _ = requireEventTarget(pid: pid, windowID: windowID, fixtureName: fixtureName)
     do {
         try task.run()
         task.waitUntilExit()
@@ -131,20 +156,6 @@ func captureWindow(pid: pid_t, windowID: CGWindowID, path: String) {
     ] as [String: Any])
 }
 
-func postMouse(_ type: CGEventType, pid: pid_t, x: Double, y: Double) {
-    requireAccessibility()
-    requireFrontmost(pid: pid)
-    guard let event = CGEvent(
-        mouseEventSource: CGEventSource(stateID: .hidSystemState),
-        mouseType: type,
-        mouseCursorPosition: CGPoint(x: x, y: y),
-        mouseButton: .left
-    ) else {
-        fail("cannot create mouse event")
-    }
-    event.post(tap: .cghidEventTap)
-}
-
 func eventFlags(_ names: String) -> CGEventFlags {
     var flags = CGEventFlags()
     for name in names.split(separator: ",").map(String.init) where !name.isEmpty && name != "none" {
@@ -159,49 +170,124 @@ func eventFlags(_ names: String) -> CGEventFlags {
     return flags
 }
 
-func postKey(_ keyCode: Int, flags: CGEventFlags, pid: pid_t) {
-    requireAccessibility()
-    requireFrontmost(pid: pid)
+func cleanupGuardError(pid: pid_t) -> String? {
+    guard AXIsProcessTrusted() else {
+        return "Accessibility permission was revoked before targeted release cleanup"
+    }
+    let session = consoleSessionFlags()
+    guard let locked = session["session_locked"] as? Bool, !locked,
+          let onConsole = session["on_console"] as? Bool, onConsole else {
+        return "targeted release cleanup is unsafe while the console is locked or unavailable"
+    }
+    guard NSRunningApplication(processIdentifier: pid) != nil else {
+        return "target process PID \(pid) exited before targeted release cleanup"
+    }
+    return nil
+}
+
+func postCleanupMouseRelease(pid: pid_t, x: Double, y: Double) {
+    if let error = cleanupGuardError(pid: pid) { fail(error) }
+    guard let event = CGEvent(
+        mouseEventSource: CGEventSource(stateID: .hidSystemState),
+        mouseType: .leftMouseUp,
+        mouseCursorPosition: CGPoint(x: x, y: y),
+        mouseButton: .left
+    ) else {
+        fail("cannot create targeted mouse-up cleanup event")
+    }
+    if let error = cleanupGuardError(pid: pid) { fail(error) }
+    // Cleanup is a release only and goes directly to the PID that received the
+    // owned down. It never enters the global event stream or reactivates the app.
+    event.postToPid(pid)
+    emit(["pid": Int(pid), "cleanup": "targeted-mouse-up", "posted_to_target_pid": true])
+}
+
+func postCleanupKeyRelease(pid: pid_t, keyCode: Int, flags: CGEventFlags) {
+    if let error = cleanupGuardError(pid: pid) { fail(error) }
     guard (0...Int(UInt16.max)).contains(keyCode),
-          let down = CGEvent(keyboardEventSource: nil, virtualKey: UInt16(keyCode), keyDown: true),
-          let up = CGEvent(keyboardEventSource: nil, virtualKey: UInt16(keyCode), keyDown: false) else {
+          let event = CGEvent(keyboardEventSource: nil, virtualKey: UInt16(keyCode), keyDown: false) else {
+        fail("cannot create targeted key-up cleanup event for code \(keyCode)")
+    }
+    event.flags = flags
+    if let error = cleanupGuardError(pid: pid) { fail(error) }
+    event.postToPid(pid)
+    emit(["pid": Int(pid), "cleanup": "targeted-key-up", "posted_to_target_pid": true])
+}
+
+func postCleanupTextRelease(pid: pid_t, text: String) {
+    if let error = cleanupGuardError(pid: pid) { fail(error) }
+    let units = Array(text.utf16)
+    guard let event = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false) else {
+        fail("cannot create targeted Unicode key-up cleanup event")
+    }
+    units.withUnsafeBufferPointer { buffer in
+        event.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: buffer.baseAddress)
+    }
+    if let error = cleanupGuardError(pid: pid) { fail(error) }
+    event.postToPid(pid)
+    emit(["pid": Int(pid), "cleanup": "targeted-text-key-up", "posted_to_target_pid": true])
+}
+
+func postMouseEvent(pid: pid_t, windowID: CGWindowID, fixtureName: String,
+                    action: String, x: Double, y: Double) {
+    let type: CGEventType
+    switch action {
+    case "down": type = .leftMouseDown
+    case "up": type = .leftMouseUp
+    case "move": type = .leftMouseDragged
+    default:
+        fail("mouse action must be down, move or up")
+    }
+    _ = requireEventTarget(pid: pid, windowID: windowID, fixtureName: fixtureName)
+    guard let event = CGEvent(
+        mouseEventSource: CGEventSource(stateID: .hidSystemState),
+        mouseType: type,
+        mouseCursorPosition: CGPoint(x: x, y: y),
+        mouseButton: .left
+    ) else {
+        fail("cannot create mouse event")
+    }
+    _ = requireEventTarget(pid: pid, windowID: windowID, fixtureName: fixtureName)
+    event.post(tap: .cghidEventTap)
+    emit(["pid": Int(pid), "window_id": Int(windowID), "event": action, "posted": true])
+}
+
+func postKeyEvent(pid: pid_t, windowID: CGWindowID, fixtureName: String,
+                  action: String, keyCode: Int, flags: CGEventFlags) {
+    guard action == "down" || action == "up" else { fail("key action must be down or up") }
+    guard (0...Int(UInt16.max)).contains(keyCode),
+          let event = CGEvent(keyboardEventSource: nil, virtualKey: UInt16(keyCode), keyDown: action == "down") else {
         fail("cannot create key event for code \(keyCode)")
     }
-    down.flags = flags
-    up.flags = flags
-    down.post(tap: .cghidEventTap)
-    usleep(30_000)
-    up.post(tap: .cghidEventTap)
+    event.flags = flags
+    _ = requireEventTarget(pid: pid, windowID: windowID, fixtureName: fixtureName)
+    event.post(tap: .cghidEventTap)
+    emit(["pid": Int(pid), "window_id": Int(windowID), "event": "key-\(action)", "posted": true])
 }
 
-func postText(_ text: String, pid: pid_t) {
-    requireAccessibility()
-    requireFrontmost(pid: pid)
-    for character in text {
-        let units = Array(String(character).utf16)
-        guard let down = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true),
-              let up = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false) else {
-            fail("cannot create Unicode key event")
-        }
-        units.withUnsafeBufferPointer { buffer in
-            down.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: buffer.baseAddress)
-            up.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: buffer.baseAddress)
-        }
-        down.post(tap: .cghidEventTap)
-        usleep(12_000)
-        up.post(tap: .cghidEventTap)
-        usleep(12_000)
+func postTextEvent(pid: pid_t, windowID: CGWindowID, fixtureName: String,
+                   action: String, text: String) {
+    guard action == "down" || action == "up" else { fail("text action must be down or up") }
+    let units = Array(text.utf16)
+    guard let event = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: action == "down") else {
+        fail("cannot create Unicode key event")
     }
+    units.withUnsafeBufferPointer { buffer in
+        event.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: buffer.baseAddress)
+    }
+    _ = requireEventTarget(pid: pid, windowID: windowID, fixtureName: fixtureName)
+    event.post(tap: .cghidEventTap)
+    emit(["pid": Int(pid), "window_id": Int(windowID), "event": "text-\(action)", "posted": true])
 }
 
-func accessibilityWindow(pid: pid_t, windowID: CGWindowID) -> AXUIElement {
+func accessibilityWindow(pid: pid_t, windowID: CGWindowID, fixtureName: String) -> AXUIElement {
     let application = AXUIElementCreateApplication(pid)
     var rawWindows: CFTypeRef?
     guard AXUIElementCopyAttributeValue(application, kAXWindowsAttribute as CFString, &rawWindows) == .success,
           let windows = rawWindows as? [AXUIElement] else {
         fail("Accessibility did not expose the target application's windows")
     }
-    let record = targetWindow(pid: pid, windowID: windowID)
+    let record = requireEventTarget(pid: pid, windowID: windowID, fixtureName: fixtureName)
     let expected = CGRect(
         x: record["x"] as! Double,
         y: record["y"] as! Double,
@@ -256,14 +342,14 @@ func consoleSessionFlags() -> [String: Any] {
     return result
 }
 
-func resizeWindow(pid: pid_t, windowID: CGWindowID, width: Double, height: Double) {
-    requireAccessibility()
-    requireFrontmost(pid: pid)
-    let window = accessibilityWindow(pid: pid, windowID: windowID)
+func resizeWindow(pid: pid_t, windowID: CGWindowID, fixtureName: String,
+                  width: Double, height: Double) {
+    let window = accessibilityWindow(pid: pid, windowID: windowID, fixtureName: fixtureName)
     var size = CGSize(width: width, height: height)
     guard let value = AXValueCreate(.cgSize, &size) else {
         fail("cannot create Accessibility window-size value")
     }
+    _ = requireEventTarget(pid: pid, windowID: windowID, fixtureName: fixtureName)
     let result = AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, value)
     guard result == .success else {
         fail("Accessibility window resize returned AXError \(result.rawValue)")
@@ -379,7 +465,7 @@ func colorComponents(_ path: String, red: UInt8, green: UInt8, blue: UInt8) -> [
 }
 
 guard CommandLine.arguments.count >= 2 else {
-    fail("usage: macos_ui.swift permissions|windows PID|activate PID WINDOW_ID|capture PID WINDOW_ID PNG|click PID X Y|down PID X Y|move PID X Y|up PID X Y|key PID CODE FLAGS|type PID TEXT|resize PID WINDOW_ID WIDTH HEIGHT|ocr PNG|colors PNG RED GREEN BLUE")
+    fail("usage: macos_ui.swift permissions|windows PID|activate PID WINDOW_ID FIXTURE|capture PID WINDOW_ID FIXTURE PNG|mouse-event PID WINDOW_ID FIXTURE ACTION X Y|key-event PID WINDOW_ID FIXTURE ACTION CODE FLAGS|text-event PID WINDOW_ID FIXTURE ACTION TEXT|cleanup-mouse PID X Y|cleanup-key PID CODE FLAGS|cleanup-text PID TEXT|resize PID WINDOW_ID FIXTURE WIDTH HEIGHT|ocr PNG|colors PNG RED GREEN BLUE")
 }
 
 let arguments = Array(CommandLine.arguments.dropFirst())
@@ -397,20 +483,32 @@ case "windows":
     let frontmost = NSWorkspace.shared.frontmostApplication?.processIdentifier ?? -1
     emit(["frontmost_pid": Int(frontmost), "windows": windowRecords().filter { ($0["pid"] as? Int) == pid }])
 case "activate":
-    guard arguments.count == 3 else { fail("activate requires PID WINDOW_ID") }
-    requireAccessibility()
+    guard arguments.count == 4 else { fail("activate requires PID WINDOW_ID FIXTURE") }
     let pid = pid_t(integer(arguments[1], "PID"))
     let windowID = CGWindowID(integer(arguments[2], "window ID"))
+    let fixtureName = arguments[3]
+    // Activation is the one operation allowed to start while another app is
+    // frontmost. It still requires an unlocked console and the unique visible
+    // process-owned fixture window before it asks macOS to activate that PID.
+    if let error = eventGuardError(pid: pid, windowID: windowID,
+                                   fixtureName: fixtureName, requireFrontmost: false) {
+        fail(error)
+    }
     guard let application = NSRunningApplication(processIdentifier: pid) else {
         fail("cannot find running application PID \(pid)")
     }
     let appActivated = application.activate(options: [.activateAllWindows])
     let appElement = AXUIElementCreateApplication(pid)
+    usleep(250_000)
+    _ = requireEventTarget(pid: pid, windowID: windowID, fixtureName: fixtureName)
     let frontmostResult = AXUIElementSetAttributeValue(
         appElement, kAXFrontmostAttribute as CFString, kCFBooleanTrue
     )
+    usleep(250_000)
+    _ = requireEventTarget(pid: pid, windowID: windowID, fixtureName: fixtureName)
     let focusedWindowResult = AXUIElementSetAttributeValue(
-        appElement, kAXFocusedWindowAttribute as CFString, accessibilityWindow(pid: pid, windowID: windowID)
+        appElement, kAXFocusedWindowAttribute as CFString,
+        accessibilityWindow(pid: pid, windowID: windowID, fixtureName: fixtureName)
     )
     usleep(250_000)
     emit([
@@ -423,45 +521,47 @@ case "activate":
         "frontmost_pid": Int(NSWorkspace.shared.frontmostApplication?.processIdentifier ?? -1),
     ])
 case "capture":
-    guard arguments.count == 4 else { fail("capture requires PID WINDOW_ID PNG") }
+    guard arguments.count == 5 else { fail("capture requires PID WINDOW_ID FIXTURE PNG") }
     let pid = pid_t(integer(arguments[1], "PID"))
     let windowID = CGWindowID(integer(arguments[2], "window ID"))
-    captureWindow(pid: pid, windowID: windowID, path: arguments[3])
-case "click":
-    guard arguments.count == 4 else { fail("click requires PID X Y") }
+    captureWindow(pid: pid, windowID: windowID, fixtureName: arguments[3], path: arguments[4])
+case "mouse-event":
+    guard arguments.count == 7 else { fail("mouse-event requires PID WINDOW_ID FIXTURE ACTION X Y") }
     let pid = pid_t(integer(arguments[1], "PID"))
-    let x = number(arguments[2], "X")
-    let y = number(arguments[3], "Y")
-    postMouse(.leftMouseDown, pid: pid, x: x, y: y)
-    usleep(60_000)
-    postMouse(.leftMouseUp, pid: pid, x: x, y: y)
-    emit(["pid": Int(pid), "x": x, "y": y, "posted": true])
-case "down", "move", "up":
-    guard arguments.count == 4 else { fail("mouse event requires PID X Y") }
+    let windowID = CGWindowID(integer(arguments[2], "window ID"))
+    postMouseEvent(pid: pid, windowID: windowID, fixtureName: arguments[3],
+                   action: arguments[4], x: number(arguments[5], "X"), y: number(arguments[6], "Y"))
+case "key-event":
+    guard arguments.count == 7 else { fail("key-event requires PID WINDOW_ID FIXTURE ACTION CODE FLAGS") }
     let pid = pid_t(integer(arguments[1], "PID"))
-    let x = number(arguments[2], "X")
-    let y = number(arguments[3], "Y")
-    let type: CGEventType = arguments[0] == "down" ? .leftMouseDown : (arguments[0] == "up" ? .leftMouseUp : .leftMouseDragged)
-    postMouse(type, pid: pid, x: x, y: y)
-    emit(["pid": Int(pid), "x": x, "y": y, "event": arguments[0], "posted": true])
-case "key":
-    guard arguments.count == 4 else { fail("key requires PID CODE FLAGS") }
+    let windowID = CGWindowID(integer(arguments[2], "window ID"))
+    postKeyEvent(pid: pid, windowID: windowID, fixtureName: arguments[3],
+                 action: arguments[4], keyCode: integer(arguments[5], "key code"),
+                 flags: eventFlags(arguments[6]))
+case "text-event":
+    guard arguments.count == 6 else { fail("text-event requires PID WINDOW_ID FIXTURE ACTION TEXT") }
     let pid = pid_t(integer(arguments[1], "PID"))
-    let code = integer(arguments[2], "key code")
-    postKey(code, flags: eventFlags(arguments[3]), pid: pid)
-    emit(["pid": Int(pid), "key_code": code, "flags": arguments[3], "posted": true])
-case "type":
-    guard arguments.count == 3 else { fail("type requires PID and one text argument") }
-    let pid = pid_t(integer(arguments[1], "PID"))
-    postText(arguments[2], pid: pid)
-    emit(["pid": Int(pid), "characters": arguments[2].count, "posted": true])
+    let windowID = CGWindowID(integer(arguments[2], "window ID"))
+    postTextEvent(pid: pid, windowID: windowID, fixtureName: arguments[3],
+                  action: arguments[4], text: arguments[5])
+case "cleanup-mouse":
+    guard arguments.count == 4 else { fail("cleanup-mouse requires PID X Y") }
+    postCleanupMouseRelease(pid: pid_t(integer(arguments[1], "PID")),
+                            x: number(arguments[2], "X"), y: number(arguments[3], "Y"))
+case "cleanup-key":
+    guard arguments.count == 4 else { fail("cleanup-key requires PID CODE FLAGS") }
+    postCleanupKeyRelease(pid: pid_t(integer(arguments[1], "PID")),
+                          keyCode: integer(arguments[2], "key code"), flags: eventFlags(arguments[3]))
+case "cleanup-text":
+    guard arguments.count == 3 else { fail("cleanup-text requires PID TEXT") }
+    postCleanupTextRelease(pid: pid_t(integer(arguments[1], "PID")), text: arguments[2])
 case "resize":
-    guard arguments.count == 5 else { fail("resize requires PID WINDOW_ID WIDTH HEIGHT") }
+    guard arguments.count == 6 else { fail("resize requires PID WINDOW_ID FIXTURE WIDTH HEIGHT") }
     let pid = pid_t(integer(arguments[1], "PID"))
     let windowID = CGWindowID(integer(arguments[2], "window ID"))
-    let width = number(arguments[3], "width")
-    let height = number(arguments[4], "height")
-    resizeWindow(pid: pid, windowID: windowID, width: width, height: height)
+    let width = number(arguments[4], "width")
+    let height = number(arguments[5], "height")
+    resizeWindow(pid: pid, windowID: windowID, fixtureName: arguments[3], width: width, height: height)
 case "ocr":
     guard arguments.count == 2 else { fail("ocr requires PNG") }
     emit(["observations": textObservations(arguments[1])])

@@ -146,16 +146,23 @@ title contains the isolated fixture name and whose size is at least 700×500
 logical points. It records other process-owned windows separately, including
 the small untitled auxiliary window used by this app. It rejects ambiguous
 fixture windows, a missing or changed selected WindowServer ID, and any loss of
-frontmost ownership before each capture or input. For the derived run, it also
-checks solid blue/pink pixels, 120×18 logical scene bounds scaled once, a held
-press across two repeated same-window resizes with unchanged dispatches,
-outside-release cancellation, and late bare releases after disable and after
-remount. It requires fresh remount state and native dispatch counters `[1, 2,
-1]`, one remount, two disables, no native failure, and the same exact edited
-file bytes. A pass writes `qualification.json`, one `smoke.json` per binary,
-the isolated editor logs, OCR records, fixtures and window-only PNGs under the
-chosen output directory. That directory must not already exist; use a new path
-for each attempt so earlier evidence stays intact.
+frontmost ownership before each capture or input. The native helper repeats the
+unlocked-console, Accessibility, live-PID, selected-window and frontmost checks
+immediately before each capture, mouse/key/text event and Accessibility window
+mutation. Paired key and pointer events are sent separately so a guard failure
+cannot emit the remaining global events. If a guard fails while the harness
+owns a synthetic key or button down, it records an attempt to release only that
+input directly to the original PID; cleanup is refused when the console is
+locked or unavailable, and failed cleanup fails the qualification. For the
+derived run, it also checks solid blue/pink pixels, 120×18 logical scene bounds
+scaled once, a held press across two repeated same-window resizes with unchanged
+dispatches, outside-release cancellation, and late bare releases after disable
+and after remount. It requires fresh remount state and native dispatch counters
+`[1, 2, 1]`, one remount, two disables, no native failure, and the same exact
+edited file bytes. A pass writes `qualification.json`, one `smoke.json` per
+binary, the isolated editor logs, OCR records, fixtures and window-only PNGs
+under the chosen output directory. That directory must not already exist; use a
+new path for each attempt so earlier evidence stays intact.
 
 This local UI procedure proves one native open/edit/save sequence and the
 listed status-bar interaction gates on the tested macOS machine. Hosted macOS CI

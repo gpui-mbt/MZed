@@ -70,6 +70,27 @@ class MacSceneEvidenceTests(unittest.TestCase):
                "MZed island counter=2\nMZed island remounted\nMZed island counter=1\n")
         self.assertEqual(smoke.counters(log), [1, 2, 1])
 
+    def test_wait_for_counters_waits_for_expected_sequence_to_arrive(self):
+        capture = object.__new__(smoke.MacSmoke)
+        with patch.object(capture, "read_log", side_effect=["", "MZed island counter=1\n"]), \
+                patch.object(smoke.time, "sleep"):
+            self.assertEqual(capture.wait_for_counters([1], timeout=1), "MZed island counter=1\n")
+        with patch.object(capture, "read_log", side_effect=[
+                "MZed island counter=1\n",
+                "MZed island counter=1\nMZed island counter=2\n"]), \
+                patch.object(smoke.time, "sleep"):
+            self.assertEqual(capture.wait_for_counters([1, 2], timeout=1),
+                             "MZed island counter=1\nMZed island counter=2\n")
+
+    def test_wait_for_counters_rejects_wrong_prefix_and_extra_dispatch(self):
+        capture = object.__new__(smoke.MacSmoke)
+        with patch.object(capture, "read_log", return_value="MZed island counter=2\n"):
+            with self.assertRaisesRegex(RuntimeError, r"expected \[1\], got \[2\]"):
+                capture.wait_for_counters([1], timeout=1)
+        with patch.object(capture, "read_log", return_value="MZed island counter=1\nMZed island counter=2\n"):
+            with self.assertRaisesRegex(RuntimeError, r"expected \[1\], got \[1, 2\]"):
+                capture.wait_for_counters([1], timeout=1)
+
     def test_dispatch_log_copy_keeps_only_native_contract_evidence(self):
         with tempfile.TemporaryDirectory() as directory:
             capture = object.__new__(smoke.MacSmoke)
@@ -127,8 +148,119 @@ class MacSceneEvidenceTests(unittest.TestCase):
                  "session_locked": False, "on_console": True}
         self.assertIsNone(smoke.preflight_blocker(ready))
         self.assertIn("locked", smoke.preflight_blocker(dict(ready, session_locked=True)))
+        self.assertIn("state is unavailable", smoke.preflight_blocker(dict(ready, session_locked=None)))
         self.assertIn("foreground", smoke.preflight_blocker(dict(ready, on_console=False)))
         self.assertIn("permissions", smoke.preflight_blocker(dict(ready, screen_recording=False)))
+
+
+def event_controller():
+    capture = object.__new__(smoke.MacSmoke)
+    capture.helper = Path("injected-helper")
+    capture.pid = 123
+    capture.window_id = 456
+    capture.fixture = Path("fixture.txt")
+    capture.window_title = "fixture.txt — fixture.txt"
+    capture.owned_input = None
+    capture.record = {"input_cleanup": [], "window_event_checks": []}
+    window = {"pid": 123, "window_id": 456, "title": capture.window_title,
+              "x": 10.0, "y": 20.0, "width": 800.0, "height": 600.0,
+              "layer": 0, "visible_on_screen": True}
+    image = dict(window, scale_x=2.0, scale_y=2.0, pixel_width=1600, pixel_height=1200)
+    return capture, window, image
+
+
+def injected_native_helper(window, *, after_event=None):
+    """Inject the native pre-event guard and separate PID-scoped cleanup emitter."""
+    state = {"frontmost_pid": 123, "window_id": 456, "fixture_visible": True,
+             "session_locked": False, "on_console": True}
+    emitted = []
+    cleanup_attempts = []
+
+    def helper(_binary, *arguments, **_kwargs):
+        command = arguments[0]
+        if command == "windows":
+            # Model the ordinary enumeration result racing with the native
+            # per-event guard: it still reports the prior frontmost snapshot.
+            return {"frontmost_pid": 123, "windows": [window]}
+        if command in ("mouse-event", "key-event", "text-event"):
+            if (state["session_locked"] or not state["on_console"]
+                    or state["frontmost_pid"] != 123 or state["window_id"] != 456
+                    or not state["fixture_visible"]):
+                raise RuntimeError("injected native per-event guard refused the global event")
+            action = arguments[4]
+            payload = arguments[5:]
+            emitted.append((command, action, *payload))
+            if after_event is not None:
+                after_event(state, command, action, payload)
+            return {"posted": True}
+        if command in ("cleanup-mouse", "cleanup-key", "cleanup-text"):
+            cleanup_attempts.append(arguments)
+            if state["session_locked"] or not state["on_console"]:
+                raise RuntimeError("injected cleanup guard refused release while locked/off-console")
+            return {"posted_to_target_pid": True}
+        raise AssertionError(f"unexpected helper command: {arguments!r}")
+
+    return state, emitted, cleanup_attempts, helper
+
+
+class MacInputGuardTests(unittest.TestCase):
+    def test_focus_loss_between_key_down_up_denies_global_up_and_targets_cleanup(self):
+        capture, window, _ = event_controller()
+
+        def lose_focus_after_down(state, command, action, _payload):
+            if command == "key-event" and action == "down":
+                state["frontmost_pid"] = 999
+
+        _state, emitted, cleanup_attempts, injected = injected_native_helper(
+            window, after_event=lose_focus_after_down)
+        with patch.object(smoke, "helper_json", side_effect=injected):
+            with self.assertRaisesRegex(RuntimeError, "native per-event guard refused"):
+                capture.key(1, "command")
+
+        self.assertEqual([event[:2] for event in emitted], [("key-event", "down")])
+        self.assertEqual(cleanup_attempts, [("cleanup-key", 123, 1, "command")])
+        self.assertEqual(capture.record["input_cleanup"][0]["outcome"],
+                         "release_posted_to_original_pid")
+        self.assertIsNone(capture.owned_input)
+
+    def test_lock_between_mouse_down_up_blocks_global_up_and_records_cleanup_failure(self):
+        capture, window, image = event_controller()
+
+        def lock_after_down(state, command, action, _payload):
+            if command == "mouse-event" and action == "down":
+                state["session_locked"] = True
+
+        _state, emitted, cleanup_attempts, injected = injected_native_helper(
+            window, after_event=lock_after_down)
+        with patch.object(smoke, "helper_json", side_effect=injected):
+            capture.mouse("down", image, (5.0, 6.0))
+            with self.assertRaisesRegex(RuntimeError, "targeted input release also failed"):
+                capture.mouse("up", image, (5.0, 6.0))
+
+        self.assertEqual([event[:2] for event in emitted], [("mouse-event", "down")])
+        self.assertEqual(len(cleanup_attempts), 1)
+        self.assertEqual(cleanup_attempts[0][0:1], ("cleanup-mouse",))
+        self.assertEqual(capture.record["input_cleanup"][0]["outcome"], "failed")
+        self.assertIn("locked/off-console", capture.record["input_cleanup"][0]["error"])
+        self.assertIsNone(capture.owned_input)
+
+    def test_window_identity_loss_between_text_characters_blocks_later_global_text(self):
+        capture, window, _ = event_controller()
+
+        def lose_window_after_first_character(state, command, action, payload):
+            if command == "text-event" and action == "up" and payload == ("a",):
+                state["window_id"] = 999
+
+        _state, emitted, cleanup_attempts, injected = injected_native_helper(
+            window, after_event=lose_window_after_first_character)
+        with patch.object(smoke, "helper_json", side_effect=injected):
+            with self.assertRaisesRegex(RuntimeError, "native per-event guard refused"):
+                capture.type_text("ab")
+
+        self.assertEqual(emitted, [("text-event", "down", "a"),
+                                   ("text-event", "up", "a")])
+        self.assertEqual(cleanup_attempts, [])
+        self.assertIsNone(capture.owned_input)
 
 
 if __name__ == "__main__":

@@ -41,7 +41,7 @@ jobs:
       - name: Compile local-only macOS UI helper (no GUI launch)
         run: |
           mkdir -p _build
-          xcrun --sdk macosx swiftc -O \
+          xcrun --sdk macosx swiftc -warnings-as-errors -O \
             -framework AppKit -framework ApplicationServices \
             -framework Vision -framework ImageIO \
             scripts/macos_ui.swift -o _build/macos-ui-helper

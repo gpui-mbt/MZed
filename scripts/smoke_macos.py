@@ -120,8 +120,8 @@ def select_fixture_editor(windows: list[dict], fixture_name: str) -> dict | None
 
 
 def preflight_blocker(permissions: dict) -> str | None:
-    if permissions.get("session_locked") is True:
-        return "the active macOS console session is locked"
+    if permissions.get("session_locked") is not False:
+        return "the active macOS console session is locked or its state is unavailable"
     if permissions.get("on_console") is not True:
         return "the invoking process is not in an unlocked foreground macOS console session"
     if permissions.get("accessibility") is not True or permissions.get("screen_recording") is not True:
@@ -156,6 +156,7 @@ class MacSmoke:
         self.window_id: int | None = None
         self.window_title: str | None = None
         self.pid: int | None = None
+        self.owned_input: dict | None = None
         self.record = {
             "schema": 1,
             "label": label,
@@ -166,6 +167,7 @@ class MacSmoke:
             "operations": [],
             "snapshots": [],
             "dispatch_log_copies": [],
+            "input_cleanup": [],
         }
 
     def prepare(self) -> tuple[dict[str, str], Path]:
@@ -203,11 +205,12 @@ class MacSmoke:
         self.pid = self.process.pid
         self.record["pid"] = self.pid
         self.wait_for_window()
-        active = helper_json(self.helper, "activate", self.pid, self.window_id)
+        active = helper_json(self.helper, "activate", self.pid, self.window_id,
+                             self.fixture.name)
         self.record["activation"] = active
         if active.get("frontmost_pid") != self.pid:
             raise RuntimeError(f"target app did not become frontmost: {active!r}")
-        self.assert_window_identity()
+        self.checked_window_identity()
         self.record["operations"].append(
             "opened the uniquely fixture-titled visible editor window and recorded auxiliary process windows")
 
@@ -262,11 +265,80 @@ class MacSmoke:
             raise RuntimeError(f"selected window no longer identifies the isolated fixture: {selected!r}")
         return selected
 
+    def release_owned_input(self, reason: str) -> str | None:
+        owned = self.owned_input
+        if owned is None:
+            return None
+        self.owned_input = None
+        kind = owned["kind"]
+        if kind == "mouse":
+            command = ("cleanup-mouse", owned["pid"], owned["x"], owned["y"])
+        elif kind == "key":
+            command = ("cleanup-key", owned["pid"], owned["key_code"], owned["flags"])
+        elif kind == "text":
+            command = ("cleanup-text", owned["pid"], owned["text"])
+        else:
+            raise RuntimeError(f"unknown owned input type: {kind!r}")
+        attempt = {"reason": reason, "kind": kind, "pid": owned["pid"],
+                   "window_id": owned["window_id"], "command": command[0]}
+        try:
+            result = helper_json(self.helper, *command, timeout=8)
+            if result.get("posted_to_target_pid") is not True:
+                raise RuntimeError(f"targeted release was not confirmed: {result!r}")
+            attempt["outcome"] = "release_posted_to_original_pid"
+            attempt["result"] = result
+            self.record["input_cleanup"].append(attempt)
+            return None
+        except Exception as error:
+            attempt["outcome"] = "failed"
+            attempt["error"] = str(error)
+            self.record["input_cleanup"].append(attempt)
+            return str(error)
+
+    def checked_window_identity(self) -> dict:
+        try:
+            return self.assert_window_identity()
+        except Exception as error:
+            cleanup_error = self.release_owned_input("window identity or foreground check failed")
+            if cleanup_error:
+                raise RuntimeError(f"{error}; targeted input release also failed: {cleanup_error}") from error
+            raise
+
+    def checked_capture_identity(self, capture: dict) -> dict:
+        window = self.checked_window_identity()
+        expected = {
+            "pid": self.pid,
+            "window_id": self.window_id,
+            "title": window.get("title"),
+        }
+        for key, value in expected.items():
+            if capture.get(key) != value:
+                cleanup_error = self.release_owned_input("capture no longer identifies the selected window")
+                error = f"capture {key} differs from the selected visible window: {capture!r} versus {window!r}"
+                if cleanup_error:
+                    error += f"; targeted input release also failed: {cleanup_error}"
+                raise RuntimeError(error)
+        for key in ("x", "y", "width", "height"):
+            if abs(float(capture[key]) - float(window[key])) > 1:
+                cleanup_error = self.release_owned_input("captured window geometry changed before input")
+                error = f"captured window geometry changed before input: {capture!r} versus {window!r}"
+                if cleanup_error:
+                    error += f"; targeted input release also failed: {cleanup_error}"
+                raise RuntimeError(error)
+        return window
+
     def capture(self, stage: str) -> dict:
-        window = self.assert_window_identity()
+        window = self.checked_window_identity()
         assert self.pid is not None and self.window_id is not None
         image = self.output / f"{stage}.png"
-        capture = helper_json(self.helper, "capture", self.pid, self.window_id, image)
+        try:
+            capture = helper_json(self.helper, "capture", self.pid, self.window_id,
+                                  self.fixture.name, image)
+        except Exception as error:
+            cleanup_error = self.release_owned_input("native window capture failed")
+            if cleanup_error:
+                raise RuntimeError(f"{error}; targeted input release also failed: {cleanup_error}") from error
+            raise
         if capture.get("pid") != self.pid or capture.get("window_id") != self.window_id:
             raise RuntimeError(f"capture identity does not match selected app window: {capture!r}")
         if capture.get("title") != window.get("title"):
@@ -319,35 +391,99 @@ class MacSmoke:
         raise RuntimeError(f"{stage}: expected OCR content not observed; last observations={last!r}")
 
     def click(self, capture: dict, point: tuple[float, float]) -> None:
-        self.assert_window_identity()
-        assert self.pid is not None
-        x, y = screen_point(capture, point)
-        helper_json(self.helper, "click", self.pid, x, y)
-        time.sleep(0.2)
+        self.mouse("down", capture, point)
+        time.sleep(0.06)
+        self.mouse("up", capture, point)
+        time.sleep(0.14)
 
     def mouse(self, action: str, capture: dict, point: tuple[float, float]) -> None:
-        self.assert_window_identity()
-        assert self.pid is not None
+        if self.owned_input is not None and self.owned_input["kind"] != "mouse":
+            raise RuntimeError(f"cannot send pointer input while another synthetic input is owned: {self.owned_input!r}")
+        window = self.checked_capture_identity(capture)
+        assert self.pid is not None and self.window_id is not None
         x, y = screen_point(capture, point)
-        helper_json(self.helper, action, self.pid, x, y)
-        time.sleep(0.12)
+        owned = self.owned_input
+        if action == "down" and owned is None:
+            pending = {"kind": "mouse", "pid": self.pid, "window_id": self.window_id,
+                       "x": x, "y": y}
+        else:
+            pending = owned
+        try:
+            helper_json(self.helper, "mouse-event", self.pid, self.window_id,
+                        self.fixture.name, action, x, y)
+        except Exception as error:
+            cleanup_error = self.release_owned_input(f"native mouse {action} event failed")
+            if cleanup_error:
+                raise RuntimeError(f"{error}; targeted input release also failed: {cleanup_error}") from error
+            raise
+        if action == "down" and pending is not None:
+            self.owned_input = pending
+        elif action == "up" and self.owned_input is not None and self.owned_input["kind"] == "mouse":
+            self.owned_input = None
+        self.record.setdefault("window_event_checks", []).append({
+            "event": action,
+            "pid": self.pid,
+            "window_id": self.window_id,
+            "fixture": self.fixture.name,
+            "visible_window": True,
+            "frontmost": True,
+            "bounds": {key: window[key] for key in ("x", "y", "width", "height")},
+        })
 
     def key(self, key_code: int, flags: str = "none") -> None:
-        self.assert_window_identity()
-        assert self.pid is not None
-        helper_json(self.helper, "key", self.pid, key_code, flags)
+        if self.owned_input is not None:
+            raise RuntimeError(f"cannot start keyboard input while another synthetic input is owned: {self.owned_input!r}")
+        assert self.pid is not None and self.window_id is not None
+        self.checked_window_identity()
+        try:
+            helper_json(self.helper, "key-event", self.pid, self.window_id,
+                        self.fixture.name, "down", key_code, flags)
+            self.owned_input = {"kind": "key", "pid": self.pid, "window_id": self.window_id,
+                                "key_code": key_code, "flags": flags}
+            self.checked_window_identity()
+            helper_json(self.helper, "key-event", self.pid, self.window_id,
+                        self.fixture.name, "up", key_code, flags)
+            self.owned_input = None
+        except Exception as error:
+            cleanup_error = self.release_owned_input(f"native key {key_code} sequence failed")
+            if cleanup_error:
+                raise RuntimeError(f"{error}; targeted input release also failed: {cleanup_error}") from error
+            raise
         time.sleep(0.12)
 
     def type_text(self, text: str) -> None:
-        self.assert_window_identity()
-        assert self.pid is not None
-        helper_json(self.helper, "type", self.pid, text)
+        if self.owned_input is not None:
+            raise RuntimeError(f"cannot start text input while another synthetic input is owned: {self.owned_input!r}")
+        assert self.pid is not None and self.window_id is not None
+        for character in text:
+            try:
+                self.checked_window_identity()
+                helper_json(self.helper, "text-event", self.pid, self.window_id,
+                            self.fixture.name, "down", character)
+                self.owned_input = {"kind": "text", "pid": self.pid,
+                                    "window_id": self.window_id, "text": character}
+                self.checked_window_identity()
+                helper_json(self.helper, "text-event", self.pid, self.window_id,
+                            self.fixture.name, "up", character)
+                self.owned_input = None
+            except Exception as error:
+                cleanup_error = self.release_owned_input("native text event sequence failed")
+                if cleanup_error:
+                    raise RuntimeError(f"{error}; targeted input release also failed: {cleanup_error}") from error
+                raise
         time.sleep(0.12)
 
     def resize(self, width: float, height: float) -> dict:
-        self.assert_window_identity()
+        self.checked_window_identity()
         assert self.pid is not None and self.window_id is not None
-        return helper_json(self.helper, "resize", self.pid, self.window_id, width, height)
+        try:
+            return helper_json(self.helper, "resize", self.pid, self.window_id,
+                               self.fixture.name, width, height)
+        except Exception as error:
+            cleanup_error = self.release_owned_input("native resize failed")
+            if cleanup_error:
+                raise RuntimeError(f"{error}; targeted input release also failed: {cleanup_error}") from error
+            raise
 
     def log_path(self) -> Path:
         candidates = list(self.output.rglob("Zed.log"))
@@ -388,7 +524,7 @@ class MacSmoke:
             actual = counters(last)
             if actual == expected:
                 return last
-            if actual[:len(expected)] != expected or len(actual) > len(expected):
+            if len(actual) > len(expected) or actual != expected[:len(actual)]:
                 raise RuntimeError(f"unexpected native dispatch sequence: expected {expected}, got {actual}")
             time.sleep(0.1)
         raise RuntimeError(f"native dispatch log did not reach {expected}; got {counters(last)}")
@@ -397,7 +533,7 @@ class MacSmoke:
         deadline = time.monotonic() + timeout
         last = None
         while time.monotonic() < deadline:
-            last = self.assert_window_identity()
+            last = self.checked_window_identity()
             if abs(float(last["width"]) - expected[0]) <= 2 and abs(float(last["height"]) - expected[1]) <= 2:
                 return last
             time.sleep(0.15)
@@ -481,7 +617,7 @@ class MacSmoke:
         pink["log"] = pink_log
         self.mouse("down", pink, center(self.find_scene(pink)))
         before_resize_log = self.read_log()
-        old_window = self.assert_window_identity()
+        old_window = self.checked_window_identity()
         first_target = (float(old_window["width"]) + 80, float(old_window["height"]) + 60)
         self.resize(*first_target)
         first_resized = self.wait_for_window_size(first_target)
@@ -620,6 +756,17 @@ def run_one(helper: Path, output: Path, label: str, binary: Path, source: Path,
     except (OSError, RuntimeError, subprocess.SubprocessError) as error:
         smoke.record["error"] = str(error)
     finally:
+        if smoke.owned_input is not None:
+            owned = dict(smoke.owned_input)
+            cleanup_error = smoke.release_owned_input("smoke run ended before matching release")
+            message = f"smoke run ended with an unmatched synthetic {owned['kind']} input"
+            if cleanup_error:
+                message += f"; targeted release failed: {cleanup_error}"
+            smoke.record["error"] = "; ".join(
+                item for item in (smoke.record.get("error"), message) if item)
+            smoke.record["editor_smoke"] = "failed"
+            if island:
+                smoke.record["same_window_island"] = "failed"
         try:
             smoke.record["log_path"] = str(smoke.log_path())
             log = smoke.read_log()
@@ -647,7 +794,8 @@ def main() -> int:
     helper = output / "macos-ui-helper"
     records: dict = {"schema": 1, "status": "failed", "host": sys.platform, "runs": {}}
     try:
-        run(["swiftc", "-O", "-framework", "AppKit", "-framework", "ApplicationServices",
+        run(["xcrun", "--sdk", "macosx", "swiftc", "-warnings-as-errors", "-O",
+             "-framework", "AppKit", "-framework", "ApplicationServices",
              "-framework", "Vision", "-framework", "ImageIO",
              str(Path(__file__).with_name("macos_ui.swift")), "-o", str(helper)], timeout=180)
         permissions = helper_json(helper, "permissions")
