@@ -48,9 +48,16 @@ cycles, and owner-thread enforcement. The editor smoke uses a fresh profile and
 requires one visible process-owned top-level window. It captures that window,
 checks the exact solid blue/pink scene pixels at the window's DPI scale, and
 sends native Win32 `SendInput` pointer events to that same window. It exercises
-unsupported right, modified-left, and wheel input; an accepted click after a
-resize; outside-release and minimize cancellation; disable/remount; late
-release rejection; and exact native dispatch/destroy log counts. For minimize
+unsupported right, modified-left, and wheel input; same-window GPUI focus loss
+while an owned press is active; an accepted click after a resize;
+outside-release and minimize cancellation; disable/remount; late release
+rejection; and exact native dispatch/destroy log counts. The focus-loss case
+uses [`Ctrl+Shift+P` from the pinned Windows keymap](https://github.com/zed-industries/zed/blob/76659a55a8c10ed355a070f8764a0b1733e3c115/assets/keymaps/default-windows.json)
+to open the command palette, requires an app-side cancellation acknowledgment,
+returns to the editor without changing the foreground top-level window, then
+checks the trailing release against both captured pixels and native dispatch
+logs. The recorded hosted run below predates this added case; only an exact-head
+hosted artifact qualifies it. For minimize
 cancellation it waits for an app-side owned-press acknowledgment, then sends a
 bare center release after restore before any new down and polls both scene pixels
 and dispatch logs for stability. It then types
