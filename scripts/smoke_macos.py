@@ -208,21 +208,28 @@ class MacSmoke:
         active = helper_json(self.helper, "activate", self.pid, self.window_id,
                              self.fixture.name)
         self.record["activation"] = active
-        if active.get("frontmost_pid") != self.pid:
-            raise RuntimeError(f"target app did not become frontmost: {active!r}")
+        if active.get("activation_completed") is not True or active.get("frontmost_pid") != self.pid:
+            self.record["activation_fresh_observation"] = self.current_window_snapshot()
+            raise RuntimeError(
+                f"target app did not become frontmost: activation={active!r}, "
+                f"fresh windows observation={self.record['activation_fresh_observation']!r}")
         self.checked_window_identity()
         self.record["operations"].append(
             "opened the uniquely fixture-titled visible editor window and recorded auxiliary process windows")
 
-    def current_windows(self, *, require_frontmost: bool = True) -> list[dict]:
+    def current_window_snapshot(self) -> dict:
         assert self.pid is not None
         result = helper_json(self.helper, "windows", self.pid)
-        if require_frontmost and result.get("frontmost_pid") != self.pid:
-            raise RuntimeError(f"editor lost foreground ownership: {result!r}")
         windows = result.get("windows")
         if not isinstance(windows, list):
             raise RuntimeError(f"invalid process window evidence: {result!r}")
-        return windows
+        return result
+
+    def current_windows(self, *, require_frontmost: bool = True) -> list[dict]:
+        result = self.current_window_snapshot()
+        if require_frontmost and result.get("frontmost_pid") != self.pid:
+            raise RuntimeError(f"editor lost foreground ownership: {result!r}")
+        return result["windows"]
 
     def wait_for_window(self) -> None:
         assert self.process is not None and self.pid is not None

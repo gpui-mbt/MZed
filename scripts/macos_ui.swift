@@ -596,9 +596,20 @@ case "activate":
         frontmostResult = AXUIElementSetAttributeValue(
             appElement, kAXFrontmostAttribute as CFString, kCFBooleanTrue
         ).rawValue
-        guard waitForFrontmost(pid: pid, windowID: windowID,
-                               fixtureName: fixtureName, timeout: 2.0) else {
-            fail("target application PID \(pid) did not become frontmost after activation request")
+        if !waitForFrontmost(pid: pid, windowID: windowID,
+                             fixtureName: fixtureName, timeout: 2.0) {
+            emit([
+                "pid": Int(pid),
+                "window_id": Int(windowID),
+                "activation_completed": false,
+                "activation_stage": "AXFrontmost",
+                "app_activate_returned": appActivated,
+                "activation_policy": application.activationPolicy.rawValue,
+                "app_is_active": application.isActive,
+                "ax_frontmost_error": frontmostResult,
+                "frontmost_pid": Int(NSWorkspace.shared.frontmostApplication?.processIdentifier ?? -1),
+            ])
+            exit(0)
         }
     }
     _ = requireEventTarget(pid: pid, windowID: windowID, fixtureName: fixtureName)
@@ -606,15 +617,31 @@ case "activate":
         appElement, kAXFocusedWindowAttribute as CFString,
         accessibilityWindow(pid: pid, windowID: windowID, fixtureName: fixtureName)
     )
-    guard waitForFrontmost(pid: pid, windowID: windowID,
-                           fixtureName: fixtureName, timeout: 2.0) else {
-        fail("target application PID \(pid) lost frontmost ownership during activation")
+    if !waitForFrontmost(pid: pid, windowID: windowID,
+                         fixtureName: fixtureName, timeout: 2.0) {
+        emit([
+            "pid": Int(pid),
+            "window_id": Int(windowID),
+            "activation_completed": false,
+            "activation_stage": "focused-window",
+            "app_activate_returned": appActivated,
+            "activation_policy": application.activationPolicy.rawValue,
+            "app_is_active": application.isActive,
+            "ax_frontmost_error": frontmostResult,
+            "ax_focused_window_error": focusedWindowResult.rawValue,
+            "frontmost_pid": Int(NSWorkspace.shared.frontmostApplication?.processIdentifier ?? -1),
+        ])
+        exit(0)
     }
     _ = requireEventTarget(pid: pid, windowID: windowID, fixtureName: fixtureName)
     emit([
         "pid": Int(pid),
         "window_id": Int(windowID),
+        "activation_completed": true,
+        "activation_stage": "complete",
         "app_activate_returned": appActivated,
+        "activation_policy": application.activationPolicy.rawValue,
+        "app_is_active": application.isActive,
         "ax_frontmost_error": frontmostResult,
         "ax_focused_window_error": focusedWindowResult.rawValue,
         "is_active": application.isActive,

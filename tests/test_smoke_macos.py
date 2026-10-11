@@ -154,6 +154,33 @@ class MacSceneEvidenceTests(unittest.TestCase):
         self.assertIn("foreground", smoke.preflight_blocker(dict(ready, on_console=False)))
         self.assertIn("permissions", smoke.preflight_blocker(dict(ready, screen_recording=False)))
 
+    def test_failed_activation_records_fresh_read_only_frontmost_observation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            binary = output / "mzed"
+            binary.write_bytes(b"fixture binary")
+            source = output / "source"
+            source.mkdir()
+            capture = smoke.MacSmoke(Path("helper"), output, "baseline", binary,
+                                     source, False, 1)
+            capture.window_id = 456
+            fake_process = type("Process", (), {"pid": 123})()
+            windows = [{"pid": 123, "window_id": 456, "title": "baseline-fixture.txt"}]
+            with patch.object(smoke.subprocess, "Popen", return_value=fake_process), \
+                    patch.object(capture, "wait_for_window"), \
+                    patch.object(smoke, "helper_json", side_effect=[
+                        {"activation_completed": False, "frontmost_pid": 10,
+                         "activation_stage": "AXFrontmost"},
+                        {"frontmost_pid": 10, "windows": windows},
+                    ]) as helper:
+                with self.assertRaisesRegex(RuntimeError, "fresh windows observation"):
+                    capture.launch()
+
+            self.assertEqual(helper.call_count, 2)
+            self.assertEqual(helper.call_args_list[1].args[1:], ("windows", 123))
+            self.assertEqual(capture.record["activation_fresh_observation"], {
+                "frontmost_pid": 10, "windows": windows})
+
 
 def event_controller():
     capture = object.__new__(smoke.MacSmoke)
