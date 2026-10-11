@@ -13,7 +13,7 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 VK_CONTROL, VK_MENU, VK_SHIFT = 0x11, 0x12, 0x10
-VK_END, VK_S = 0x23, 0x53
+VK_END, VK_P, VK_S, VK_ESCAPE = 0x23, 0x50, 0x53, 0x1B
 KEYEVENTF_KEYUP = 0x0002
 INPUT_MOUSE, INPUT_KEYBOARD = 0, 1
 MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP = 0x0002, 0x0004
@@ -398,6 +398,10 @@ def press_ack_generations(native_log):
     return [int(value) for value in re.findall(r'MZed island press owned generation=(\d+)', native_log)]
 
 
+def focus_loss_acknowledgments(native_log):
+    return re.findall(r'MZed island press canceled after GPUI focus loss', native_log)
+
+
 def native_dispatches(native_log):
     return [int(value) for value in re.findall(r'MZed island counter=(\d+)', native_log)]
 
@@ -414,6 +418,20 @@ def wait_for_press_ack(process, log_path, previous_count, timeout=5):
             return acknowledgments[-1]
         time.sleep(0.05)
     raise RuntimeError('native island did not acknowledge owned press before minimize')
+
+
+def wait_for_focus_loss_ack(process, log_path, previous_count, timeout=5):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError(f'editor exited before acknowledging focus loss: {process.returncode}')
+        acknowledgments = focus_loss_acknowledgments(read_native_log(log_path))
+        if len(acknowledgments) > previous_count + 1:
+            raise RuntimeError('one editor focus transfer produced multiple island cancellation acknowledgments')
+        if len(acknowledgments) == previous_count + 1:
+            return
+        time.sleep(0.05)
+    raise RuntimeError('GPUI focus loss did not cancel the owned native island press')
 
 
 def assert_scene_unchanged(snapshot, native_log, expected_color, expected_dispatches):
@@ -514,6 +532,39 @@ def exercise_island(hwnd, process, output, record):
     wheel(hwnd, snapshot, scene_center(rect))
     snapshot, rect = wait_scene(hwnd, output, 'island-unsupported-input', 'blue')
     record['operations'].append('right, Shift-left, and wheel input did not activate the native scene')
+
+    log_path = native_log_path(output)
+    log_before_focus_test = read_native_log(log_path)
+    previous_press_acknowledgments = len(press_ack_generations(log_before_focus_test))
+    previous_focus_loss_acknowledgments = len(focus_loss_acknowledgments(log_before_focus_test))
+    focus_test_dispatches = native_dispatches(log_before_focus_test)
+    _require_foreground(hwnd)
+    move_pointer(hwnd, snapshot, scene_center(rect))
+    mouse_button('left', True)
+    try:
+        generation = wait_for_press_ack(process, log_path, previous_press_acknowledgments)
+        record['focus_loss_press_generation'] = generation
+        if len(focus_loss_acknowledgments(read_native_log(log_path))) != previous_focus_loss_acknowledgments:
+            raise RuntimeError('the editor lost GPUI focus before the command palette test action')
+        chord([VK_CONTROL, VK_SHIFT], VK_P)
+        wait_for_focus_loss_ack(process, log_path, previous_focus_loss_acknowledgments)
+        record['focus_loss_acknowledgments'] = previous_focus_loss_acknowledgments + 1
+        if int(_user32().GetForegroundWindow() or 0) != hwnd:
+            raise RuntimeError('command palette focus transfer changed the foreground top-level window')
+        key(VK_ESCAPE, True)
+        key(VK_ESCAPE, False)
+        time.sleep(0.2)
+        if int(_user32().GetForegroundWindow() or 0) != hwnd:
+            raise RuntimeError('closing the command palette changed the foreground top-level window')
+        mouse_button('left', False)
+    finally:
+        mouse_button('left', False)
+    snapshot, rect, focus_observations = observe_scene_unchanged(
+        hwnd, output, log_path, 'island-focus-loss-late-release', 'blue', focus_test_dispatches)
+    record['focus_loss_late_release_observations'] = focus_observations
+    record['operations'].append(
+        'owned a press, transferred GPUI focus to the command palette while the editor stayed foreground, '
+        'then rejected the restored trailing release')
 
     _require_foreground(hwnd)
     move_pointer(hwnd, snapshot, scene_center(rect))
@@ -714,7 +765,7 @@ def main():
             record['operations'].append('typed once and saved expected bytes through native keyboard input')
             capture(hwnd, output / 'after-input.png')
             record['operations'].append('captured the focused editor window after save')
-            record['same_window_island_reason'] = 'Windows smoke verifies scene pixels, pointer ownership, cancellation, and remount lifecycle.'
+            record['same_window_island_reason'] = 'Windows smoke verifies scene pixels, pointer ownership, focus and visibility cancellation, and remount lifecycle.'
     except (OSError, RuntimeError, subprocess.SubprocessError) as error:
         if record['editor_smoke'] != 'passed':
             record['editor_smoke'] = 'failed'

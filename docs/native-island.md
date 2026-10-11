@@ -67,14 +67,19 @@ MSVC, links and runs `native/protocol.rs` in one Rust process, builds the pinned
 editor with the opt-in island, and runs an isolated native-window smoke. The
 smoke captures the island's exact scene pixels, drives same-window Win32 pointer
 input, checks resize and lifecycle behavior, and verifies open/edit/save through
-the editor. Its minimize cancellation case waits for an app-side owned-press
-acknowledgment, then probes a bare release after restore before any new press.
+the editor. It also opens the pinned Zed command palette while an island press
+is owned, requires the GPUI focus-loss cancellation acknowledgment, and checks
+the trailing release against stable pixels and dispatch logs while the same
+top-level window stays foreground. Its minimize cancellation case waits for an
+app-side owned-press acknowledgment, then probes a bare release after restore
+before any new press.
 The exact-source hosted run [38041917899](https://github.com/gpui-mbt/MZed/actions/runs/38041917899)
 passed on 2026-10-10 for harness commit
 `40069b99460ba9b16e6aba9a130711d2c7acc5f9`. It qualifies this bounded
 Windows 2022 primary-monitor scenario at 96 DPI: one visible process-owned
 editor window, scene pixels and native input/lifecycle checks, plus the saved
-fixture. See the [Windows evidence record](windows-validation.md#hosted-windows-qualification)
+fixture, but predates the added GPUI focus-loss check above. See the
+[Windows evidence record](windows-validation.md#hosted-windows-qualification)
 for the exact source pins and outcomes. The full editor build and UI smoke
 remain unrun locally because the available disk space is below the build
 preflight requirement.

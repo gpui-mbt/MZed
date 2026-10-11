@@ -93,6 +93,36 @@ class WindowsSceneEvidenceTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'did not acknowledge owned press'):
                 smoke.wait_for_press_ack(RunningProcess(), Path('unused'), previous_count=1, timeout=0.01)
 
+    def test_focus_loss_acknowledgment_is_a_distinct_native_event(self):
+        log = ('MZed island press owned generation=7\n'
+               'MZed island press canceled after GPUI focus loss\n')
+        self.assertEqual(smoke.focus_loss_acknowledgments(log), [
+            'MZed island press canceled after GPUI focus loss',
+        ])
+
+    def test_focus_loss_waits_for_a_fresh_app_acknowledgment(self):
+        class RunningProcess:
+            @staticmethod
+            def poll():
+                return None
+
+        before = 'MZed island press canceled after GPUI focus loss\n'
+        after = before + 'MZed island press canceled after GPUI focus loss\n'
+        with patch.object(smoke, 'read_native_log', side_effect=[before, after]):
+            smoke.wait_for_focus_loss_ack(RunningProcess(), Path('unused'), previous_count=1)
+
+    def test_focus_loss_rejects_duplicate_cancellation_acknowledgments(self):
+        class RunningProcess:
+            @staticmethod
+            def poll():
+                return None
+
+        log = ('MZed island press canceled after GPUI focus loss\n'
+               'MZed island press canceled after GPUI focus loss\n')
+        with patch.object(smoke, 'read_native_log', return_value=log):
+            with self.assertRaisesRegex(RuntimeError, 'multiple island cancellation acknowledgments'):
+                smoke.wait_for_focus_loss_ack(RunningProcess(), Path('unused'), previous_count=0)
+
     def test_late_release_oracle_requires_unchanged_pixels_and_dispatches(self):
         snapshot = capture(pink=(0, 0, 119, 17))
         smoke.assert_scene_unchanged(snapshot, 'MZed island counter=2\n', 'pink', [2])

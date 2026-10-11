@@ -4,10 +4,14 @@
 # MZed
 
 Keep a working Rust Zed editor while replacing small, optional regions with
-MoonBit. The Linux baseline and island have native qualification workflows. A
-separate Windows lane now builds the pinned native ABI with MSVC and records a
-Windows editor open/edit/save smoke; it does not yet qualify island pixels or
-pointer interactions on Windows.
+MoonBit. The Linux baseline and island have native qualification workflows.
+Windows builds the pinned native ABI with MSVC. The recorded hosted Windows
+2022 run passed same-window island pixels, pointer input, resize, outside and
+minimize cancellation, lifecycle checks, and fixture edit/save. The Windows
+smoke now also checks same-window GPUI focus loss; that added case needs an
+exact-head hosted run before it can be called qualified. Full-editor smoke is a
+manual hosted run; local full-editor build and UI execution are unrun because of
+disk space limits.
 
 The baseline editor and the opt-in MoonBit island remain separate lanes. This
 repository pins Zed v1.22.0, verifies source and license provenance, and
