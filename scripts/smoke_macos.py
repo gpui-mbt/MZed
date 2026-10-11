@@ -130,7 +130,9 @@ def preflight_blocker(permissions: dict) -> str | None:
 
 
 def require_unmodified_input_flags(result: dict, action: str) -> None:
-    flags = result.get("event_flags_raw")
+    # Core Graphics may annotate its event object during post(). Validate the
+    # captured pre-post value; `event_flags_after_post_raw` is diagnostic only.
+    flags = result.get("event_flags_before_post_raw")
     if flags != 0:
         raise RuntimeError(f"plain {action} retained synthetic modifier flags: {flags!r}")
 

@@ -233,12 +233,14 @@ def injected_native_helper(window, *, after_event=None):
             emitted.append((command, action, *payload))
             if after_event is not None:
                 after_event(state, command, action, payload)
-            return {"posted": True, "event_flags_raw": 0}
+            return {"posted": True, "event_flags_before_post_raw": 0,
+                    "event_flags_raw": 0, "event_flags_after_post_raw": 0}
         if command in ("cleanup-mouse", "cleanup-key", "cleanup-text"):
             cleanup_attempts.append(arguments)
             if state["session_locked"] or not state["on_console"]:
                 raise RuntimeError("injected cleanup guard refused release while locked/off-console")
-            return {"posted_to_target_pid": True, "event_flags_raw": 0}
+            return {"posted_to_target_pid": True, "event_flags_before_post_raw": 0,
+                    "event_flags_raw": 0, "event_flags_after_post_raw": 0}
         raise AssertionError(f"unexpected helper command: {arguments!r}")
 
     return state, emitted, cleanup_attempts, helper
@@ -246,9 +248,41 @@ def injected_native_helper(window, *, after_event=None):
 
 class MacInputGuardTests(unittest.TestCase):
     def test_plain_input_ack_rejects_inherited_command_and_control_flags(self):
-        smoke.require_unmodified_input_flags({"event_flags_raw": 0}, "Unicode event")
+        smoke.require_unmodified_input_flags({"event_flags_before_post_raw": 0,
+                                              "event_flags_after_post_raw": 0x20000000},
+                                             "Unicode event")
         with self.assertRaisesRegex(RuntimeError, "retained synthetic modifier flags: 538181632"):
-            smoke.require_unmodified_input_flags({"event_flags_raw": 0x20140000}, "Unicode event")
+            smoke.require_unmodified_input_flags({"event_flags_before_post_raw": 0x20140000,
+                                                  "event_flags_after_post_raw": 0x20140000},
+                                                 "Unicode event")
+
+    def test_post_annotation_does_not_fail_mouse_or_unicode_acknowledgements(self):
+        capture, window, image = event_controller()
+        _state, emitted, _cleanup_attempts, injected = injected_native_helper(window)
+
+        def post_annotated(_binary, *arguments, **_kwargs):
+            result = injected(_binary, *arguments)
+            if arguments[0] in ("mouse-event", "text-event"):
+                return {**result,
+                        "event_flags_before_post_raw": 0,
+                        "event_flags_raw": 0,
+                        "event_flags_after_post_raw": 0x20000000}
+            return result
+
+        with patch.object(smoke, "helper_json", side_effect=post_annotated):
+            capture.mouse("down", image, (5.0, 6.0))
+            capture.mouse("up", image, (5.0, 6.0))
+            capture.type_text("a")
+
+        self.assertIsNone(capture.owned_input)
+        self.assertEqual([event[:2] for event in emitted], [
+            ("mouse-event", "down"), ("mouse-event", "up"),
+            ("text-event", "down"), ("text-event", "up"),
+        ])
+        acknowledgements = capture.record["input_event_acks"]
+        self.assertTrue(all(item["result"]["event_flags_before_post_raw"] == 0
+                            and item["result"]["event_flags_after_post_raw"] == 0x20000000
+                            for item in acknowledgements))
 
     def test_mouse_with_inherited_modifiers_is_released_and_fails_closed(self):
         capture, window, image = event_controller()
@@ -257,7 +291,9 @@ class MacInputGuardTests(unittest.TestCase):
         def contaminated_mouse(_binary, *arguments, **_kwargs):
             result = injected(_binary, *arguments)
             if arguments[0] == "mouse-event":
-                return {**result, "event_flags_raw": 0x20140000}
+                return {**result, "event_flags_before_post_raw": 0x20140000,
+                        "event_flags_raw": 0x20140000,
+                        "event_flags_after_post_raw": 0x20140000}
             return result
 
         with patch.object(smoke, "helper_json", side_effect=contaminated_mouse):
@@ -277,7 +313,9 @@ class MacInputGuardTests(unittest.TestCase):
         def contaminated_text(_binary, *arguments, **_kwargs):
             result = injected(_binary, *arguments)
             if arguments[0] == "text-event":
-                return {**result, "event_flags_raw": 0x20140000}
+                return {**result, "event_flags_before_post_raw": 0x20140000,
+                        "event_flags_raw": 0x20140000,
+                        "event_flags_after_post_raw": 0x20140000}
             return result
 
         with patch.object(smoke, "helper_json", side_effect=contaminated_text):

@@ -272,11 +272,14 @@ func postCleanupMouseRelease(pid: pid_t, x: Double, y: Double) {
     resetUnmodifiedInputFlags(event)
     if let error = cleanupGuardError(pid: pid) { fail(error) }
     guard event.flags.rawValue == 0 else { fail("targeted mouse-up cleanup retained modifier flags") }
+    let flagsBeforePost = event.flags.rawValue
     // Cleanup is a release only and goes directly to the PID that received the
     // owned down. It never enters the global event stream or reactivates the app.
     event.postToPid(pid)
     emit(["pid": Int(pid), "cleanup": "targeted-mouse-up", "posted_to_target_pid": true,
-          "event_flags_raw": event.flags.rawValue])
+          "event_flags_before_post_raw": flagsBeforePost,
+          "event_flags_raw": flagsBeforePost,
+          "event_flags_after_post_raw": event.flags.rawValue])
 }
 
 func postCleanupKeyRelease(pid: pid_t, keyCode: Int, flags: CGEventFlags) {
@@ -287,9 +290,13 @@ func postCleanupKeyRelease(pid: pid_t, keyCode: Int, flags: CGEventFlags) {
     }
     event.flags = flags
     if let error = cleanupGuardError(pid: pid) { fail(error) }
+    let flagsBeforePost = event.flags.rawValue
     event.postToPid(pid)
     emit(["pid": Int(pid), "cleanup": "targeted-key-up", "posted_to_target_pid": true,
-          "event_flags_raw": event.flags.rawValue, "key_code": keyCode])
+          "event_flags_before_post_raw": flagsBeforePost,
+          "event_flags_raw": flagsBeforePost,
+          "event_flags_after_post_raw": event.flags.rawValue,
+          "key_code": keyCode])
 }
 
 func postCleanupTextRelease(pid: pid_t, text: String) {
@@ -304,9 +311,13 @@ func postCleanupTextRelease(pid: pid_t, text: String) {
     resetUnmodifiedInputFlags(event)
     if let error = cleanupGuardError(pid: pid) { fail(error) }
     guard event.flags.rawValue == 0 else { fail("targeted Unicode cleanup retained modifier flags") }
+    let flagsBeforePost = event.flags.rawValue
     event.postToPid(pid)
     emit(["pid": Int(pid), "cleanup": "targeted-text-key-up", "posted_to_target_pid": true,
-          "event_flags_raw": event.flags.rawValue, "key_code": 0,
+          "event_flags_before_post_raw": flagsBeforePost,
+          "event_flags_raw": flagsBeforePost,
+          "event_flags_after_post_raw": event.flags.rawValue,
+          "key_code": 0,
           "unicode_utf16_units": units])
 }
 
@@ -332,9 +343,12 @@ func postMouseEvent(pid: pid_t, windowID: CGWindowID, fixtureName: String,
     resetUnmodifiedInputFlags(event)
     _ = requireEventTarget(pid: pid, windowID: windowID, fixtureName: fixtureName)
     guard event.flags.rawValue == 0 else { fail("plain mouse event retained modifier flags") }
+    let flagsBeforePost = event.flags.rawValue
     event.post(tap: .cghidEventTap)
     emit(["pid": Int(pid), "window_id": Int(windowID), "event": action, "posted": true,
-          "event_flags_raw": event.flags.rawValue])
+          "event_flags_before_post_raw": flagsBeforePost,
+          "event_flags_raw": flagsBeforePost,
+          "event_flags_after_post_raw": event.flags.rawValue])
 }
 
 func postKeyEvent(pid: pid_t, windowID: CGWindowID, fixtureName: String,
@@ -355,10 +369,14 @@ func postKeyEvent(pid: pid_t, windowID: CGWindowID, fixtureName: String,
         }
     }
     _ = requireEventTarget(pid: pid, windowID: windowID, fixtureName: fixtureName)
+    let flagsBeforePost = event.flags.rawValue
     event.post(tap: .cghidEventTap)
     var result: [String: Any] = ["pid": Int(pid), "window_id": Int(windowID),
                                 "event": "key-\(action)", "posted": true,
-                                "event_flags_raw": event.flags.rawValue, "key_code": keyCode]
+                                "event_flags_before_post_raw": flagsBeforePost,
+                                "event_flags_raw": flagsBeforePost,
+                                "event_flags_after_post_raw": event.flags.rawValue,
+                                "key_code": keyCode]
     if let expectedFocusedWindowID {
         result["expected_focused_window_id"] = expectedFocusedWindowID
     }
@@ -378,9 +396,13 @@ func postTextEvent(pid: pid_t, windowID: CGWindowID, fixtureName: String,
     resetUnmodifiedInputFlags(event)
     _ = requireEventTarget(pid: pid, windowID: windowID, fixtureName: fixtureName)
     guard event.flags.rawValue == 0 else { fail("plain Unicode event retained modifier flags") }
+    let flagsBeforePost = event.flags.rawValue
     event.post(tap: .cghidEventTap)
     emit(["pid": Int(pid), "window_id": Int(windowID), "event": "text-\(action)", "posted": true,
-          "event_flags_raw": event.flags.rawValue, "key_code": 0,
+          "event_flags_before_post_raw": flagsBeforePost,
+          "event_flags_raw": flagsBeforePost,
+          "event_flags_after_post_raw": event.flags.rawValue,
+          "key_code": 0,
           "unicode_utf16_units": units])
 }
 

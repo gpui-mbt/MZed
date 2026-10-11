@@ -135,9 +135,11 @@ window by its WindowServer ID, not the whole display. Both binaries receive
 fresh isolated profiles and the same untrusted fixture, then the harness
 exercises native keyboard input and saves the file through the editor. Plain
 pointer and Unicode events explicitly clear inherited modifier flags. Each
-native acknowledgement records its flags, and the harness stops if a plain
-event retains any modifier; this prevents a prior synthetic shortcut from
-changing the meaning of the next click or character. The saved bytes must be
+native acknowledgement records the event flags immediately before posting and
+the separate value observed after posting; the harness validates the pre-post
+value because Core Graphics can annotate the event object during posting. This
+prevents a prior synthetic shortcut from changing the meaning of the next
+click or character. The saved bytes must be
 exactly:
 
 ```text
