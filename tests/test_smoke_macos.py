@@ -149,6 +149,8 @@ class MacSceneEvidenceTests(unittest.TestCase):
         self.assertIsNone(smoke.preflight_blocker(ready))
         self.assertIn("locked", smoke.preflight_blocker(dict(ready, session_locked=True)))
         self.assertIn("state is unavailable", smoke.preflight_blocker(dict(ready, session_locked=None)))
+        self.assertIn("state is unavailable", smoke.preflight_blocker(
+            {key: value for key, value in ready.items() if key != "session_locked"}))
         self.assertIn("foreground", smoke.preflight_blocker(dict(ready, on_console=False)))
         self.assertIn("permissions", smoke.preflight_blocker(dict(ready, screen_recording=False)))
 

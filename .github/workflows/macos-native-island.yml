@@ -45,6 +45,7 @@ jobs:
             -framework AppKit -framework ApplicationServices \
             -framework Vision -framework ImageIO \
             scripts/macos_ui.swift -o _build/macos-ui-helper
+          _build/macos-ui-helper guard-fixtures
       - name: Build the pinned MoonBit image as a macOS static archive
         run: python3 scripts/build_native.py --source _build/gpui --output _build/native-macos
       - name: Run the Rust to MoonBit C ABI contract tests

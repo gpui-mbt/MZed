@@ -813,6 +813,10 @@ def main() -> int:
              "-framework", "AppKit", "-framework", "ApplicationServices",
              "-framework", "Vision", "-framework", "ImageIO",
              str(Path(__file__).with_name("macos_ui.swift")), "-o", str(helper)], timeout=180)
+        records["guard_fixtures"] = helper_json(helper, "guard-fixtures")
+        if (records["guard_fixtures"].get("session_fixtures") != "passed"
+                or records["guard_fixtures"].get("frontmost_guard_fixtures") != "passed"):
+            raise RuntimeError("macOS UI guard fixtures did not pass")
         permissions = helper_json(helper, "permissions")
         records["permissions"] = permissions
         blocker = preflight_blocker(permissions)

@@ -62,6 +62,10 @@ func windowRecords() -> [[String: Any]] {
     }
 }
 
+func frontmostGuardAllows(targetPID: pid_t, currentFrontmostPID: pid_t?, required: Bool) -> Bool {
+    !required || currentFrontmostPID == targetPID
+}
+
 func eventGuardError(pid: pid_t, windowID: CGWindowID, fixtureName: String,
                      requireFrontmost: Bool = true) -> String? {
     guard AXIsProcessTrusted() else {
@@ -88,7 +92,9 @@ func eventGuardError(pid: pid_t, windowID: CGWindowID, fixtureName: String,
           (fixtureWindows[0]["window_id"] as? Int) == Int(windowID) else {
         return "selected visible fixture window \(windowID) is missing, ambiguous, or changed for PID \(pid)"
     }
-    guard !requireFrontmost || NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else {
+    guard frontmostGuardAllows(targetPID: pid,
+                               currentFrontmostPID: NSWorkspace.shared.frontmostApplication?.processIdentifier,
+                               required: requireFrontmost) else {
         return "target application PID \(pid) is not frontmost; refusing UI interaction"
     }
     return nil
@@ -106,6 +112,22 @@ func requireEventTarget(pid: pid_t, windowID: CGWindowID, fixtureName: String,
         fail("selected visible fixture window \(windowID) disappeared for PID \(pid)")
     }
     return record
+}
+
+func waitForFrontmost(pid: pid_t, windowID: CGWindowID, fixtureName: String,
+                      timeout: TimeInterval) -> Bool {
+    let deadline = Date().addingTimeInterval(timeout)
+    repeat {
+        if let error = eventGuardError(pid: pid, windowID: windowID,
+                                       fixtureName: fixtureName, requireFrontmost: false) {
+            fail(error)
+        }
+        if NSWorkspace.shared.frontmostApplication?.processIdentifier == pid {
+            return true
+        }
+        if Date() >= deadline { return false }
+        usleep(50_000)
+    } while true
 }
 
 func captureWindow(pid: pid_t, windowID: CGWindowID, fixtureName: String, path: String) {
@@ -330,16 +352,76 @@ func accessibilityWindow(pid: pid_t, windowID: CGWindowID, fixtureName: String) 
     fail("Accessibility did not expose window \(windowID) with matching identity or geometry for PID \(pid)")
 }
 
-func consoleSessionFlags() -> [String: Any] {
-    let session = CGSessionCopyCurrentDictionary() as? [String: Any] ?? [:]
+func sessionFlags(_ session: [String: Any]?) -> [String: Any] {
+    guard let session else { return [:] }
     var result: [String: Any] = [:]
-    if let locked = session["CGSSessionScreenIsLocked"] as? NSNumber {
+    let onConsole = session["kCGSSessionOnConsoleKey"] as? NSNumber
+    if let lockValue = session["CGSSessionScreenIsLocked"] {
+        guard let locked = lockValue as? NSNumber else {
+            if let onConsole {
+                result["on_console"] = onConsole.boolValue
+            }
+            return result
+        }
         result["session_locked"] = locked.boolValue
+    } else if onConsole?.boolValue == true {
+        // On this macOS host the private lock marker is present with `true`
+        // while locked, and omitted in an unlocked console session. Treat that
+        // omission as unlocked only when the session dictionary explicitly
+        // identifies the caller as on-console. A missing dictionary or console
+        // marker, or an unrecognized lock value, remains unknown and therefore
+        // fails closed in event guards.
+        result["session_locked"] = false
     }
-    if let onConsole = session["kCGSSessionOnConsoleKey"] as? NSNumber {
+    if let onConsole {
         result["on_console"] = onConsole.boolValue
     }
     return result
+}
+
+func consoleSessionFlags() -> [String: Any] {
+    sessionFlags(CGSessionCopyCurrentDictionary() as? [String: Any])
+}
+
+func validateSessionFlagFixtures() {
+    let unlocked = sessionFlags(["kCGSSessionOnConsoleKey": NSNumber(value: true)])
+    guard unlocked["session_locked"] as? Bool == false,
+          unlocked["on_console"] as? Bool == true else {
+        fail("unlocked on-console session fixture did not normalize to unlocked")
+    }
+    let locked = sessionFlags([
+        "kCGSSessionOnConsoleKey": NSNumber(value: true),
+        "CGSSessionScreenIsLocked": NSNumber(value: true),
+    ])
+    guard locked["session_locked"] as? Bool == true,
+          locked["on_console"] as? Bool == true else {
+        fail("explicitly locked session fixture did not remain locked")
+    }
+    let offConsole = sessionFlags(["kCGSSessionOnConsoleKey": NSNumber(value: false)])
+    guard offConsole["session_locked"] == nil,
+          offConsole["on_console"] as? Bool == false else {
+        fail("off-console session fixture did not remain unavailable to event guards")
+    }
+    let empty = sessionFlags([:])
+    guard empty.isEmpty else {
+        fail("empty session dictionary fixture did not remain unavailable")
+    }
+    let malformedLock = sessionFlags([
+        "kCGSSessionOnConsoleKey": NSNumber(value: true),
+        "CGSSessionScreenIsLocked": "unknown",
+    ])
+    guard malformedLock["session_locked"] == nil,
+          malformedLock["on_console"] as? Bool == true else {
+        fail("unrecognized lock marker fixture did not remain unavailable")
+    }
+    guard sessionFlags(nil).isEmpty else {
+        fail("missing session dictionary fixture did not remain unavailable")
+    }
+    guard frontmostGuardAllows(targetPID: 123, currentFrontmostPID: 999, required: false),
+          !frontmostGuardAllows(targetPID: 123, currentFrontmostPID: 999, required: true),
+          frontmostGuardAllows(targetPID: 123, currentFrontmostPID: 123, required: true) else {
+        fail("activation and regular-event frontmost guard fixtures did not preserve their policies")
+    }
 }
 
 func resizeWindow(pid: pid_t, windowID: CGWindowID, fixtureName: String,
@@ -465,7 +547,7 @@ func colorComponents(_ path: String, red: UInt8, green: UInt8, blue: UInt8) -> [
 }
 
 guard CommandLine.arguments.count >= 2 else {
-    fail("usage: macos_ui.swift permissions|windows PID|activate PID WINDOW_ID FIXTURE|capture PID WINDOW_ID FIXTURE PNG|mouse-event PID WINDOW_ID FIXTURE ACTION X Y|key-event PID WINDOW_ID FIXTURE ACTION CODE FLAGS|text-event PID WINDOW_ID FIXTURE ACTION TEXT|cleanup-mouse PID X Y|cleanup-key PID CODE FLAGS|cleanup-text PID TEXT|resize PID WINDOW_ID FIXTURE WIDTH HEIGHT|ocr PNG|colors PNG RED GREEN BLUE")
+    fail("usage: macos_ui.swift permissions|guard-fixtures|windows PID|activate PID WINDOW_ID FIXTURE|capture PID WINDOW_ID FIXTURE PNG|mouse-event PID WINDOW_ID FIXTURE ACTION X Y|key-event PID WINDOW_ID FIXTURE ACTION CODE FLAGS|text-event PID WINDOW_ID FIXTURE ACTION TEXT|cleanup-mouse PID X Y|cleanup-key PID CODE FLAGS|cleanup-text PID TEXT|resize PID WINDOW_ID FIXTURE WIDTH HEIGHT|ocr PNG|colors PNG RED GREEN BLUE")
 }
 
 let arguments = Array(CommandLine.arguments.dropFirst())
@@ -477,6 +559,9 @@ case "permissions":
     ]
     result.merge(consoleSessionFlags()) { _, new in new }
     emit(result)
+case "guard-fixtures":
+    validateSessionFlagFixtures()
+    emit(["session_fixtures": "passed", "frontmost_guard_fixtures": "passed"])
 case "windows":
     guard arguments.count == 2 else { fail("windows requires PID") }
     let pid = integer(arguments[1], "PID")
@@ -499,23 +584,38 @@ case "activate":
     }
     let appActivated = application.activate(options: [.activateAllWindows])
     let appElement = AXUIElementCreateApplication(pid)
-    usleep(250_000)
-    _ = requireEventTarget(pid: pid, windowID: windowID, fixtureName: fixtureName)
-    let frontmostResult = AXUIElementSetAttributeValue(
-        appElement, kAXFrontmostAttribute as CFString, kCFBooleanTrue
-    )
-    usleep(250_000)
+    var frontmostResult: Any = "not_needed"
+    if !waitForFrontmost(pid: pid, windowID: windowID,
+                         fixtureName: fixtureName, timeout: 2.0) {
+        // NSRunningApplication activation may be asynchronous or rejected.
+        // Only the explicit activation path may request AX frontmost while a
+        // different app is frontmost; session and selected-window ownership
+        // are rechecked immediately before that mutation.
+        _ = requireEventTarget(pid: pid, windowID: windowID, fixtureName: fixtureName,
+                               requireFrontmost: false)
+        frontmostResult = AXUIElementSetAttributeValue(
+            appElement, kAXFrontmostAttribute as CFString, kCFBooleanTrue
+        ).rawValue
+        guard waitForFrontmost(pid: pid, windowID: windowID,
+                               fixtureName: fixtureName, timeout: 2.0) else {
+            fail("target application PID \(pid) did not become frontmost after activation request")
+        }
+    }
     _ = requireEventTarget(pid: pid, windowID: windowID, fixtureName: fixtureName)
     let focusedWindowResult = AXUIElementSetAttributeValue(
         appElement, kAXFocusedWindowAttribute as CFString,
         accessibilityWindow(pid: pid, windowID: windowID, fixtureName: fixtureName)
     )
-    usleep(250_000)
+    guard waitForFrontmost(pid: pid, windowID: windowID,
+                           fixtureName: fixtureName, timeout: 2.0) else {
+        fail("target application PID \(pid) lost frontmost ownership during activation")
+    }
+    _ = requireEventTarget(pid: pid, windowID: windowID, fixtureName: fixtureName)
     emit([
         "pid": Int(pid),
         "window_id": Int(windowID),
         "app_activate_returned": appActivated,
-        "ax_frontmost_error": frontmostResult.rawValue,
+        "ax_frontmost_error": frontmostResult,
         "ax_focused_window_error": focusedWindowResult.rawValue,
         "is_active": application.isActive,
         "frontmost_pid": Int(NSWorkspace.shared.frontmostApplication?.processIdentifier ?? -1),
