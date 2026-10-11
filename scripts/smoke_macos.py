@@ -280,7 +280,8 @@ class MacSmoke:
         else:
             raise RuntimeError(f"unknown owned input type: {kind!r}")
         attempt = {"reason": reason, "kind": kind, "pid": owned["pid"],
-                   "window_id": owned["window_id"], "command": command[0]}
+                   "window_id": owned["window_id"], "command": command[0],
+                   "ownership_state": owned.get("state", "down_acknowledged")}
         try:
             result = helper_json(self.helper, *command, timeout=8)
             if result.get("posted_to_target_pid") is not True:
@@ -405,9 +406,14 @@ class MacSmoke:
         owned = self.owned_input
         if action == "down" and owned is None:
             pending = {"kind": "mouse", "pid": self.pid, "window_id": self.window_id,
-                       "x": x, "y": y}
+                       "x": x, "y": y, "state": "down_pending_ack"}
         else:
             pending = owned
+        if action == "down" and pending is not None:
+            # The helper posts the event before returning its JSON acknowledgement.
+            # Track ownership first so a timeout or output failure after the post
+            # still triggers a confined release attempt.
+            self.owned_input = pending
         try:
             helper_json(self.helper, "mouse-event", self.pid, self.window_id,
                         self.fixture.name, action, x, y)
@@ -417,6 +423,7 @@ class MacSmoke:
                 raise RuntimeError(f"{error}; targeted input release also failed: {cleanup_error}") from error
             raise
         if action == "down" and pending is not None:
+            pending["state"] = "down_acknowledged"
             self.owned_input = pending
         elif action == "up" and self.owned_input is not None and self.owned_input["kind"] == "mouse":
             self.owned_input = None
@@ -436,10 +443,14 @@ class MacSmoke:
         assert self.pid is not None and self.window_id is not None
         self.checked_window_identity()
         try:
+            # A failed subprocess response does not prove that the native helper
+            # failed before posting the down event.
+            self.owned_input = {"kind": "key", "pid": self.pid, "window_id": self.window_id,
+                                "key_code": key_code, "flags": flags,
+                                "state": "down_pending_ack"}
             helper_json(self.helper, "key-event", self.pid, self.window_id,
                         self.fixture.name, "down", key_code, flags)
-            self.owned_input = {"kind": "key", "pid": self.pid, "window_id": self.window_id,
-                                "key_code": key_code, "flags": flags}
+            self.owned_input["state"] = "down_acknowledged"
             self.checked_window_identity()
             helper_json(self.helper, "key-event", self.pid, self.window_id,
                         self.fixture.name, "up", key_code, flags)
@@ -458,10 +469,14 @@ class MacSmoke:
         for character in text:
             try:
                 self.checked_window_identity()
+                # The native helper may post the down and then fail while
+                # writing its acknowledgement; conservatively own it first.
+                self.owned_input = {"kind": "text", "pid": self.pid,
+                                    "window_id": self.window_id, "text": character,
+                                    "state": "down_pending_ack"}
                 helper_json(self.helper, "text-event", self.pid, self.window_id,
                             self.fixture.name, "down", character)
-                self.owned_input = {"kind": "text", "pid": self.pid,
-                                    "window_id": self.window_id, "text": character}
+                self.owned_input["state"] = "down_acknowledged"
                 self.checked_window_identity()
                 helper_json(self.helper, "text-event", self.pid, self.window_id,
                             self.fixture.name, "up", character)

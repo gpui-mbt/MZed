@@ -150,11 +150,12 @@ frontmost ownership before each capture or input. The native helper repeats the
 unlocked-console, Accessibility, live-PID, selected-window and frontmost checks
 immediately before each capture, mouse/key/text event and Accessibility window
 mutation. Paired key and pointer events are sent separately so a guard failure
-cannot emit the remaining global events. If a guard fails while the harness
-owns a synthetic key or button down, it records an attempt to release only that
-input directly to the original PID; cleanup is refused when the console is
-locked or unavailable, and failed cleanup fails the qualification. For the
-derived run, it also checks solid blue/pink pixels, 120×18 logical scene bounds
+cannot emit the remaining global events. On guard failure or uncertain helper
+acknowledgement while a synthetic key or button down is pending, it records an
+attempt to release only that input directly to the original PID; cleanup is
+refused when the console is locked or unavailable, and failed cleanup fails the
+qualification. For the derived run, it also checks solid blue/pink pixels,
+120×18 logical scene bounds
 scaled once, a held press across two repeated same-window resizes with unchanged
 dispatches, outside-release cancellation, and late bare releases after disable
 and after remount. It requires fresh remount state and native dispatch counters

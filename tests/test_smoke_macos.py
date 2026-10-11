@@ -204,6 +204,69 @@ def injected_native_helper(window, *, after_event=None):
 
 
 class MacInputGuardTests(unittest.TestCase):
+    def test_mouse_down_ack_failure_still_attempts_targeted_release(self):
+        capture, window, image = event_controller()
+
+        def lose_ack_after_down(_state, command, action, _payload):
+            if command == "mouse-event" and action == "down":
+                raise RuntimeError("helper acknowledgement was lost after mouse down")
+
+        _state, emitted, cleanup_attempts, injected = injected_native_helper(
+            window, after_event=lose_ack_after_down)
+        with patch.object(smoke, "helper_json", side_effect=injected):
+            with self.assertRaisesRegex(RuntimeError, "acknowledgement was lost"):
+                capture.mouse("down", image, (5.0, 6.0))
+
+        self.assertEqual([event[:2] for event in emitted], [("mouse-event", "down")])
+        self.assertEqual(cleanup_attempts[0][0], "cleanup-mouse")
+        self.assertEqual(capture.record["input_cleanup"][0]["outcome"],
+                         "release_posted_to_original_pid")
+        self.assertEqual(capture.record["input_cleanup"][0]["ownership_state"],
+                         "down_pending_ack")
+        self.assertIsNone(capture.owned_input)
+
+    def test_key_down_ack_failure_still_attempts_targeted_release(self):
+        capture, window, _ = event_controller()
+
+        def lose_ack_after_down(_state, command, action, _payload):
+            if command == "key-event" and action == "down":
+                raise RuntimeError("helper acknowledgement was lost after key down")
+
+        _state, emitted, cleanup_attempts, injected = injected_native_helper(
+            window, after_event=lose_ack_after_down)
+        with patch.object(smoke, "helper_json", side_effect=injected):
+            with self.assertRaisesRegex(RuntimeError, "acknowledgement was lost"):
+                capture.key(1, "command")
+
+        self.assertEqual([event[:2] for event in emitted], [("key-event", "down")])
+        self.assertEqual(cleanup_attempts, [("cleanup-key", 123, 1, "command")])
+        self.assertEqual(capture.record["input_cleanup"][0]["outcome"],
+                         "release_posted_to_original_pid")
+        self.assertEqual(capture.record["input_cleanup"][0]["ownership_state"],
+                         "down_pending_ack")
+        self.assertIsNone(capture.owned_input)
+
+    def test_text_down_ack_failure_still_attempts_targeted_release(self):
+        capture, window, _ = event_controller()
+
+        def lose_ack_after_down(_state, command, action, _payload):
+            if command == "text-event" and action == "down":
+                raise RuntimeError("helper acknowledgement was lost after text down")
+
+        _state, emitted, cleanup_attempts, injected = injected_native_helper(
+            window, after_event=lose_ack_after_down)
+        with patch.object(smoke, "helper_json", side_effect=injected):
+            with self.assertRaisesRegex(RuntimeError, "acknowledgement was lost"):
+                capture.type_text("a")
+
+        self.assertEqual(emitted, [("text-event", "down", "a")])
+        self.assertEqual(cleanup_attempts, [("cleanup-text", 123, "a")])
+        self.assertEqual(capture.record["input_cleanup"][0]["outcome"],
+                         "release_posted_to_original_pid")
+        self.assertEqual(capture.record["input_cleanup"][0]["ownership_state"],
+                         "down_pending_ack")
+        self.assertIsNone(capture.owned_input)
+
     def test_focus_loss_between_key_down_up_denies_global_up_and_targets_cleanup(self):
         capture, window, _ = event_controller()
 
@@ -241,6 +304,8 @@ class MacInputGuardTests(unittest.TestCase):
         self.assertEqual(len(cleanup_attempts), 1)
         self.assertEqual(cleanup_attempts[0][0:1], ("cleanup-mouse",))
         self.assertEqual(capture.record["input_cleanup"][0]["outcome"], "failed")
+        self.assertEqual(capture.record["input_cleanup"][0]["ownership_state"],
+                         "down_acknowledged")
         self.assertIn("locked/off-console", capture.record["input_cleanup"][0]["error"])
         self.assertIsNone(capture.owned_input)
 
@@ -259,7 +324,11 @@ class MacInputGuardTests(unittest.TestCase):
 
         self.assertEqual(emitted, [("text-event", "down", "a"),
                                    ("text-event", "up", "a")])
-        self.assertEqual(cleanup_attempts, [])
+        self.assertEqual(cleanup_attempts, [("cleanup-text", 123, "b")])
+        self.assertEqual(capture.record["input_cleanup"][0]["outcome"],
+                         "release_posted_to_original_pid")
+        self.assertEqual(capture.record["input_cleanup"][0]["ownership_state"],
+                         "down_pending_ack")
         self.assertIsNone(capture.owned_input)
 
 
