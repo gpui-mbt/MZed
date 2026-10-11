@@ -56,8 +56,8 @@ uses [`Ctrl+Shift+P` from the pinned Windows keymap](https://github.com/zed-indu
 to open the command palette, requires an app-side cancellation acknowledgment,
 returns to the editor without changing the foreground top-level window, then
 checks the trailing release against both captured pixels and native dispatch
-logs. The recorded hosted run below predates this added case; only an exact-head
-hosted artifact qualifies it. For minimize
+logs. The exact-source hosted run below includes this case; its bounded
+coverage and limits are recorded there. For minimize
 cancellation it waits for an app-side owned-press acknowledgment, then sends a
 bare center release after restore before any new down and polls both scene pixels
 and dispatch logs for stability. It then types
