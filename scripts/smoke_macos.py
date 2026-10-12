@@ -28,6 +28,7 @@ FAILURE_MARKERS = (
     "MZed island dispatch failed",
 )
 EDITOR_MINIMUM_SIZE = (700, 500)
+WINDOW_SIZE_TOLERANCE = 2
 
 
 def run(argv: list[str], *, timeout: float = 30, cwd: Path | None = None,
@@ -103,6 +104,21 @@ def _frame_values(frame: dict, label: str) -> tuple[float, float, float, float]:
     if not all(math.isfinite(value) for value in values) or values[2] <= 0 or values[3] <= 0:
         raise RuntimeError(f"{label} has invalid display geometry: {frame!r}")
     return values
+
+
+def resize_size_matches(actual: tuple[float, float], expected: tuple[float, float],
+                        *, tolerance: float = WINDOW_SIZE_TOLERANCE) -> bool:
+    return abs(actual[0] - expected[0]) <= tolerance and abs(actual[1] - expected[1]) <= tolerance
+
+
+def require_observed_resize(previous: dict, actual: dict, label: str) -> tuple[float, float]:
+    previous_size = (float(previous["width"]), float(previous["height"]))
+    actual_size = (float(actual["width"]), float(actual["height"]))
+    if resize_size_matches(actual_size, previous_size):
+        raise RuntimeError(
+            f"{label} did not change the observed window size beyond the "
+            f"{WINDOW_SIZE_TOLERANCE}-point tolerance: {previous_size!r} -> {actual_size!r}")
+    return actual_size
 
 
 def frame_fits_display(frame: dict, display: dict, *, tolerance: float = 1.0) -> bool:
@@ -185,9 +201,12 @@ def fit_resize_targets(window: dict, displays: list[dict], *,
             first = (first[0] - 1, first[1])
         elif first[1] > minimum_height:
             first = (first[0], first[1] - 1)
-    if first == second or first == current or second == current:
+    if (first == second or first == current or second == current
+            or resize_size_matches(first, current)
+            or resize_size_matches(second, first)):
         raise RuntimeError(
-            f"active display cannot provide two meaningful distinct resize sizes: "
+            f"active display cannot provide two observable distinct resize sizes outside the "
+            f"{WINDOW_SIZE_TOLERANCE}-point waiter tolerance: "
             f"current={current}, first={first}, second={second}, "
             f"minimum={(minimum_width, minimum_height)}")
 
@@ -915,7 +934,7 @@ class MacSmoke:
         last = None
         while time.monotonic() < deadline:
             last = self.checked_window_identity()
-            if abs(float(last["width"]) - expected[0]) <= 2 and abs(float(last["height"]) - expected[1]) <= 2:
+            if resize_size_matches((float(last["width"]), float(last["height"])), expected):
                 return last
             time.sleep(0.15)
         raise RuntimeError(f"Accessibility resize did not reach requested size {expected}: {last!r}")
@@ -1011,13 +1030,14 @@ class MacSmoke:
         pink_log = self.wait_for_counters([1])
         self.save_dispatch_log("first-click", pink_log)
         pink["log"] = pink_log
-        self.mouse("down", pink, center(self.find_scene(pink)))
-        before_resize_log = self.read_log()
         old_window = self.checked_window_identity()
         first_target, second_target, resize_display = fit_resize_targets(
             old_window, self.current_displays())
+        self.mouse("down", pink, center(self.find_scene(pink)))
+        before_resize_log = self.read_log()
         self.resize(*first_target)
         first_resized = self.wait_for_window_size(first_target)
+        first_size = require_observed_resize(old_window, first_resized, "first AX resize")
         first_display = self.checked_resize_display(first_resized, resize_display)
         first_held = self.snapshot("island-held-after-first-resize", expected="pink")
         first_scene_visible = require_scene_inside_display(
@@ -1028,6 +1048,7 @@ class MacSmoke:
 
         self.resize(*second_target)
         second_resized = self.wait_for_window_size(second_target)
+        second_size = require_observed_resize(first_resized, second_resized, "second AX resize")
         second_display = self.checked_resize_display(second_resized, resize_display)
         held = self.snapshot("island-held-after-second-resize", expected="pink")
         second_scene_visible = require_scene_inside_display(
@@ -1060,6 +1081,8 @@ class MacSmoke:
             "display_bounds": {key: resize_display[key] for key in ("display_id", "x", "y", "width", "height")},
             "target_first": list(first_target),
             "target_second": list(second_target),
+            "observed_first": list(first_size),
+            "observed_second": list(second_size),
             "scene_visible_after_first": first_scene_visible,
             "scene_visible_after_second": second_scene_visible,
             "dispatches_unchanged_across_both_resizes": True,

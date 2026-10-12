@@ -222,6 +222,8 @@ class MacDisplayFitTests(unittest.TestCase):
         self.assertEqual(first, (1540, 626))
         self.assertEqual(second, (1604, 666))
         self.assertNotEqual(first, second)
+        self.assertFalse(smoke.resize_size_matches((1536, 690), first))
+        self.assertFalse(smoke.resize_size_matches(first, second))
         for width, height in (first, second):
             self.assertTrue(smoke.frame_fits_display(
                 {**self.window, "width": width, "height": height}, display, tolerance=0))
@@ -295,6 +297,26 @@ class MacDisplayFitTests(unittest.TestCase):
                 "width": 770.0, "height": 540.0}
         with self.assertRaisesRegex(RuntimeError, "insufficient room"):
             smoke.fit_resize_targets({"x": 50.0, "y": 20.0, "width": 700.0, "height": 500.0}, [tiny])
+
+    def test_near_minimum_display_rejects_targets_inside_noop_tolerance(self):
+        window = {"x": 0.0, "y": 0.0, "width": 705.0, "height": 504.0}
+        display = {"display_id": 2, "x": 0.0, "y": 0.0,
+                   "width": 730.0, "height": 528.0}
+        # Both targets proposed by the former planner matched the unchanged
+        # frame under wait_for_window_size's ±2-point acceptance rule.
+        self.assertTrue(smoke.resize_size_matches((705, 504), (704, 504)))
+        self.assertTrue(smoke.resize_size_matches((705, 504), (706, 504)))
+        with self.assertRaisesRegex(RuntimeError, "two observable distinct resize sizes"):
+            smoke.fit_resize_targets(window, [display])
+
+    def test_waiter_noop_success_is_rejected_by_observed_resize_check(self):
+        current = {"x": 0.0, "y": 0.0, "width": 705.0, "height": 504.0}
+        capture_owner = object.__new__(smoke.MacSmoke)
+        with patch.object(capture_owner, "checked_window_identity", return_value=current):
+            observed = capture_owner.wait_for_window_size((706, 504), timeout=0.1)
+        self.assertIs(observed, current)
+        with self.assertRaisesRegex(RuntimeError, "did not change the observed window size"):
+            smoke.require_observed_resize(current, observed, "first AX resize")
 
 
 def event_controller():
