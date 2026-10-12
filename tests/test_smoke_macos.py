@@ -416,6 +416,7 @@ def injected_native_helper(window, *, after_event=None):
                         "point": {"x": point[0], "y": point[1]},
                         "current_window_frame": dict(frame),
                         "top_window": {"pid": pid, "window_id": window_id, "layer": 0},
+                        "ignored_system_cursor_windows": [],
                     },
                 }
             else:
@@ -706,6 +707,18 @@ class MacInputGuardTests(unittest.TestCase):
             lambda result: result["guard_evidence"]["top_window"].update(window_id=457),
             lambda result: result["guard_evidence"]["top_window"].update(layer=False),
             lambda result: result["guard_evidence"]["current_window_frame"].update(x=True),
+            lambda result: result["guard_evidence"].update(
+                ignored_system_cursor_windows={"pid": 31415}),
+            lambda result: result["guard_evidence"].update(
+                ignored_system_cursor_windows=[{
+                    "pid": 31415, "window_id": 7777, "layer": 2147483630,
+                    "verified_windowserver_owner": False,
+                }]),
+            lambda result: result["guard_evidence"].update(
+                ignored_system_cursor_windows=[{
+                    "pid": 31415, "window_id": 7777, "layer": 2147483630,
+                    "verified_windowserver_owner": True, "owner_name": "WindowServer",
+                }]),
         ):
             with self.subTest(edit=edit):
                 capture, window, _ = event_controller()
@@ -733,6 +746,33 @@ class MacInputGuardTests(unittest.TestCase):
                 ])
                 self.assertEqual(capture.record["input_cleanup"][0]["outcome"], "failed")
                 self.assertIsNone(capture.owned_input)
+
+    def test_guarded_mouse_cleanup_accepts_verified_cursor_audit_metadata(self):
+        capture, window, _ = event_controller()
+        _state, _emitted, cleanup_attempts, injected = injected_native_helper(window)
+        capture.owned_input = {"kind": "mouse", "pid": 123, "window_id": 456,
+                               "x": 50.0, "y": 60.0,
+                               "state": "down_pending_ack"}
+
+        def verified_cursor_ack(_binary, *arguments, **kwargs):
+            result = injected(_binary, *arguments, **kwargs)
+            if arguments[0] == "cleanup-mouse":
+                result["guard_evidence"]["ignored_system_cursor_windows"] = [{
+                    "pid": 31415,
+                    "window_id": 7777,
+                    "layer": 2147483630,
+                    "verified_windowserver_owner": True,
+                }]
+            return result
+
+        with patch.object(smoke, "helper_json", side_effect=verified_cursor_ack):
+            error = capture.release_owned_input("test verified cursor audit acknowledgement")
+
+        self.assertIsNone(error)
+        self.assertEqual(cleanup_attempts[0][0], "cleanup-mouse")
+        self.assertEqual(capture.record["input_cleanup"][0]["outcome"],
+                         "guarded_hid_release_enqueued")
+        self.assertIsNone(capture.owned_input)
 
     def test_guarded_mouse_release_fails_closed_on_live_focus_point_or_occlusion_loss(self):
         failures = (

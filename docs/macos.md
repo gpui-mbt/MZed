@@ -171,13 +171,18 @@ Mouse cleanup reuses the global HID event-tap route used by ordinary mouse
 events, but only after fresh checks confirm the original process is live and
 frontmost, the same unique visible fixture window is AX-focused, the saved
 screen point remains inside its current frame, and the top on-screen window at
-that point is the same process-owned fixture window. It never activates the app
-or falls back to another posting route when a guard fails. The helper reports
-that it enqueued a guarded HID release; that acknowledgement does not prove the
-editor handled it. Cleanup is refused when the console is locked or unavailable,
-and failed cleanup fails the qualification. The mouse release-fault qualifier
-checks the resulting scene pixels and dispatch count before any subsequent
-mouse input. For the derived run, it
+that point is the same process-owned fixture window after excluding only a
+window at the SDK's exact cursor-window level whose current owner PID resolves
+through `proc_pidpath` and canonical path resolution to the OS WindowServer
+executable. The helper records each excluded cursor window's PID, window ID,
+layer, and verified-owner flag in its guard evidence. Unknown or malformed
+records, failed owner/path verification, and every other overlay remain
+blocking. It never activates the app or falls back to another posting route
+when a guard fails. The helper reports that it enqueued a guarded HID release;
+that acknowledgement does not prove the editor handled it. Cleanup is refused
+when the console is locked or unavailable, and failed cleanup fails the
+qualification. The mouse release-fault qualifier checks the resulting scene
+pixels and dispatch count before any subsequent mouse input. For the derived run, it
 also checks solid blue/pink pixels,
 120×18 logical scene bounds
 scaled once, a held press across two repeated same-window resizes with unchanged

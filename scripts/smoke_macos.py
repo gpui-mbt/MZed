@@ -335,6 +335,21 @@ def require_guarded_mouse_cleanup_ack(result: dict, pid: int, window_id: int,
             or type(top_window.get("window_id")) is not int or top_window.get("window_id") != window_id
             or type(top_window.get("layer")) is not int or top_window.get("layer") != 0):
         raise RuntimeError(f"mouse cleanup point is not owned by the top selected fixture window: {top_window!r}")
+    ignored_cursor_windows = guard.get("ignored_system_cursor_windows")
+    if not isinstance(ignored_cursor_windows, list):
+        raise RuntimeError("mouse cleanup guard evidence lacks its ignored cursor-window audit list")
+    expected_cursor_fields = {
+        "pid", "window_id", "layer", "verified_windowserver_owner",
+    }
+    for ignored in ignored_cursor_windows:
+        if (not isinstance(ignored, dict)
+                or set(ignored) != expected_cursor_fields
+                or type(ignored.get("pid")) is not int or ignored["pid"] <= 0
+                or type(ignored.get("window_id")) is not int or ignored["window_id"] <= 0
+                or type(ignored.get("layer")) is not int
+                or ignored.get("verified_windowserver_owner") is not True):
+            raise RuntimeError(
+                f"mouse cleanup has malformed ignored system cursor-window audit data: {ignored!r}")
 
 
 def require_input_sender_settle(result: dict, action: str) -> None:
@@ -1295,7 +1310,7 @@ def main() -> int:
                 or records["guard_fixtures"].get("mouse_release_refusal_fixtures") != "passed"
                 or records["guard_fixtures"].get("mouse_release_refusal_fixture_count") != 18
                 or records["guard_fixtures"].get("top_window_selection_fixtures") != "passed"
-                or records["guard_fixtures"].get("top_window_selection_fixture_count") != 5
+                or records["guard_fixtures"].get("top_window_selection_fixture_count") != 11
                 or records["guard_fixtures"].get("input_sender_settle_fixtures") != "passed"):
             raise RuntimeError("macOS UI guard fixtures did not pass")
         require_input_sender_settle({

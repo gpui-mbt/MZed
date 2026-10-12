@@ -1,6 +1,7 @@
 import AppKit
 import ApplicationServices
 import CoreGraphics
+import Darwin
 import Foundation
 import ImageIO
 import Vision
@@ -308,7 +309,8 @@ func validateMouseReleaseRefusalFixtures() -> Int {
         sessionLocked: nil, onConsole: nil, targetProcessLive: true,
         frontmostPID: 123, focusedWindowID: 455, selectedWindowID: 456,
         fixtureMatches: true, point: point, currentWindowFrame: frame,
-        topWindow: nil, failedPredicates: ["session_unlocked", "on_console",
+        topWindow: nil, ignoredSystemCursorWindows: [],
+        failedPredicates: ["session_unlocked", "on_console",
                                           "focused_window_id_matches_expected"]
     )
     guard let data = try? JSONSerialization.data(withJSONObject: evidence,
@@ -321,11 +323,13 @@ func validateMouseReleaseRefusalFixtures() -> Int {
               "accessibility_trusted", "screen_capture_trusted", "session_locked",
               "on_console", "target_process_live", "frontmost_pid",
               "focused_window_id", "fixture_matches_selected_window", "point_global",
-              "current_window_frame", "top_window",
+              "current_window_frame", "top_window", "ignored_system_cursor_windows",
           ]),
           snapshot["session_locked"] is NSNull,
           snapshot["on_console"] is NSNull,
-          snapshot["top_window"] is NSNull else {
+          snapshot["top_window"] is NSNull,
+          let ignoredCursorWindows = snapshot["ignored_system_cursor_windows"] as? [[String: Any]],
+          ignoredCursorWindows.isEmpty else {
         fail("guarded mouse-release refusal evidence was not safe structured JSON")
     }
     return cases.count
@@ -335,6 +339,59 @@ struct WindowAtPoint {
     let pid: pid_t
     let windowID: Int
     let layer: Int
+}
+
+struct IgnoredSystemCursorWindow {
+    let pid: pid_t
+    let windowID: Int
+    let layer: Int
+
+    var jsonValue: [String: Any] {
+        ["pid": Int(pid), "window_id": windowID, "layer": layer,
+         "verified_windowserver_owner": true]
+    }
+}
+
+struct TopWindowSelection {
+    let window: WindowAtPoint?
+    let ignoredSystemCursorWindows: [IgnoredSystemCursorWindow]
+}
+
+let windowServerExecutablePath =
+    "/System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer"
+
+func canonicalFilesystemPath(_ path: String) -> String? {
+    var resolved = [CChar](repeating: 0, count: Int(MAXPATHLEN))
+    let result: UnsafeMutablePointer<CChar>? = path.withCString { rawPath in
+        resolved.withUnsafeMutableBufferPointer { buffer in
+            guard let baseAddress = buffer.baseAddress else { return nil }
+            return realpath(rawPath, baseAddress)
+        }
+    }
+    guard result != nil else { return nil }
+    return resolved.withUnsafeBufferPointer { buffer in
+        guard let baseAddress = buffer.baseAddress else { return nil }
+        return String(validatingUTF8: baseAddress)
+    }
+}
+
+func currentCanonicalExecutablePath(pid: pid_t) -> String? {
+    let capacity = 4 * Int(MAXPATHLEN)
+    var reportedPath = [CChar](repeating: 0, count: capacity)
+    let reportedLength = reportedPath.withUnsafeMutableBufferPointer { buffer -> Int32 in
+        guard let baseAddress = buffer.baseAddress else { return 0 }
+        return proc_pidpath(pid, baseAddress, UInt32(buffer.count))
+    }
+    guard reportedLength > 0, Int(reportedLength) < reportedPath.count,
+          let terminator = reportedPath.firstIndex(of: 0), terminator > 0,
+          terminator <= Int(reportedLength),
+          let path = reportedPath.withUnsafeBufferPointer({ buffer -> String? in
+              guard let baseAddress = buffer.baseAddress else { return nil }
+              return String(validatingUTF8: baseAddress)
+          }) else {
+        return nil
+    }
+    return canonicalFilesystemPath(path)
 }
 
 func finiteJSONNumber(_ value: Double) -> Any {
@@ -360,6 +417,7 @@ func mouseReleaseGuardRefusalEvidence(targetPID: pid_t, expectedWindowID: Int,
                                       fixtureMatches: Bool, point: CGPoint,
                                       currentWindowFrame: CGRect?,
                                       topWindow: WindowAtPoint?,
+                                      ignoredSystemCursorWindows: [IgnoredSystemCursorWindow],
                                       failedPredicates: [String]) -> [String: Any] {
     let topValue: Any
     if let topWindow {
@@ -384,6 +442,7 @@ func mouseReleaseGuardRefusalEvidence(targetPID: pid_t, expectedWindowID: Int,
                          "y": finiteJSONNumber(Double(point.y))],
         "current_window_frame": frameJSON(currentWindowFrame),
         "top_window": topValue,
+        "ignored_system_cursor_windows": ignoredSystemCursorWindows.map(\.jsonValue),
     ]
     return ["kind": "guarded_hid_mouse_up_refusal",
             "failed_predicates": failedPredicates,
@@ -403,16 +462,22 @@ func failMouseReleaseGuard(reason: String, evidence: [String: Any]) -> Never {
     }
 }
 
-func topWindowRecord(at point: CGPoint, in rawWindows: [[String: Any]]) -> WindowAtPoint? {
+func topWindowRecord(at point: CGPoint, in rawWindows: [[String: Any]],
+                     cursorWindowLevel: Int, trustedWindowServerPath: String?,
+                     executablePathForPID: (pid_t) -> String?) -> TopWindowSelection {
     // CGWindowListOption.optionOnScreenOnly returns windows front-to-back.
     // Treat an unparseable window at the point as unknown ownership and fail
-    // closed rather than skipping a possible occluder.
+    // closed rather than skipping a possible occluder. The only exception is a
+    // cursor-level record whose current PID resolves to the canonical OS
+    // WindowServer executable.
+    var ignoredSystemCursorWindows: [IgnoredSystemCursorWindow] = []
     for window in rawWindows {
         guard let rawBounds = window[kCGWindowBounds as String] as? [String: CGFloat],
               let x = rawBounds["X"], let y = rawBounds["Y"],
               let width = rawBounds["Width"], let height = rawBounds["Height"],
               width > 0, height > 0 else {
-            return nil
+            return TopWindowSelection(window: nil,
+                                      ignoredSystemCursorWindows: ignoredSystemCursorWindows)
         }
         let frame = CGRect(x: x, y: y, width: width, height: height)
         guard frame.contains(point) else { continue }
@@ -423,15 +488,30 @@ func topWindowRecord(at point: CGPoint, in rawWindows: [[String: Any]]) -> Windo
         guard let rawPID = (window[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value,
               let rawWindowID = (window[kCGWindowNumber as String] as? NSNumber)?.intValue,
               let layer = (window[kCGWindowLayer as String] as? NSNumber)?.intValue else {
-            return nil
+            return TopWindowSelection(window: nil,
+                                      ignoredSystemCursorWindows: ignoredSystemCursorWindows)
         }
-        return WindowAtPoint(pid: rawPID, windowID: rawWindowID, layer: layer)
+        if layer == cursorWindowLevel,
+           let trustedWindowServerPath,
+           executablePathForPID(rawPID) == trustedWindowServerPath {
+            ignoredSystemCursorWindows.append(IgnoredSystemCursorWindow(
+                pid: rawPID, windowID: rawWindowID, layer: layer))
+            continue
+        }
+        return TopWindowSelection(
+            window: WindowAtPoint(pid: rawPID, windowID: rawWindowID, layer: layer),
+            ignoredSystemCursorWindows: ignoredSystemCursorWindows)
     }
-    return nil
+    return TopWindowSelection(window: nil,
+                              ignoredSystemCursorWindows: ignoredSystemCursorWindows)
 }
 
 func validateTopWindowSelectionFixtures() -> Int {
     let point = CGPoint(x: 50, y: 60)
+    let cursorWindowLevel = Int(CGWindowLevelForKey(.cursorWindow))
+    guard let canonicalWindowServerPath = canonicalFilesystemPath(windowServerExecutablePath) else {
+        fail("the fixed WindowServer executable path did not resolve canonically")
+    }
     func window(pid: Int, id: Int, layer: Int, alpha: Double = 1.0) -> [String: Any] {
         [kCGWindowOwnerPID as String: NSNumber(value: pid),
          kCGWindowNumber as String: NSNumber(value: id),
@@ -443,25 +523,109 @@ func validateTopWindowSelectionFixtures() -> Int {
     let fixture = window(pid: 123, id: 456, layer: 0)
     let overlay = window(pid: 999, id: 900, layer: 3)
     let transparent = window(pid: 999, id: 901, layer: 3, alpha: 0)
-    guard let target = topWindowRecord(at: point, in: [fixture]),
-          target.pid == 123, target.windowID == 456, target.layer == 0,
-          let blocked = topWindowRecord(at: point, in: [overlay, fixture]),
-          blocked.pid == 999, blocked.windowID == 900, blocked.layer == 3,
-          !mouseReleaseOwnershipGuardAllows(
+    let cursor = window(pid: 31415, id: 7777, layer: cursorWindowLevel)
+    let verifiedPath: (pid_t) -> String? = { pid in
+        pid == 31415 ? canonicalWindowServerPath : "/Applications/foreign-process"
+    }
+    let direct = topWindowRecord(at: point, in: [fixture],
+                                 cursorWindowLevel: cursorWindowLevel,
+                                 trustedWindowServerPath: canonicalWindowServerPath,
+                                 executablePathForPID: verifiedPath)
+    let cursorThenFixture = topWindowRecord(at: point, in: [cursor, fixture],
+                                            cursorWindowLevel: cursorWindowLevel,
+                                            trustedWindowServerPath: canonicalWindowServerPath,
+                                            executablePathForPID: verifiedPath)
+    let foreignCursor = window(pid: 999, id: 902, layer: cursorWindowLevel)
+    let foreignCursorSelection = topWindowRecord(
+        at: point, in: [foreignCursor, fixture], cursorWindowLevel: cursorWindowLevel,
+        trustedWindowServerPath: canonicalWindowServerPath,
+        executablePathForPID: verifiedPath)
+    let wrongLayerWindowServer = window(pid: 31415, id: 903, layer: cursorWindowLevel - 1)
+    let wrongLayerSelection = topWindowRecord(
+        at: point, in: [wrongLayerWindowServer, fixture],
+        cursorWindowLevel: cursorWindowLevel,
+        trustedWindowServerPath: canonicalWindowServerPath,
+        executablePathForPID: verifiedPath)
+    let failedAttestation = topWindowRecord(
+        at: point, in: [cursor, fixture], cursorWindowLevel: cursorWindowLevel,
+        trustedWindowServerPath: canonicalWindowServerPath, executablePathForPID: { _ in nil })
+    let unknownTrustedPath = topWindowRecord(
+        at: point, in: [cursor, fixture], cursorWindowLevel: cursorWindowLevel,
+        trustedWindowServerPath: nil, executablePathForPID: verifiedPath)
+    let blocked = topWindowRecord(at: point, in: [overlay, fixture],
+                                  cursorWindowLevel: cursorWindowLevel,
+                                  trustedWindowServerPath: canonicalWindowServerPath,
+                                  executablePathForPID: verifiedPath)
+    let throughTransparent = topWindowRecord(at: point, in: [transparent, fixture],
+                                             cursorWindowLevel: cursorWindowLevel,
+                                             trustedWindowServerPath: canonicalWindowServerPath,
+                                             executablePathForPID: verifiedPath)
+    let outside = topWindowRecord(at: CGPoint(x: 900, y: 900), in: [fixture],
+                                  cursorWindowLevel: cursorWindowLevel,
+                                  trustedWindowServerPath: canonicalWindowServerPath,
+                                  executablePathForPID: verifiedPath)
+    let malformed = topWindowRecord(at: point, in: [["unexpected": true], fixture],
+                                    cursorWindowLevel: cursorWindowLevel,
+                                    trustedWindowServerPath: canonicalWindowServerPath,
+                                    executablePathForPID: verifiedPath)
+    var malformedOwner = window(pid: 31415, id: 904, layer: cursorWindowLevel)
+    malformedOwner[kCGWindowOwnerPID as String] = "31415"
+    let malformedOwnerSelection = topWindowRecord(
+        at: point, in: [malformedOwner, fixture], cursorWindowLevel: cursorWindowLevel,
+        trustedWindowServerPath: canonicalWindowServerPath,
+        executablePathForPID: verifiedPath)
+    func allowsOriginalFixture(_ selection: TopWindowSelection) -> Bool {
+        guard let top = selection.window else { return false }
+        return mouseReleaseOwnershipGuardAllows(
             targetPID: 123, expectedWindowID: 456,
             accessibilityTrusted: true, screenCaptureTrusted: true,
             sessionUnlocked: true, onConsole: true, targetProcessLive: true,
-            frontmostPID: 123,
-            focusedWindowID: 456, selectedWindowID: 456, fixtureMatches: true,
-            point: point, currentWindowFrame: CGRect(x: 10, y: 20, width: 800, height: 600),
-            topWindowPID: blocked.pid, topWindowID: blocked.windowID),
-          let throughTransparent = topWindowRecord(at: point, in: [transparent, fixture]),
-          throughTransparent.pid == 123, throughTransparent.windowID == 456,
-          topWindowRecord(at: CGPoint(x: 900, y: 900), in: [fixture]) == nil,
-          topWindowRecord(at: point, in: [["unexpected": true], fixture]) == nil else {
+            frontmostPID: 123, focusedWindowID: 456, selectedWindowID: 456,
+            fixtureMatches: true, point: point,
+            currentWindowFrame: CGRect(x: 10, y: 20, width: 800, height: 600),
+            topWindowPID: top.pid, topWindowID: top.windowID)
+    }
+    guard direct.window?.pid == 123, direct.window?.windowID == 456,
+          direct.window?.layer == 0, direct.ignoredSystemCursorWindows.isEmpty,
+          allowsOriginalFixture(direct),
+          cursorThenFixture.window?.pid == 123,
+          cursorThenFixture.window?.windowID == 456,
+          cursorThenFixture.ignoredSystemCursorWindows.count == 1,
+          cursorThenFixture.ignoredSystemCursorWindows[0].pid == 31415,
+          cursorThenFixture.ignoredSystemCursorWindows[0].windowID == 7777,
+          cursorThenFixture.ignoredSystemCursorWindows[0].layer == cursorWindowLevel,
+          cursorThenFixture.ignoredSystemCursorWindows[0].jsonValue[
+              "verified_windowserver_owner"] as? Bool == true,
+          allowsOriginalFixture(cursorThenFixture),
+          foreignCursorSelection.window?.pid == 999,
+          foreignCursorSelection.window?.windowID == 902,
+          foreignCursorSelection.ignoredSystemCursorWindows.isEmpty,
+          !allowsOriginalFixture(foreignCursorSelection),
+          wrongLayerSelection.window?.pid == 31415,
+          wrongLayerSelection.window?.windowID == 903,
+          wrongLayerSelection.ignoredSystemCursorWindows.isEmpty,
+          !allowsOriginalFixture(wrongLayerSelection),
+          failedAttestation.window?.pid == 31415,
+          failedAttestation.ignoredSystemCursorWindows.isEmpty,
+          !allowsOriginalFixture(failedAttestation),
+          unknownTrustedPath.window?.pid == 31415,
+          unknownTrustedPath.ignoredSystemCursorWindows.isEmpty,
+          !allowsOriginalFixture(unknownTrustedPath),
+          blocked.window?.pid == 999, blocked.window?.windowID == 900,
+          blocked.window?.layer == 3,
+          !allowsOriginalFixture(blocked),
+          throughTransparent.window?.pid == 123,
+          throughTransparent.window?.windowID == 456,
+          allowsOriginalFixture(throughTransparent),
+          throughTransparent.ignoredSystemCursorWindows.isEmpty,
+          outside.window == nil,
+          malformed.window == nil,
+          malformedOwnerSelection.window == nil,
+          !allowsOriginalFixture(malformed),
+          !allowsOriginalFixture(malformedOwnerSelection) else {
         fail("top-window-at-point fixtures did not preserve front-to-back ownership or fail closed")
     }
-    return 5
+    return 11
 }
 
 func eventGuardError(pid: pid_t, windowID: CGWindowID, fixtureName: String,
@@ -669,13 +833,18 @@ func cleanupGuardError(pid: pid_t) -> String? {
     return nil
 }
 
-func topVisibleWindow(at point: CGPoint) -> WindowAtPoint? {
+func topVisibleWindow(at point: CGPoint) -> TopWindowSelection {
     guard let rawWindows = CGWindowListCopyWindowInfo(
         [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
     ) as? [[String: Any]] else {
-        return nil
+        return TopWindowSelection(window: nil, ignoredSystemCursorWindows: [])
     }
-    return topWindowRecord(at: point, in: rawWindows)
+    let trustedWindowServerPath = canonicalFilesystemPath(windowServerExecutablePath)
+    let cursorWindowLevel = Int(CGWindowLevelForKey(.cursorWindow))
+    return topWindowRecord(
+        at: point, in: rawWindows, cursorWindowLevel: cursorWindowLevel,
+        trustedWindowServerPath: trustedWindowServerPath,
+        executablePathForPID: currentCanonicalExecutablePath)
 }
 
 func guardedMouseReleaseTarget(pid: pid_t, windowID: CGWindowID, fixtureName: String,
@@ -692,7 +861,8 @@ func guardedMouseReleaseTarget(pid: pid_t, windowID: CGWindowID, fixtureName: St
     )
     let point = CGPoint(x: x, y: y)
     let focusedID = focusedAXWindowID(pid: pid)
-    let top = topVisibleWindow(at: point)
+    let topSelection = topVisibleWindow(at: point)
+    let top = topSelection.window
     let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
     let session = consoleSessionFlags()
     let accessibilityTrusted = AXIsProcessTrusted()
@@ -732,7 +902,9 @@ func guardedMouseReleaseTarget(pid: pid_t, windowID: CGWindowID, fixtureName: St
             targetProcessLive: targetProcessLive, frontmostPID: frontmostPID,
             focusedWindowID: focusedID, selectedWindowID: selected["window_id"] as? Int,
             fixtureMatches: fixtureMatches, point: point, currentWindowFrame: frame,
-            topWindow: top, failedPredicates: failedPredicates
+            topWindow: top,
+            ignoredSystemCursorWindows: topSelection.ignoredSystemCursorWindows,
+            failedPredicates: failedPredicates
         )
         let reason = top == nil
             ? "top window at the owned pointer is unavailable"
@@ -750,7 +922,9 @@ func guardedMouseReleaseTarget(pid: pid_t, windowID: CGWindowID, fixtureName: St
             targetProcessLive: targetProcessLive, frontmostPID: frontmostPID,
             focusedWindowID: focusedID, selectedWindowID: selected["window_id"] as? Int,
             fixtureMatches: fixtureMatches, point: point, currentWindowFrame: frame,
-            topWindow: nil, failedPredicates: failedPredicates
+            topWindow: nil,
+            ignoredSystemCursorWindows: topSelection.ignoredSystemCursorWindows,
+            failedPredicates: failedPredicates
         )
         failMouseReleaseGuard(reason: "top window at the owned pointer is unavailable",
                               evidence: evidence)
@@ -769,6 +943,7 @@ func guardedMouseReleaseTarget(pid: pid_t, windowID: CGWindowID, fixtureName: St
             "width": Double(frame.width), "height": Double(frame.height),
         ],
         "top_window": ["pid": Int(top.pid), "window_id": top.windowID, "layer": top.layer],
+        "ignored_system_cursor_windows": topSelection.ignoredSystemCursorWindows.map(\.jsonValue),
     ]
 }
 
