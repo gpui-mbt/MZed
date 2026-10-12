@@ -1,4 +1,5 @@
 import importlib.util
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -430,6 +431,39 @@ def injected_native_helper(window, *, after_event=None):
 
 
 class MacInputGuardTests(unittest.TestCase):
+    def test_guarded_mouse_refusal_evidence_is_preserved_without_acknowledgement(self):
+        capture, _window, _image = event_controller()
+        capture.owned_input = {"kind": "mouse", "pid": 123, "window_id": 456,
+                               "x": 50.0, "y": 60.0,
+                               "state": "down_pending_ack"}
+        evidence = {
+            "kind": "guarded_hid_mouse_up_refusal",
+            "failed_predicates": ["top_window_pid_matches_target"],
+            "guard_snapshot": {
+                "target_pid": 123,
+                "expected_window_id": 456,
+                "selected_window_id": 456,
+                "point_global": {"x": 50.0, "y": 60.0},
+                "current_window_frame": {"x": 10.0, "y": 20.0,
+                                          "width": 800.0, "height": 600.0},
+                "top_window": {"pid": 999, "window_id": 900, "layer": 3},
+            },
+        }
+        diagnostic = (
+            "macOS UI helper: guarded HID mouse-up refused: original fixture focus, "
+            "current-frame point, or top-window ownership changed; refusal_evidence="
+            + json.dumps(evidence, sort_keys=True)
+        )
+        with patch.object(smoke, "helper_json", side_effect=RuntimeError(diagnostic)) as helper:
+            error = capture.release_owned_input("guarded release refusal fixture")
+
+        self.assertEqual(helper.call_count, 1)
+        self.assertIn("refusal_evidence=", error)
+        self.assertEqual(json.loads(error.split("refusal_evidence=", 1)[1]), evidence)
+        self.assertEqual(capture.record["input_cleanup"][0]["outcome"], "failed")
+        self.assertEqual(capture.record["input_cleanup"][0]["error"], diagnostic)
+        self.assertIsNone(capture.owned_input)
+
     def test_input_sender_settle_requires_measured_minimum(self):
         smoke.require_input_sender_settle({
             "sender_runloop_settle_requested_ms": 100,

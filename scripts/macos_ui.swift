@@ -145,6 +145,43 @@ func mouseReleaseOwnershipGuardAllows(targetPID: pid_t, expectedWindowID: Int,
         && topWindowID == expectedWindowID
 }
 
+func mouseReleaseOwnershipGuardFailureNames(targetPID: pid_t, expectedWindowID: Int,
+                                            accessibilityTrusted: Bool,
+                                            screenCaptureTrusted: Bool,
+                                            sessionUnlocked: Bool, onConsole: Bool,
+                                            targetProcessLive: Bool, frontmostPID: pid_t?,
+                                            focusedWindowID: Int?, selectedWindowID: Int?,
+                                            fixtureMatches: Bool, point: CGPoint,
+                                            currentWindowFrame: CGRect?,
+                                            topWindowPID: pid_t?, topWindowID: Int?) -> [String] {
+    var failures: [String] = []
+    if !accessibilityTrusted { failures.append("accessibility_trusted") }
+    if !screenCaptureTrusted { failures.append("screen_capture_trusted") }
+    if !sessionUnlocked { failures.append("session_unlocked") }
+    if !onConsole { failures.append("on_console") }
+    if !targetProcessLive { failures.append("target_process_live") }
+    if frontmostPID != targetPID { failures.append("frontmost_pid_matches_target") }
+    if focusedWindowID != expectedWindowID {
+        failures.append("focused_window_id_matches_expected")
+    }
+    if selectedWindowID != expectedWindowID {
+        failures.append("selected_window_id_matches_expected")
+    }
+    if !fixtureMatches { failures.append("fixture_name_matches_selected_window") }
+    if currentWindowFrame == nil { failures.append("current_window_frame_available") }
+    if currentWindowFrame?.contains(point) != true {
+        failures.append("point_inside_current_window_frame")
+    }
+    if topWindowPID == nil || topWindowID == nil {
+        failures.append("top_window_available")
+    }
+    if topWindowPID != targetPID { failures.append("top_window_pid_matches_target") }
+    if topWindowID != expectedWindowID {
+        failures.append("top_window_id_matches_expected")
+    }
+    return failures
+}
+
 func validateMouseReleaseOwnershipGuardFixtures() -> Int {
     let frame = CGRect(x: 10, y: 20, width: 800, height: 600)
     let point = CGPoint(x: 50, y: 60)
@@ -190,10 +227,180 @@ func validateMouseReleaseOwnershipGuardFixtures() -> Int {
     return 18
 }
 
+func validateMouseReleaseRefusalFixtures() -> Int {
+    let frame = CGRect(x: 10, y: 20, width: 800, height: 600)
+    let point = CGPoint(x: 50, y: 60)
+    func failed(accessibilityTrusted: Bool = true, screenCaptureTrusted: Bool = true,
+                sessionUnlocked: Bool = true, onConsole: Bool = true,
+                targetProcessLive: Bool = true,
+                frontmostPID: pid_t? = 123, focusedWindowID: Int? = 456,
+                selectedWindowID: Int? = 456, fixtureMatches: Bool = true,
+                point: CGPoint = point, currentWindowFrame: CGRect? = frame,
+                topWindowPID: pid_t? = 123, topWindowID: Int? = 456) -> [String] {
+        mouseReleaseOwnershipGuardFailureNames(
+            targetPID: 123, expectedWindowID: 456,
+            accessibilityTrusted: accessibilityTrusted,
+            screenCaptureTrusted: screenCaptureTrusted,
+            sessionUnlocked: sessionUnlocked, onConsole: onConsole,
+            targetProcessLive: targetProcessLive, frontmostPID: frontmostPID,
+            focusedWindowID: focusedWindowID, selectedWindowID: selectedWindowID,
+            fixtureMatches: fixtureMatches, point: point,
+            currentWindowFrame: currentWindowFrame,
+            topWindowPID: topWindowPID, topWindowID: topWindowID
+        )
+    }
+    func allows(accessibilityTrusted: Bool = true, screenCaptureTrusted: Bool = true,
+                sessionUnlocked: Bool = true, onConsole: Bool = true,
+                targetProcessLive: Bool = true,
+                frontmostPID: pid_t? = 123, focusedWindowID: Int? = 456,
+                selectedWindowID: Int? = 456, fixtureMatches: Bool = true,
+                point: CGPoint = point, currentWindowFrame: CGRect? = frame,
+                topWindowPID: pid_t? = 123, topWindowID: Int? = 456) -> Bool {
+        mouseReleaseOwnershipGuardAllows(
+            targetPID: 123, expectedWindowID: 456,
+            accessibilityTrusted: accessibilityTrusted,
+            screenCaptureTrusted: screenCaptureTrusted,
+            sessionUnlocked: sessionUnlocked, onConsole: onConsole,
+            targetProcessLive: targetProcessLive, frontmostPID: frontmostPID,
+            focusedWindowID: focusedWindowID, selectedWindowID: selectedWindowID,
+            fixtureMatches: fixtureMatches, point: point,
+            currentWindowFrame: currentWindowFrame,
+            topWindowPID: topWindowPID, topWindowID: topWindowID
+        )
+    }
+
+    let cases: [(String, [String], Bool)] = [
+        ("accessibility_trusted", failed(accessibilityTrusted: false), allows(accessibilityTrusted: false)),
+        ("screen_capture_trusted", failed(screenCaptureTrusted: false), allows(screenCaptureTrusted: false)),
+        ("session_unlocked", failed(sessionUnlocked: false), allows(sessionUnlocked: false)),
+        ("on_console", failed(onConsole: false), allows(onConsole: false)),
+        ("target_process_live", failed(targetProcessLive: false), allows(targetProcessLive: false)),
+        ("frontmost_pid_matches_target", failed(frontmostPID: 999), allows(frontmostPID: 999)),
+        ("frontmost_pid_matches_target", failed(frontmostPID: nil), allows(frontmostPID: nil)),
+        ("focused_window_id_matches_expected", failed(focusedWindowID: 455), allows(focusedWindowID: 455)),
+        ("focused_window_id_matches_expected", failed(focusedWindowID: nil), allows(focusedWindowID: nil)),
+        ("selected_window_id_matches_expected", failed(selectedWindowID: 455), allows(selectedWindowID: 455)),
+        ("selected_window_id_matches_expected", failed(selectedWindowID: nil), allows(selectedWindowID: nil)),
+        ("fixture_name_matches_selected_window", failed(fixtureMatches: false), allows(fixtureMatches: false)),
+        ("current_window_frame_available", failed(currentWindowFrame: nil), allows(currentWindowFrame: nil)),
+        ("point_inside_current_window_frame",
+         failed(point: CGPoint(x: 900, y: 60)), allows(point: CGPoint(x: 900, y: 60))),
+        ("point_inside_current_window_frame",
+         failed(currentWindowFrame: CGRect(x: 100, y: 100, width: 800, height: 600)),
+         allows(currentWindowFrame: CGRect(x: 100, y: 100, width: 800, height: 600))),
+        ("top_window_pid_matches_target", failed(topWindowPID: 999), allows(topWindowPID: 999)),
+        ("top_window_id_matches_expected", failed(topWindowID: 457), allows(topWindowID: 457)),
+        ("top_window_available", failed(topWindowPID: nil, topWindowID: nil),
+         allows(topWindowPID: nil, topWindowID: nil)),
+    ]
+    guard allows() else {
+        fail("guarded mouse-release refusal fixtures rejected the valid snapshot")
+    }
+    for (expected, failures, allowed) in cases {
+        guard failures.contains(expected), !failures.isEmpty, !allowed else {
+            fail("guarded mouse-release refusal name did not match rejected predicate \(expected)")
+        }
+    }
+
+    let evidence = mouseReleaseGuardRefusalEvidence(
+        targetPID: 123, expectedWindowID: 456,
+        accessibilityTrusted: true, screenCaptureTrusted: true,
+        sessionLocked: nil, onConsole: nil, targetProcessLive: true,
+        frontmostPID: 123, focusedWindowID: 455, selectedWindowID: 456,
+        fixtureMatches: true, point: point, currentWindowFrame: frame,
+        topWindow: nil, failedPredicates: ["session_unlocked", "on_console",
+                                          "focused_window_id_matches_expected"]
+    )
+    guard let data = try? JSONSerialization.data(withJSONObject: evidence,
+                                                 options: [.sortedKeys, .fragmentsAllowed]),
+          let decoded = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          decoded["kind"] as? String == "guarded_hid_mouse_up_refusal",
+          let snapshot = decoded["guard_snapshot"] as? [String: Any],
+          Set(snapshot.keys) == Set([
+              "target_pid", "expected_window_id", "selected_window_id",
+              "accessibility_trusted", "screen_capture_trusted", "session_locked",
+              "on_console", "target_process_live", "frontmost_pid",
+              "focused_window_id", "fixture_matches_selected_window", "point_global",
+              "current_window_frame", "top_window",
+          ]),
+          snapshot["session_locked"] is NSNull,
+          snapshot["on_console"] is NSNull,
+          snapshot["top_window"] is NSNull else {
+        fail("guarded mouse-release refusal evidence was not safe structured JSON")
+    }
+    return cases.count
+}
+
 struct WindowAtPoint {
     let pid: pid_t
     let windowID: Int
     let layer: Int
+}
+
+func finiteJSONNumber(_ value: Double) -> Any {
+    value.isFinite ? value : NSNull()
+}
+
+func frameJSON(_ frame: CGRect?) -> Any {
+    guard let frame else { return NSNull() }
+    return [
+        "x": finiteJSONNumber(Double(frame.origin.x)),
+        "y": finiteJSONNumber(Double(frame.origin.y)),
+        "width": finiteJSONNumber(Double(frame.width)),
+        "height": finiteJSONNumber(Double(frame.height)),
+    ] as [String: Any]
+}
+
+func mouseReleaseGuardRefusalEvidence(targetPID: pid_t, expectedWindowID: Int,
+                                      accessibilityTrusted: Bool,
+                                      screenCaptureTrusted: Bool,
+                                      sessionLocked: Bool?, onConsole: Bool?,
+                                      targetProcessLive: Bool, frontmostPID: pid_t?,
+                                      focusedWindowID: Int?, selectedWindowID: Int?,
+                                      fixtureMatches: Bool, point: CGPoint,
+                                      currentWindowFrame: CGRect?,
+                                      topWindow: WindowAtPoint?,
+                                      failedPredicates: [String]) -> [String: Any] {
+    let topValue: Any
+    if let topWindow {
+        topValue = ["pid": Int(topWindow.pid), "window_id": topWindow.windowID,
+                    "layer": topWindow.layer] as [String: Any]
+    } else {
+        topValue = NSNull()
+    }
+    let snapshot: [String: Any] = [
+        "target_pid": Int(targetPID),
+        "expected_window_id": expectedWindowID,
+        "selected_window_id": selectedWindowID.map { $0 as Any } ?? NSNull(),
+        "accessibility_trusted": accessibilityTrusted,
+        "screen_capture_trusted": screenCaptureTrusted,
+        "session_locked": sessionLocked.map { $0 as Any } ?? NSNull(),
+        "on_console": onConsole.map { $0 as Any } ?? NSNull(),
+        "target_process_live": targetProcessLive,
+        "frontmost_pid": frontmostPID.map { Int($0) as Any } ?? NSNull(),
+        "focused_window_id": focusedWindowID.map { $0 as Any } ?? NSNull(),
+        "fixture_matches_selected_window": fixtureMatches,
+        "point_global": ["x": finiteJSONNumber(Double(point.x)),
+                         "y": finiteJSONNumber(Double(point.y))],
+        "current_window_frame": frameJSON(currentWindowFrame),
+        "top_window": topValue,
+    ]
+    return ["kind": "guarded_hid_mouse_up_refusal",
+            "failed_predicates": failedPredicates,
+            "guard_snapshot": snapshot]
+}
+
+func failMouseReleaseGuard(reason: String, evidence: [String: Any]) -> Never {
+    do {
+        let data = try JSONSerialization.data(withJSONObject: evidence,
+                                              options: [.sortedKeys, .fragmentsAllowed])
+        let encodedEvidence = String(decoding: data, as: UTF8.self)
+        fputs("macOS UI helper: guarded HID mouse-up refused: \(reason); refusal_evidence=\(encodedEvidence)\n",
+              stderr)
+        exit(2)
+    } catch {
+        fail("guarded HID mouse-up refused: \(reason); refusal evidence could not be encoded")
+    }
 }
 
 func topWindowRecord(at point: CGPoint, in rawWindows: [[String: Any]]) -> WindowAtPoint? {
@@ -485,15 +692,15 @@ func guardedMouseReleaseTarget(pid: pid_t, windowID: CGWindowID, fixtureName: St
     )
     let point = CGPoint(x: x, y: y)
     let focusedID = focusedAXWindowID(pid: pid)
-    guard let top = topVisibleWindow(at: point) else {
-        fail("guarded HID mouse-up refused: top window at the owned pointer is unavailable")
-    }
+    let top = topVisibleWindow(at: point)
     let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
     let session = consoleSessionFlags()
     let accessibilityTrusted = AXIsProcessTrusted()
     let screenCaptureTrusted = CGPreflightScreenCaptureAccess()
-    let sessionUnlocked = session["session_locked"] as? Bool == false
-    let onConsole = session["on_console"] as? Bool == true
+    let sessionLocked = session["session_locked"] as? Bool
+    let onConsoleObserved = session["on_console"] as? Bool
+    let sessionUnlocked = sessionLocked == false
+    let onConsole = onConsoleObserved == true
     let targetProcessLive = NSRunningApplication(processIdentifier: pid) != nil
     let fixtureMatches = (selected["title"] as? String ?? "")
         .localizedCaseInsensitiveContains(fixtureName)
@@ -505,9 +712,48 @@ func guardedMouseReleaseTarget(pid: pid_t, windowID: CGWindowID, fixtureName: St
         targetProcessLive: targetProcessLive, frontmostPID: frontmostPID,
         focusedWindowID: focusedID, selectedWindowID: selected["window_id"] as? Int,
         fixtureMatches: fixtureMatches, point: point, currentWindowFrame: frame,
-        topWindowPID: top.pid, topWindowID: top.windowID
+        topWindowPID: top?.pid, topWindowID: top?.windowID
     ) else {
-        fail("guarded HID mouse-up refused: original fixture focus, current-frame point, or top-window ownership changed")
+        let failedPredicates = mouseReleaseOwnershipGuardFailureNames(
+            targetPID: pid, expectedWindowID: Int(windowID),
+            accessibilityTrusted: accessibilityTrusted,
+            screenCaptureTrusted: screenCaptureTrusted,
+            sessionUnlocked: sessionUnlocked, onConsole: onConsole,
+            targetProcessLive: targetProcessLive, frontmostPID: frontmostPID,
+            focusedWindowID: focusedID, selectedWindowID: selected["window_id"] as? Int,
+            fixtureMatches: fixtureMatches, point: point, currentWindowFrame: frame,
+            topWindowPID: top?.pid, topWindowID: top?.windowID
+        )
+        let evidence = mouseReleaseGuardRefusalEvidence(
+            targetPID: pid, expectedWindowID: Int(windowID),
+            accessibilityTrusted: accessibilityTrusted,
+            screenCaptureTrusted: screenCaptureTrusted,
+            sessionLocked: sessionLocked, onConsole: onConsoleObserved,
+            targetProcessLive: targetProcessLive, frontmostPID: frontmostPID,
+            focusedWindowID: focusedID, selectedWindowID: selected["window_id"] as? Int,
+            fixtureMatches: fixtureMatches, point: point, currentWindowFrame: frame,
+            topWindow: top, failedPredicates: failedPredicates
+        )
+        let reason = top == nil
+            ? "top window at the owned pointer is unavailable"
+            : "original fixture focus, current-frame point, or top-window ownership changed"
+        failMouseReleaseGuard(reason: reason, evidence: evidence)
+    }
+    guard let top else {
+        let failedPredicates = ["top_window_available", "top_window_pid_matches_target",
+                                "top_window_id_matches_expected"]
+        let evidence = mouseReleaseGuardRefusalEvidence(
+            targetPID: pid, expectedWindowID: Int(windowID),
+            accessibilityTrusted: accessibilityTrusted,
+            screenCaptureTrusted: screenCaptureTrusted,
+            sessionLocked: sessionLocked, onConsole: onConsoleObserved,
+            targetProcessLive: targetProcessLive, frontmostPID: frontmostPID,
+            focusedWindowID: focusedID, selectedWindowID: selected["window_id"] as? Int,
+            fixtureMatches: fixtureMatches, point: point, currentWindowFrame: frame,
+            topWindow: nil, failedPredicates: failedPredicates
+        )
+        failMouseReleaseGuard(reason: "top window at the owned pointer is unavailable",
+                              evidence: evidence)
     }
     return [
         "pid": Int(pid), "window_id": Int(windowID), "fixture": fixtureName,
@@ -1376,6 +1622,7 @@ case "guard-fixtures":
     validateAXButtonTraversalFixtures()
     validatePlainInputFlagFixtures()
     let mouseReleaseOwnershipFixtures = validateMouseReleaseOwnershipGuardFixtures()
+    let mouseReleaseRefusalFixtures = validateMouseReleaseRefusalFixtures()
     let topWindowSelectionFixtures = validateTopWindowSelectionFixtures()
     let inputSenderSettle = validateInputSenderSettleFixture()
     emit(["session_fixtures": "passed", "frontmost_guard_fixtures": "passed",
@@ -1383,6 +1630,8 @@ case "guard-fixtures":
           "ax_traversal_fixtures": "passed", "plain_input_flags_fixtures": "passed",
           "mouse_release_ownership_fixtures": "passed",
           "mouse_release_ownership_fixture_count": mouseReleaseOwnershipFixtures,
+          "mouse_release_refusal_fixtures": "passed",
+          "mouse_release_refusal_fixture_count": mouseReleaseRefusalFixtures,
           "top_window_selection_fixtures": "passed",
           "top_window_selection_fixture_count": topWindowSelectionFixtures,
           "input_sender_settle_fixtures": "passed",

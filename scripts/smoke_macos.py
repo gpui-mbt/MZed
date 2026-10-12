@@ -1292,6 +1292,8 @@ def main() -> int:
                 or records["guard_fixtures"].get("plain_input_flags_fixtures") != "passed"
                 or records["guard_fixtures"].get("mouse_release_ownership_fixtures") != "passed"
                 or records["guard_fixtures"].get("mouse_release_ownership_fixture_count") != 18
+                or records["guard_fixtures"].get("mouse_release_refusal_fixtures") != "passed"
+                or records["guard_fixtures"].get("mouse_release_refusal_fixture_count") != 18
                 or records["guard_fixtures"].get("top_window_selection_fixtures") != "passed"
                 or records["guard_fixtures"].get("top_window_selection_fixture_count") != 5
                 or records["guard_fixtures"].get("input_sender_settle_fixtures") != "passed"):
