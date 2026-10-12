@@ -341,9 +341,20 @@ def injected_native_helper(window, *, after_event=None):
     state = {"frontmost_pid": 123, "window_id": 456, "fixture_visible": True,
              "session_locked": False, "on_console": True, "accessibility": True,
              "screen_recording": True,
-             "focused_window_id": 456, "top_window_pid": 123, "top_window_id": 456,
+             "focused_window_id": 456,
              "current_window_frame": {"x": 10.0, "y": 20.0,
                                       "width": 800.0, "height": 600.0},
+             "point_owner": {
+                 "method": "accessibility_point_hit", "hit_pid": 123,
+                 "hit_role": "AXWindow", "resolution_origin": "hit_is_window",
+                 "parent_depth": 0, "parent_resolution_complete": True,
+                 "candidate_pid": 123, "candidate_window_id": 456,
+                 "candidate_role": "AXWindow",
+                 "candidate_geometry": {"x": 10.0, "y": 20.0,
+                                        "width": 800.0, "height": 600.0},
+                 "matching_window_ids": [456],
+                 "global_point": None,
+             },
              "cleanup_enqueued": False}
     emitted = []
     cleanup_attempts = []
@@ -381,16 +392,22 @@ def injected_native_helper(window, *, after_event=None):
                 fixture = arguments[3]
                 point = (float(arguments[4]), float(arguments[5]))
                 frame = state["current_window_frame"]
+                point_owner = dict(state["point_owner"])
+                if point_owner.get("global_point") is None:
+                    point_owner["global_point"] = {"x": point[0], "y": point[1]}
                 if (state["frontmost_pid"] != pid
                         or state["window_id"] != window_id
                         or not state["fixture_visible"]
                         or state["focused_window_id"] != window_id
-                        or state["top_window_pid"] != pid
-                        or state["top_window_id"] != window_id
-                        or not smoke.point_inside_frame(point, frame, tolerance=0)):
+                        or not smoke.point_inside_frame(point, frame, tolerance=0)
+                        or point_owner.get("hit_pid") != pid
+                        or point_owner.get("candidate_pid") != pid
+                        or point_owner.get("candidate_window_id") != window_id
+                        or point_owner.get("matching_window_ids") != [window_id]
+                        or point_owner.get("global_point") != {"x": point[0], "y": point[1]}):
                     raise RuntimeError(
                         "injected guarded HID cleanup refused lost focus, current-frame point, "
-                        "or top-window ownership")
+                        "or AX point-owner mapping")
                 state["cleanup_enqueued"] = True
                 result = {
                     "pid": pid,
@@ -413,10 +430,13 @@ def injected_native_helper(window, *, after_event=None):
                         "target_process_live": True,
                         "frontmost_pid": pid,
                         "focused_window_id": window_id,
+                        "selected_window_id": window_id,
                         "point": {"x": point[0], "y": point[1]},
                         "current_window_frame": dict(frame),
-                        "top_window": {"pid": pid, "window_id": window_id, "layer": 0},
-                        "ignored_system_cursor_windows": [],
+                        "point_owner": dict(point_owner),
+                        "point_owner_refusal": None,
+                        "focused_window_refusal": None,
+                        "cleanup_ax_budget_available": True,
                     },
                 }
             else:
@@ -439,7 +459,7 @@ class MacInputGuardTests(unittest.TestCase):
                                "state": "down_pending_ack"}
         evidence = {
             "kind": "guarded_hid_mouse_up_refusal",
-            "failed_predicates": ["top_window_pid_matches_target"],
+            "failed_predicates": ["ax_point_owner_matches_original_window"],
             "guard_snapshot": {
                 "target_pid": 123,
                 "expected_window_id": 456,
@@ -447,12 +467,16 @@ class MacInputGuardTests(unittest.TestCase):
                 "point_global": {"x": 50.0, "y": 60.0},
                 "current_window_frame": {"x": 10.0, "y": 20.0,
                                           "width": 800.0, "height": 600.0},
-                "top_window": {"pid": 999, "window_id": 900, "layer": 3},
+                "point_owner": None,
+                "point_owner_refusal": {"code": "ax_hit_pid_mismatch", "stage": "hit_pid",
+                                         "hit_pid": 999},
+                "focused_window_refusal": None,
+                "cleanup_ax_budget_available": True,
             },
         }
         diagnostic = (
             "macOS UI helper: guarded HID mouse-up refused: original fixture focus, "
-            "current-frame point, or top-window ownership changed; refusal_evidence="
+            "current-frame point, or AX point-owner mapping changed; refusal_evidence="
             + json.dumps(evidence, sort_keys=True)
         )
         with patch.object(smoke, "helper_json", side_effect=RuntimeError(diagnostic)) as helper:
@@ -703,22 +727,31 @@ class MacInputGuardTests(unittest.TestCase):
             lambda result: result.pop("guarded_hid_enqueue"),
             lambda result: result.update(posted_to_target_pid=True),
             lambda result: result["guard_evidence"].update(focused_window_id=455),
-            lambda result: result["guard_evidence"]["top_window"].update(pid=999),
-            lambda result: result["guard_evidence"]["top_window"].update(window_id=457),
-            lambda result: result["guard_evidence"]["top_window"].update(layer=False),
+            lambda result: result["guard_evidence"].update(selected_window_id=455),
+            lambda result: result["guard_evidence"]["point_owner"].update(hit_pid=999),
+            lambda result: result["guard_evidence"]["point_owner"].update(candidate_pid=999),
+            lambda result: result["guard_evidence"]["point_owner"].update(candidate_window_id=457),
+            lambda result: result["guard_evidence"]["point_owner"].update(candidate_role="AXButton"),
+            lambda result: result["guard_evidence"]["point_owner"].update(hit_role=""),
+            lambda result: result["guard_evidence"]["point_owner"].update(hit_role="AXPretendRole"),
+            lambda result: result["guard_evidence"]["point_owner"].update(hit_role="AXButton"),
+            lambda result: result["guard_evidence"]["point_owner"].update(
+                resolution_origin="window_attribute", hit_role="AXWindow"),
+            lambda result: result["guard_evidence"]["point_owner"].update(resolution_origin=[]),
+            lambda result: result["guard_evidence"]["point_owner"].update(matching_window_ids=[456, 457]),
+            lambda result: result["guard_evidence"]["point_owner"].update(matching_window_ids=[True]),
+            lambda result: result["guard_evidence"]["point_owner"].update(parent_resolution_complete=False),
+            lambda result: result["guard_evidence"]["point_owner"].update(resolution_origin="parent",
+                                                                          parent_depth=0),
+            lambda result: result["guard_evidence"]["point_owner"]["global_point"].update(x=51.0),
+            lambda result: result["guard_evidence"]["point_owner"]["candidate_geometry"].update(width=True),
+            lambda result: result["guard_evidence"]["point_owner"].pop("candidate_role"),
+            lambda result: result["guard_evidence"]["point_owner"].update(extra_owner_field=True),
             lambda result: result["guard_evidence"]["current_window_frame"].update(x=True),
             lambda result: result["guard_evidence"].update(
-                ignored_system_cursor_windows={"pid": 31415}),
-            lambda result: result["guard_evidence"].update(
-                ignored_system_cursor_windows=[{
-                    "pid": 31415, "window_id": 7777, "layer": 2147483630,
-                    "verified_windowserver_owner": False,
-                }]),
-            lambda result: result["guard_evidence"].update(
-                ignored_system_cursor_windows=[{
-                    "pid": 31415, "window_id": 7777, "layer": 2147483630,
-                    "verified_windowserver_owner": True, "owner_name": "WindowServer",
-                }]),
+                point_owner_refusal={"code": "ax_budget_exhausted"}),
+            lambda result: result["guard_evidence"].update(cleanup_ax_budget_available=False),
+            lambda result: result["guard_evidence"].update(focused_window_refusal={"code": "ax_error"}),
         ):
             with self.subTest(edit=edit):
                 capture, window, _ = event_controller()
@@ -732,8 +765,14 @@ class MacInputGuardTests(unittest.TestCase):
                     if arguments[0] == "cleanup-mouse":
                         result = dict(result)
                         result["guard_evidence"] = dict(result["guard_evidence"])
-                        result["guard_evidence"]["top_window"] = dict(
-                            result["guard_evidence"]["top_window"])
+                        result["guard_evidence"]["point_owner"] = dict(
+                            result["guard_evidence"]["point_owner"])
+                        result["guard_evidence"]["point_owner"]["candidate_geometry"] = dict(
+                            result["guard_evidence"]["point_owner"]["candidate_geometry"])
+                        result["guard_evidence"]["point_owner"]["global_point"] = dict(
+                            result["guard_evidence"]["point_owner"]["global_point"])
+                        result["guard_evidence"]["point_owner"]["matching_window_ids"] = list(
+                            result["guard_evidence"]["point_owner"]["matching_window_ids"])
                         edit(result)
                     return result
 
@@ -747,25 +786,14 @@ class MacInputGuardTests(unittest.TestCase):
                 self.assertEqual(capture.record["input_cleanup"][0]["outcome"], "failed")
                 self.assertIsNone(capture.owned_input)
 
-    def test_guarded_mouse_cleanup_accepts_verified_cursor_audit_metadata(self):
+    def test_guarded_mouse_cleanup_accepts_exact_ax_point_owner_mapping(self):
         capture, window, _ = event_controller()
         _state, _emitted, cleanup_attempts, injected = injected_native_helper(window)
         capture.owned_input = {"kind": "mouse", "pid": 123, "window_id": 456,
                                "x": 50.0, "y": 60.0,
                                "state": "down_pending_ack"}
 
-        def verified_cursor_ack(_binary, *arguments, **kwargs):
-            result = injected(_binary, *arguments, **kwargs)
-            if arguments[0] == "cleanup-mouse":
-                result["guard_evidence"]["ignored_system_cursor_windows"] = [{
-                    "pid": 31415,
-                    "window_id": 7777,
-                    "layer": 2147483630,
-                    "verified_windowserver_owner": True,
-                }]
-            return result
-
-        with patch.object(smoke, "helper_json", side_effect=verified_cursor_ack):
+        with patch.object(smoke, "helper_json", side_effect=injected):
             error = capture.release_owned_input("test verified cursor audit acknowledgement")
 
         self.assertIsNone(error)
@@ -778,8 +806,11 @@ class MacInputGuardTests(unittest.TestCase):
         failures = (
             ("frontmost_pid", 999, "guarded HID cleanup refused"),
             ("focused_window_id", 455, "guarded HID cleanup refused"),
-            ("top_window_pid", 999, "guarded HID cleanup refused"),
-            ("top_window_id", 457, "guarded HID cleanup refused"),
+            ("point_owner", {"hit_pid": 999}, "guarded HID cleanup refused"),
+            ("point_owner", {"candidate_window_id": 457}, "guarded HID cleanup refused"),
+            ("point_owner", {"matching_window_ids": [456, 457]}, "guarded HID cleanup refused"),
+            ("point_owner", {"global_point": {"x": 51.0, "y": 60.0}},
+             "guarded HID cleanup refused"),
             ("accessibility", False, "revoked TCC permission"),
             ("screen_recording", False, "revoked TCC permission"),
             ("session_locked", True, "locked/off-console"),
@@ -791,7 +822,10 @@ class MacInputGuardTests(unittest.TestCase):
             with self.subTest(field=field):
                 capture, window, _ = event_controller()
                 state, _emitted, cleanup_attempts, injected = injected_native_helper(window)
-                state[field] = value
+                if field == "point_owner":
+                    state[field].update(value)
+                else:
+                    state[field] = value
                 capture.owned_input = {"kind": "mouse", "pid": 123, "window_id": 456,
                                        "x": 50.0, "y": 60.0,
                                        "state": "down_pending_ack"}

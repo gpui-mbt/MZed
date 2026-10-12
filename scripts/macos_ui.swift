@@ -112,6 +112,540 @@ func focusedWindowGuardAllows(expectedWindowID: Int?, currentWindowID: Int?) -> 
     expectedWindowID == nil || expectedWindowID == currentWindowID
 }
 
+enum AXPointRead<Value> {
+    case value(Value)
+    case axError(AXError)
+    case malformed
+    case budgetExceeded
+}
+
+struct AXPointWindowMapping {
+    let available: Bool
+    let budgetExceeded: Bool
+    let matchingWindowIDs: [CGWindowID]
+
+    var uniqueWindowID: CGWindowID? {
+        available && matchingWindowIDs.count == 1 ? matchingWindowIDs[0] : nil
+    }
+}
+
+struct AXPointQueries<Element> {
+    let hitAtPoint: () -> AXPointRead<Element>
+    let processID: (Element) -> AXPointRead<pid_t>
+    let role: (Element) -> AXPointRead<String>
+    let containingWindow: (Element) -> AXPointRead<Element>
+    let parent: (Element) -> AXPointRead<Element>
+    let geometry: (Element) -> AXPointRead<CGRect>
+    let mapGeometry: (pid_t, CGRect) -> AXPointWindowMapping
+    let sameElement: (Element, Element) -> Bool
+}
+
+struct AXPointResolutionFault: Error {
+    let code: String
+    let stage: String
+    let axError: Int?
+    let hitPID: pid_t?
+    let hitRole: String?
+    let parentDepth: Int?
+    let matchingWindowIDs: [CGWindowID]?
+    let candidateGeometry: CGRect?
+
+    var jsonValue: [String: Any] {
+        var result: [String: Any] = ["code": code, "stage": stage]
+        if let axError { result["ax_error"] = axError }
+        if let hitPID { result["hit_pid"] = Int(hitPID) }
+        if let hitRole { result["hit_role"] = hitRole }
+        if let parentDepth { result["parent_depth"] = parentDepth }
+        if let matchingWindowIDs {
+            result["matching_window_ids"] = matchingWindowIDs.map(Int.init)
+        }
+        if let candidateGeometry { result["candidate_geometry"] = frameJSON(candidateGeometry) }
+        return result
+    }
+}
+
+struct AXPointOwnership {
+    let hitPID: pid_t
+    let hitRole: String
+    let resolutionOrigin: String
+    let parentDepth: Int
+    let parentResolutionComplete: Bool
+    let candidatePID: pid_t
+    let candidateWindowID: CGWindowID
+    let candidateRole: String
+    let candidateGeometry: CGRect
+    let matchingWindowIDs: [CGWindowID]
+    let globalPoint: CGPoint
+
+    func matchesOriginal(targetPID: pid_t, expectedWindowID: CGWindowID,
+                         point: CGPoint, currentWindowFrame: CGRect) -> Bool {
+        candidatePID == targetPID && hitPID == targetPID
+            && candidateWindowID == expectedWindowID
+            && candidateRole == (kAXWindowRole as String)
+            && parentResolutionComplete && parentDepth >= 0 && parentDepth <= 8
+            && matchingWindowIDs == [expectedWindowID]
+            && globalPoint.x.isFinite && globalPoint.y.isFinite
+            && abs(globalPoint.x - point.x) <= 0.000001
+            && abs(globalPoint.y - point.y) <= 0.000001
+            && finiteFrame(candidateGeometry) && finiteFrame(currentWindowFrame)
+            && abs(candidateGeometry.minX - currentWindowFrame.minX) <= 2
+            && abs(candidateGeometry.minY - currentWindowFrame.minY) <= 2
+            && abs(candidateGeometry.width - currentWindowFrame.width) <= 2
+            && abs(candidateGeometry.height - currentWindowFrame.height) <= 2
+            && candidateGeometry.contains(point)
+            && currentWindowFrame.contains(point)
+    }
+
+    var jsonValue: [String: Any] {
+        [
+            "method": "accessibility_point_hit",
+            "hit_pid": Int(hitPID),
+            "hit_role": hitRole,
+            "resolution_origin": resolutionOrigin,
+            "parent_depth": parentDepth,
+            "parent_resolution_complete": parentResolutionComplete,
+            "candidate_pid": Int(candidatePID),
+            "candidate_window_id": Int(candidateWindowID),
+            "candidate_role": candidateRole,
+            "candidate_geometry": frameJSON(candidateGeometry),
+            "matching_window_ids": matchingWindowIDs.map(Int.init),
+            "global_point": ["x": Double(globalPoint.x), "y": Double(globalPoint.y)],
+        ]
+    }
+}
+
+func finiteFrame(_ frame: CGRect) -> Bool {
+    frame.origin.x.isFinite && frame.origin.y.isFinite
+        && frame.width.isFinite && frame.height.isFinite
+        && frame.width > 0 && frame.height > 0
+}
+
+final class AXCleanupBudget {
+    private let deadline: TimeInterval
+    private let now: () -> TimeInterval
+
+    init() {
+        let started = ProcessInfo.processInfo.systemUptime
+        deadline = started + 2.0
+        now = { ProcessInfo.processInfo.systemUptime }
+        let systemWide = AXUIElementCreateSystemWide()
+        let timeoutResult = AXUIElementSetMessagingTimeout(systemWide, 0.25)
+        guard timeoutResult == .success else {
+            fail("cannot set cleanup-helper Accessibility messaging timeout (\(timeoutResult.rawValue))")
+        }
+    }
+
+    init(until deadline: TimeInterval, now: @escaping () -> TimeInterval) {
+        self.deadline = deadline
+        self.now = now
+    }
+
+    var hasTime: Bool { now() < deadline }
+}
+
+func axElementValue(_ result: AXError, _ raw: CFTypeRef?, budget: AXCleanupBudget)
+    -> AXPointRead<CFTypeRef> {
+    guard budget.hasTime else { return .budgetExceeded }
+    guard result == .success else { return .axError(result) }
+    guard let raw else { return .malformed }
+    guard budget.hasTime else { return .budgetExceeded }
+    return .value(raw)
+}
+
+func copyAXAttributeValue(budget: AXCleanupBudget,
+                           copy: (inout CFTypeRef?) -> AXError) -> AXPointRead<CFTypeRef> {
+    guard budget.hasTime else { return .budgetExceeded }
+    var raw: CFTypeRef?
+    let result = copy(&raw)
+    return axElementValue(result, raw, budget: budget)
+}
+
+func axElementAttribute(_ element: AXUIElement, _ name: String,
+                        budget: AXCleanupBudget) -> AXPointRead<AXUIElement> {
+    switch copyAXAttributeValue(budget: budget, copy: { raw in
+        AXUIElementCopyAttributeValue(element, name as CFString, &raw)
+    }) {
+    case .value(let value):
+        guard CFGetTypeID(value) == AXUIElementGetTypeID() else { return .malformed }
+        return .value(unsafeBitCast(value, to: AXUIElement.self))
+    case .axError(let error): return .axError(error)
+    case .malformed: return .malformed
+    case .budgetExceeded: return .budgetExceeded
+    }
+}
+
+func axStringValue(_ element: AXUIElement, _ name: String,
+                   budget: AXCleanupBudget) -> AXPointRead<String> {
+    switch copyAXAttributeValue(budget: budget, copy: { raw in
+        AXUIElementCopyAttributeValue(element, name as CFString, &raw)
+    }) {
+    case .value(let value):
+        guard CFGetTypeID(value) == CFStringGetTypeID(),
+              let string = value as? String, !string.isEmpty else { return .malformed }
+        return .value(string)
+    case .axError(let error): return .axError(error)
+    case .malformed: return .malformed
+    case .budgetExceeded: return .budgetExceeded
+    }
+}
+
+func axProcessID(_ element: AXUIElement, budget: AXCleanupBudget) -> AXPointRead<pid_t> {
+    guard budget.hasTime else { return .budgetExceeded }
+    var pid: pid_t = 0
+    let result = AXUIElementGetPid(element, &pid)
+    guard budget.hasTime else { return .budgetExceeded }
+    guard result == .success, pid > 0 else {
+        return result == .success ? .malformed : .axError(result)
+    }
+    return .value(pid)
+}
+
+func axFrame(_ element: AXUIElement, budget: AXCleanupBudget) -> AXPointRead<CGRect> {
+    func value(_ name: String) -> AXPointRead<AXValue> {
+        switch copyAXAttributeValue(budget: budget, copy: { raw in
+            AXUIElementCopyAttributeValue(element, name as CFString, &raw)
+        }) {
+        case .value(let rawValue):
+            guard CFGetTypeID(rawValue) == AXValueGetTypeID() else { return .malformed }
+            return .value(unsafeBitCast(rawValue, to: AXValue.self))
+        case .axError(let error): return .axError(error)
+        case .malformed: return .malformed
+        case .budgetExceeded: return .budgetExceeded
+        }
+    }
+    let position: AXValue
+    switch value(kAXPositionAttribute as String) {
+    case .value(let result): position = result
+    case .axError(let error): return .axError(error)
+    case .malformed: return .malformed
+    case .budgetExceeded: return .budgetExceeded
+    }
+    let size: AXValue
+    switch value(kAXSizeAttribute as String) {
+    case .value(let result): size = result
+    case .axError(let error): return .axError(error)
+    case .malformed: return .malformed
+    case .budgetExceeded: return .budgetExceeded
+    }
+    guard AXValueGetType(position) == .cgPoint, AXValueGetType(size) == .cgSize else {
+        return .malformed
+    }
+    var origin = CGPoint.zero
+    var dimensions = CGSize.zero
+    guard AXValueGetValue(position, .cgPoint, &origin),
+          AXValueGetValue(size, .cgSize, &dimensions) else { return .malformed }
+    let frame = CGRect(origin: origin, size: dimensions)
+    return finiteFrame(frame) ? .value(frame) : .malformed
+}
+
+func mapAXGeometryToWindow(targetPID: pid_t, geometry: CGRect,
+                           budget: AXCleanupBudget) -> AXPointWindowMapping {
+    guard budget.hasTime else {
+        return AXPointWindowMapping(available: false, budgetExceeded: true, matchingWindowIDs: [])
+    }
+    guard let rawWindows = CGWindowListCopyWindowInfo(
+        [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
+    ) as? [[String: Any]] else {
+        return AXPointWindowMapping(available: false, budgetExceeded: false, matchingWindowIDs: [])
+    }
+    var matches = [CGWindowID]()
+    for window in rawWindows {
+        guard let ownerNumber = window[kCGWindowOwnerPID as String] as? NSNumber else {
+            return AXPointWindowMapping(available: false, budgetExceeded: false, matchingWindowIDs: [])
+        }
+        let ownerPID = ownerNumber.int32Value
+        guard ownerPID == targetPID else { continue }
+        guard let layer = window[kCGWindowLayer as String] as? NSNumber,
+              let number = window[kCGWindowNumber as String] as? NSNumber,
+              let bounds = window[kCGWindowBounds as String] as? [String: CGFloat],
+              let x = bounds["X"], let y = bounds["Y"],
+              let width = bounds["Width"], let height = bounds["Height"],
+              x.isFinite, y.isFinite, width.isFinite, height.isFinite,
+              width > 0, height > 0 else {
+            return AXPointWindowMapping(available: false, budgetExceeded: false, matchingWindowIDs: [])
+        }
+        guard layer.intValue == 0 else { continue }
+        let candidate = CGRect(x: x, y: y, width: width, height: height)
+        if abs(candidate.minX - geometry.minX) <= 2
+            && abs(candidate.minY - geometry.minY) <= 2
+            && abs(candidate.width - geometry.width) <= 2
+            && abs(candidate.height - geometry.height) <= 2 {
+            matches.append(number.uint32Value)
+        }
+    }
+    guard budget.hasTime else {
+        return AXPointWindowMapping(available: false, budgetExceeded: true,
+                                    matchingWindowIDs: matches)
+    }
+    return AXPointWindowMapping(available: true, budgetExceeded: false,
+                                matchingWindowIDs: matches)
+}
+
+func cleanupAXPointQueries(point: CGPoint, budget: AXCleanupBudget)
+    -> AXPointQueries<AXUIElement> {
+    let systemWide = AXUIElementCreateSystemWide()
+    return AXPointQueries<AXUIElement>(
+        hitAtPoint: {
+            guard budget.hasTime else { return .budgetExceeded }
+            var raw: AXUIElement?
+            let result = AXUIElementCopyElementAtPosition(systemWide, Float(point.x), Float(point.y), &raw)
+            guard budget.hasTime else { return .budgetExceeded }
+            guard result == .success else { return .axError(result) }
+            guard let raw else { return .malformed }
+            return .value(raw)
+        },
+        processID: { axProcessID($0, budget: budget) },
+        role: { axStringValue($0, kAXRoleAttribute as String, budget: budget) },
+        containingWindow: { axElementAttribute($0, kAXWindowAttribute as String, budget: budget) },
+        parent: { axElementAttribute($0, kAXParentAttribute as String, budget: budget) },
+        geometry: { axFrame($0, budget: budget) },
+        mapGeometry: { pid, frame in mapAXGeometryToWindow(targetPID: pid, geometry: frame, budget: budget) },
+        sameElement: { CFEqual($0, $1) }
+    )
+}
+
+func cleanupFocusedWindowID(pid: pid_t, expectedWindowID: CGWindowID,
+                            budget: AXCleanupBudget) -> (Int?, AXPointResolutionFault?) {
+    var hitPID: pid_t?
+    var hitRole: String?
+    func refusal(_ code: String, _ stage: String, axError: AXError? = nil,
+                 geometry: CGRect? = nil, ids: [CGWindowID]? = nil)
+        -> (Int?, AXPointResolutionFault?) {
+        (nil, AXPointResolutionFault(code: code, stage: stage,
+                                     axError: axError.map { Int($0.rawValue) },
+                                     hitPID: hitPID, hitRole: hitRole, parentDepth: 0,
+                                     matchingWindowIDs: ids, candidateGeometry: geometry))
+    }
+    guard budget.hasTime else { return refusal("ax_budget_exhausted", "focused_window") }
+    let app = AXUIElementCreateApplication(pid)
+    var raw: CFTypeRef?
+    let result = AXUIElementCopyAttributeValue(app, kAXFocusedWindowAttribute as CFString, &raw)
+    guard budget.hasTime else { return refusal("ax_budget_exhausted", "focused_window") }
+    guard result == .success else { return refusal("ax_focused_window_error", "focused_window", axError: result) }
+    guard let raw, CFGetTypeID(raw) == AXUIElementGetTypeID() else {
+        return refusal("ax_focused_window_malformed", "focused_window")
+    }
+    let focused = unsafeBitCast(raw, to: AXUIElement.self)
+    switch axProcessID(focused, budget: budget) {
+    case .value(let observedPID): hitPID = observedPID
+    case .axError(let error): return refusal("ax_focused_window_pid_error", "focused_window_pid", axError: error)
+    case .malformed: return refusal("ax_focused_window_pid_malformed", "focused_window_pid")
+    case .budgetExceeded: return refusal("ax_budget_exhausted", "focused_window_pid")
+    }
+    guard hitPID == pid else { return refusal("ax_focused_window_pid_mismatch", "focused_window_pid") }
+    switch axStringValue(focused, kAXRoleAttribute as String, budget: budget) {
+    case .value(let role): hitRole = safeAXPointRole(role)
+    case .axError(let error): return refusal("ax_focused_window_role_error", "focused_window_role", axError: error)
+    case .malformed: return refusal("ax_focused_window_role_malformed", "focused_window_role")
+    case .budgetExceeded: return refusal("ax_budget_exhausted", "focused_window_role")
+    }
+    guard hitRole == (kAXWindowRole as String) else {
+        return refusal("ax_focused_window_role_mismatch", "focused_window_role")
+    }
+    let geometry: CGRect
+    switch axFrame(focused, budget: budget) {
+    case .value(let frame): geometry = frame
+    case .axError(let error): return refusal("ax_focused_window_geometry_error", "focused_window_geometry", axError: error)
+    case .malformed: return refusal("ax_focused_window_geometry_malformed", "focused_window_geometry")
+    case .budgetExceeded: return refusal("ax_budget_exhausted", "focused_window_geometry")
+    }
+    let mapping = mapAXGeometryToWindow(targetPID: pid, geometry: geometry, budget: budget)
+    guard !mapping.budgetExceeded else {
+        return refusal("ax_budget_exhausted", "focused_window_mapping", geometry: geometry,
+                       ids: mapping.matchingWindowIDs)
+    }
+    guard mapping.available else {
+        return refusal("cg_window_mapping_unavailable", "focused_window_mapping", geometry: geometry)
+    }
+    guard mapping.uniqueWindowID == expectedWindowID else {
+        return refusal("cg_focused_window_id_mismatch", "focused_window_mapping", geometry: geometry,
+                       ids: mapping.matchingWindowIDs)
+    }
+    return (Int(expectedWindowID), nil)
+}
+
+func safeAXPointRole(_ role: String) -> String {
+    let knownRoles: Set<String> = [
+        kAXWindowRole as String, kAXApplicationRole as String, kAXGroupRole as String,
+        kAXButtonRole as String, kAXCheckBoxRole as String, kAXImageRole as String,
+        "AXLink", kAXProgressIndicatorRole as String, kAXRadioButtonRole as String,
+        kAXScrollAreaRole as String, kAXSliderRole as String, kAXStaticTextRole as String,
+        kAXTextAreaRole as String, kAXTextFieldRole as String, kAXUnknownRole as String,
+    ]
+    return knownRoles.contains(role) ? role : "AXOther"
+}
+
+func resolveAXPointOwnership<Element>(queries: AXPointQueries<Element>, targetPID: pid_t,
+                                      expectedWindowID: CGWindowID, point: CGPoint) throws
+    -> AXPointOwnership {
+    var hitPID: pid_t?
+    var hitRole: String?
+    var parentDepth: Int?
+
+    func fault(_ code: String, _ stage: String, axError: AXError? = nil,
+               matchingWindowIDs: [CGWindowID]? = nil,
+               candidateGeometry: CGRect? = nil) -> AXPointResolutionFault {
+        AXPointResolutionFault(code: code, stage: stage,
+                               axError: axError.map { Int($0.rawValue) },
+                               hitPID: hitPID, hitRole: hitRole,
+                               parentDepth: parentDepth,
+                               matchingWindowIDs: matchingWindowIDs,
+                               candidateGeometry: candidateGeometry)
+    }
+
+    func required<Value>(_ value: AXPointRead<Value>, stage: String,
+                         code: String) throws -> Value {
+        switch value {
+        case .value(let result): return result
+        case .axError(let error): throw fault(code, stage, axError: error)
+        case .malformed: throw fault("ax_value_malformed", stage)
+        case .budgetExceeded: throw fault("ax_budget_exhausted", stage)
+        }
+    }
+
+    guard point.x.isFinite && point.y.isFinite else {
+        throw fault("ax_hit_point_invalid", "hit_coordinate")
+    }
+    guard CGFloat(Float(point.x)) == point.x && CGFloat(Float(point.y)) == point.y else {
+        throw fault("ax_hit_point_not_exact", "hit_coordinate")
+    }
+    let hit = try required(queries.hitAtPoint(), stage: "hit_test", code: "ax_hit_test_error")
+    let observedHitPID = try required(queries.processID(hit), stage: "hit_pid", code: "ax_hit_pid_error")
+    guard observedHitPID > 0 else {
+        throw fault("ax_hit_pid_invalid", "hit_pid")
+    }
+    hitPID = observedHitPID
+    guard observedHitPID == targetPID else {
+        throw fault("ax_hit_pid_mismatch", "hit_pid")
+    }
+
+    let rawHitRole = try required(queries.role(hit), stage: "hit_role", code: "ax_hit_role_error")
+    guard !rawHitRole.isEmpty else { throw fault("ax_hit_role_malformed", "hit_role") }
+    hitRole = safeAXPointRole(rawHitRole)
+
+    let candidate: Element
+    let resolutionOrigin: String
+    var resolvedDepth = 0
+    if rawHitRole == (kAXWindowRole as String) {
+        candidate = hit
+        resolutionOrigin = "hit_is_window"
+    } else {
+        switch queries.containingWindow(hit) {
+        case .value(let window):
+            let windowPID = try required(queries.processID(window), stage: "window_attribute_pid",
+                                         code: "ax_window_pid_error")
+            guard windowPID == targetPID else {
+                throw fault("ax_window_pid_mismatch", "window_attribute_pid")
+            }
+            let rawRole = try required(queries.role(window), stage: "window_attribute_role",
+                                       code: "ax_window_role_error")
+            guard rawRole == (kAXWindowRole as String) else {
+                throw fault("ax_window_role_mismatch", "window_attribute_role")
+            }
+            candidate = window
+            resolutionOrigin = "window_attribute"
+        case .axError(let error) where error == .attributeUnsupported || error == .noValue:
+            var current = hit
+            var visited = [hit]
+            var resolved: Element?
+            for depth in 1...8 {
+                parentDepth = depth
+                guard visited.count < 16 else { throw fault("ax_parent_visit_limit", "parent") }
+                let parent = try required(queries.parent(current), stage: "parent", code: "ax_parent_error")
+                let parentPID = try required(queries.processID(parent), stage: "parent_pid",
+                                             code: "ax_parent_pid_error")
+                guard parentPID == targetPID else {
+                    throw fault("ax_parent_pid_mismatch", "parent_pid")
+                }
+                guard !visited.contains(where: { queries.sameElement($0, parent) }) else {
+                    throw fault("ax_parent_cycle", "parent")
+                }
+                visited.append(parent)
+                let rawRole = try required(queries.role(parent), stage: "parent_role",
+                                           code: "ax_parent_role_error")
+                if rawRole == (kAXWindowRole as String) {
+                    resolved = parent
+                    resolvedDepth = depth
+                    break
+                }
+                current = parent
+            }
+            guard let resolved else {
+                throw fault("ax_parent_depth_limit", "parent", candidateGeometry: nil)
+            }
+            candidate = resolved
+            resolutionOrigin = "parent"
+        case .axError(let error):
+            throw fault("ax_window_attribute_error", "window_attribute", axError: error)
+        case .malformed:
+            throw fault("ax_window_attribute_malformed", "window_attribute")
+        case .budgetExceeded:
+            throw fault("ax_budget_exhausted", "window_attribute")
+        }
+    }
+
+    parentDepth = resolvedDepth
+    let candidatePID = try required(queries.processID(candidate), stage: "candidate_pid",
+                                    code: "ax_candidate_pid_error")
+    guard candidatePID == targetPID else {
+        throw fault("ax_candidate_pid_mismatch", "candidate_pid")
+    }
+    let rawCandidateRole = try required(queries.role(candidate), stage: "candidate_role",
+                                        code: "ax_candidate_role_error")
+    guard rawCandidateRole == (kAXWindowRole as String) else {
+        throw fault("ax_candidate_role_mismatch", "candidate_role")
+    }
+    let frame = try required(queries.geometry(candidate), stage: "candidate_geometry",
+                             code: "ax_candidate_geometry_error")
+    guard finiteFrame(frame) else {
+        throw fault("ax_candidate_geometry_invalid", "candidate_geometry",
+                    candidateGeometry: frame)
+    }
+    let mapping = queries.mapGeometry(targetPID, frame)
+    guard !mapping.budgetExceeded else {
+        throw fault("ax_budget_exhausted", "candidate_window_mapping",
+                    matchingWindowIDs: mapping.matchingWindowIDs,
+                    candidateGeometry: frame)
+    }
+    guard mapping.available else {
+        throw fault("cg_window_mapping_unavailable", "candidate_window_mapping",
+                    matchingWindowIDs: mapping.matchingWindowIDs,
+                    candidateGeometry: frame)
+    }
+    guard let candidateWindowID = mapping.uniqueWindowID else {
+        throw fault("cg_window_mapping_ambiguous_or_missing", "candidate_window_mapping",
+                    matchingWindowIDs: mapping.matchingWindowIDs,
+                    candidateGeometry: frame)
+    }
+    guard candidateWindowID == expectedWindowID else {
+        throw fault("cg_window_id_mismatch", "candidate_window_mapping",
+                    matchingWindowIDs: mapping.matchingWindowIDs,
+                    candidateGeometry: frame)
+    }
+    return AXPointOwnership(
+        hitPID: observedHitPID, hitRole: hitRole ?? "AXUnknown",
+        resolutionOrigin: resolutionOrigin, parentDepth: resolvedDepth,
+        parentResolutionComplete: true, candidatePID: candidatePID,
+        candidateWindowID: candidateWindowID, candidateRole: kAXWindowRole as String,
+        candidateGeometry: frame, matchingWindowIDs: mapping.matchingWindowIDs,
+        globalPoint: point
+    )
+}
+
+func finiteJSONNumber(_ value: Double) -> Any {
+    value.isFinite ? value : NSNull()
+}
+
+func frameJSON(_ frame: CGRect?) -> Any {
+    guard let frame else { return NSNull() }
+    return [
+        "x": finiteJSONNumber(Double(frame.origin.x)),
+        "y": finiteJSONNumber(Double(frame.origin.y)),
+        "width": finiteJSONNumber(Double(frame.width)),
+        "height": finiteJSONNumber(Double(frame.height)),
+    ] as [String: Any]
+}
+
 func axPressGuardAllows(targetPID: pid_t, focusedPID: pid_t?, expectedFocusedWindowID: Int,
                         currentFocusedWindowID: Int?, buttonPID: pid_t?,
                         expectedButtonTitle: String, actualButtonTitle: String?,
@@ -133,7 +667,8 @@ func mouseReleaseOwnershipGuardAllows(targetPID: pid_t, expectedWindowID: Int,
                                       frontmostPID: pid_t?, focusedWindowID: Int?,
                                       selectedWindowID: Int?, fixtureMatches: Bool,
                                       point: CGPoint, currentWindowFrame: CGRect?,
-                                      topWindowPID: pid_t?, topWindowID: Int?) -> Bool {
+                                      pointOwner: AXPointOwnership?,
+                                      cleanupBudgetAvailable: Bool = true) -> Bool {
     guard let currentWindowFrame else { return false }
     return accessibilityTrusted && screenCaptureTrusted && sessionUnlocked && onConsole
         && targetProcessLive
@@ -141,9 +676,11 @@ func mouseReleaseOwnershipGuardAllows(targetPID: pid_t, expectedWindowID: Int,
         && focusedWindowID == expectedWindowID
         && selectedWindowID == expectedWindowID
         && fixtureMatches
+        && cleanupBudgetAvailable
         && currentWindowFrame.contains(point)
-        && topWindowPID == targetPID
-        && topWindowID == expectedWindowID
+        && pointOwner?.matchesOriginal(
+            targetPID: targetPID, expectedWindowID: CGWindowID(expectedWindowID),
+            point: point, currentWindowFrame: currentWindowFrame) == true
 }
 
 func mouseReleaseOwnershipGuardFailureNames(targetPID: pid_t, expectedWindowID: Int,
@@ -154,7 +691,8 @@ func mouseReleaseOwnershipGuardFailureNames(targetPID: pid_t, expectedWindowID: 
                                             focusedWindowID: Int?, selectedWindowID: Int?,
                                             fixtureMatches: Bool, point: CGPoint,
                                             currentWindowFrame: CGRect?,
-                                            topWindowPID: pid_t?, topWindowID: Int?) -> [String] {
+                                            pointOwner: AXPointOwnership?,
+                                            cleanupBudgetAvailable: Bool = true) -> [String] {
     var failures: [String] = []
     if !accessibilityTrusted { failures.append("accessibility_trusted") }
     if !screenCaptureTrusted { failures.append("screen_capture_trusted") }
@@ -169,289 +707,130 @@ func mouseReleaseOwnershipGuardFailureNames(targetPID: pid_t, expectedWindowID: 
         failures.append("selected_window_id_matches_expected")
     }
     if !fixtureMatches { failures.append("fixture_name_matches_selected_window") }
+    if !cleanupBudgetAvailable { failures.append("cleanup_ax_budget_available") }
     if currentWindowFrame == nil { failures.append("current_window_frame_available") }
     if currentWindowFrame?.contains(point) != true {
         failures.append("point_inside_current_window_frame")
     }
-    if topWindowPID == nil || topWindowID == nil {
-        failures.append("top_window_available")
-    }
-    if topWindowPID != targetPID { failures.append("top_window_pid_matches_target") }
-    if topWindowID != expectedWindowID {
-        failures.append("top_window_id_matches_expected")
+    if pointOwner?.matchesOriginal(
+        targetPID: targetPID, expectedWindowID: CGWindowID(expectedWindowID),
+        point: point, currentWindowFrame: currentWindowFrame ?? .zero) != true {
+        failures.append("ax_point_owner_matches_original_window")
     }
     return failures
 }
 
-func validateMouseReleaseOwnershipGuardFixtures() -> Int {
-    let frame = CGRect(x: 10, y: 20, width: 800, height: 600)
-    let point = CGPoint(x: 50, y: 60)
-    func allows(accessibilityTrusted: Bool = true, screenCaptureTrusted: Bool = true,
-                sessionUnlocked: Bool = true, onConsole: Bool = true,
-                targetProcessLive: Bool = true,
-                frontmostPID: pid_t? = 123, focusedWindowID: Int? = 456,
-                selectedWindowID: Int? = 456, fixtureMatches: Bool = true,
-                point: CGPoint = point, currentWindowFrame: CGRect? = frame,
-                topWindowPID: pid_t? = 123, topWindowID: Int? = 456) -> Bool {
+struct MouseReleaseGuardSnapshot {
+    let targetPID: pid_t
+    let expectedWindowID: CGWindowID
+    let fixtureName: String
+    let accessibilityTrusted: Bool
+    let screenCaptureTrusted: Bool
+    let sessionLocked: Bool?
+    let onConsole: Bool?
+    let targetProcessLive: Bool
+    let frontmostPID: pid_t?
+    let focusedWindowID: Int?
+    let selectedWindowID: Int?
+    let fixtureMatches: Bool
+    let point: CGPoint
+    let currentWindowFrame: CGRect?
+    let pointOwner: AXPointOwnership?
+    let pointOwnerRefusal: AXPointResolutionFault?
+    let focusedWindowRefusal: AXPointResolutionFault?
+    let cleanupBudgetAvailable: Bool
+
+    var allowsRelease: Bool {
         mouseReleaseOwnershipGuardAllows(
-            targetPID: 123, expectedWindowID: 456,
+            targetPID: targetPID, expectedWindowID: Int(expectedWindowID),
             accessibilityTrusted: accessibilityTrusted,
             screenCaptureTrusted: screenCaptureTrusted,
-            sessionUnlocked: sessionUnlocked, onConsole: onConsole,
+            sessionUnlocked: sessionLocked == false, onConsole: onConsole == true,
             targetProcessLive: targetProcessLive, frontmostPID: frontmostPID,
             focusedWindowID: focusedWindowID, selectedWindowID: selectedWindowID,
             fixtureMatches: fixtureMatches, point: point,
-            currentWindowFrame: currentWindowFrame, topWindowPID: topWindowPID,
-            topWindowID: topWindowID
+            currentWindowFrame: currentWindowFrame, pointOwner: pointOwner,
+            cleanupBudgetAvailable: cleanupBudgetAvailable
         )
     }
-    guard allows(),
-          !allows(accessibilityTrusted: false),
-          !allows(screenCaptureTrusted: false),
-          !allows(sessionUnlocked: false),
-          !allows(onConsole: false),
-          !allows(targetProcessLive: false),
-          !allows(frontmostPID: 999),
-          !allows(focusedWindowID: 455),
-          !allows(focusedWindowID: nil),
-          !allows(selectedWindowID: 455),
-          !allows(fixtureMatches: false),
-          !allows(point: CGPoint(x: 900, y: 60)),
-          !allows(currentWindowFrame: nil),
-          !allows(currentWindowFrame: CGRect(x: 10, y: 20, width: 30, height: 30)),
-          !allows(currentWindowFrame: CGRect(x: 100, y: 100, width: 800, height: 600)),
-          !allows(topWindowPID: 999),
-          !allows(topWindowID: 457),
-          !allows(topWindowPID: nil, topWindowID: nil) else {
-        fail("guarded mouse-release fixtures did not reject lost ownership, focus, point, or top-window identity")
-    }
-    return 18
-}
 
-func validateMouseReleaseRefusalFixtures() -> Int {
-    let frame = CGRect(x: 10, y: 20, width: 800, height: 600)
-    let point = CGPoint(x: 50, y: 60)
-    func failed(accessibilityTrusted: Bool = true, screenCaptureTrusted: Bool = true,
-                sessionUnlocked: Bool = true, onConsole: Bool = true,
-                targetProcessLive: Bool = true,
-                frontmostPID: pid_t? = 123, focusedWindowID: Int? = 456,
-                selectedWindowID: Int? = 456, fixtureMatches: Bool = true,
-                point: CGPoint = point, currentWindowFrame: CGRect? = frame,
-                topWindowPID: pid_t? = 123, topWindowID: Int? = 456) -> [String] {
+    var failedPredicates: [String] {
         mouseReleaseOwnershipGuardFailureNames(
-            targetPID: 123, expectedWindowID: 456,
+            targetPID: targetPID, expectedWindowID: Int(expectedWindowID),
             accessibilityTrusted: accessibilityTrusted,
             screenCaptureTrusted: screenCaptureTrusted,
-            sessionUnlocked: sessionUnlocked, onConsole: onConsole,
+            sessionUnlocked: sessionLocked == false, onConsole: onConsole == true,
             targetProcessLive: targetProcessLive, frontmostPID: frontmostPID,
             focusedWindowID: focusedWindowID, selectedWindowID: selectedWindowID,
             fixtureMatches: fixtureMatches, point: point,
-            currentWindowFrame: currentWindowFrame,
-            topWindowPID: topWindowPID, topWindowID: topWindowID
-        )
-    }
-    func allows(accessibilityTrusted: Bool = true, screenCaptureTrusted: Bool = true,
-                sessionUnlocked: Bool = true, onConsole: Bool = true,
-                targetProcessLive: Bool = true,
-                frontmostPID: pid_t? = 123, focusedWindowID: Int? = 456,
-                selectedWindowID: Int? = 456, fixtureMatches: Bool = true,
-                point: CGPoint = point, currentWindowFrame: CGRect? = frame,
-                topWindowPID: pid_t? = 123, topWindowID: Int? = 456) -> Bool {
-        mouseReleaseOwnershipGuardAllows(
-            targetPID: 123, expectedWindowID: 456,
-            accessibilityTrusted: accessibilityTrusted,
-            screenCaptureTrusted: screenCaptureTrusted,
-            sessionUnlocked: sessionUnlocked, onConsole: onConsole,
-            targetProcessLive: targetProcessLive, frontmostPID: frontmostPID,
-            focusedWindowID: focusedWindowID, selectedWindowID: selectedWindowID,
-            fixtureMatches: fixtureMatches, point: point,
-            currentWindowFrame: currentWindowFrame,
-            topWindowPID: topWindowPID, topWindowID: topWindowID
+            currentWindowFrame: currentWindowFrame, pointOwner: pointOwner,
+            cleanupBudgetAvailable: cleanupBudgetAvailable
         )
     }
 
-    let cases: [(String, [String], Bool)] = [
-        ("accessibility_trusted", failed(accessibilityTrusted: false), allows(accessibilityTrusted: false)),
-        ("screen_capture_trusted", failed(screenCaptureTrusted: false), allows(screenCaptureTrusted: false)),
-        ("session_unlocked", failed(sessionUnlocked: false), allows(sessionUnlocked: false)),
-        ("on_console", failed(onConsole: false), allows(onConsole: false)),
-        ("target_process_live", failed(targetProcessLive: false), allows(targetProcessLive: false)),
-        ("frontmost_pid_matches_target", failed(frontmostPID: 999), allows(frontmostPID: 999)),
-        ("frontmost_pid_matches_target", failed(frontmostPID: nil), allows(frontmostPID: nil)),
-        ("focused_window_id_matches_expected", failed(focusedWindowID: 455), allows(focusedWindowID: 455)),
-        ("focused_window_id_matches_expected", failed(focusedWindowID: nil), allows(focusedWindowID: nil)),
-        ("selected_window_id_matches_expected", failed(selectedWindowID: 455), allows(selectedWindowID: 455)),
-        ("selected_window_id_matches_expected", failed(selectedWindowID: nil), allows(selectedWindowID: nil)),
-        ("fixture_name_matches_selected_window", failed(fixtureMatches: false), allows(fixtureMatches: false)),
-        ("current_window_frame_available", failed(currentWindowFrame: nil), allows(currentWindowFrame: nil)),
-        ("point_inside_current_window_frame",
-         failed(point: CGPoint(x: 900, y: 60)), allows(point: CGPoint(x: 900, y: 60))),
-        ("point_inside_current_window_frame",
-         failed(currentWindowFrame: CGRect(x: 100, y: 100, width: 800, height: 600)),
-         allows(currentWindowFrame: CGRect(x: 100, y: 100, width: 800, height: 600))),
-        ("top_window_pid_matches_target", failed(topWindowPID: 999), allows(topWindowPID: 999)),
-        ("top_window_id_matches_expected", failed(topWindowID: 457), allows(topWindowID: 457)),
-        ("top_window_available", failed(topWindowPID: nil, topWindowID: nil),
-         allows(topWindowPID: nil, topWindowID: nil)),
-    ]
-    guard allows() else {
-        fail("guarded mouse-release refusal fixtures rejected the valid snapshot")
-    }
-    for (expected, failures, allowed) in cases {
-        guard failures.contains(expected), !failures.isEmpty, !allowed else {
-            fail("guarded mouse-release refusal name did not match rejected predicate \(expected)")
-        }
+    var successEvidence: [String: Any] {
+        [
+            "pid": Int(targetPID), "window_id": Int(expectedWindowID), "fixture": fixtureName,
+            "selected_window_id": selectedWindowID ?? -1,
+            "accessibility_trusted": accessibilityTrusted,
+            "screen_capture_trusted": screenCaptureTrusted,
+            "session_locked": sessionLocked.map { $0 as Any } ?? NSNull(),
+            "on_console": onConsole.map { $0 as Any } ?? NSNull(),
+            "target_process_live": targetProcessLive,
+            "frontmost_pid": Int(frontmostPID ?? -1),
+            "focused_window_id": focusedWindowID ?? -1,
+            "point": ["x": Double(point.x), "y": Double(point.y)],
+            "current_window_frame": frameJSON(currentWindowFrame),
+            "point_owner": pointOwner?.jsonValue as Any? ?? NSNull(),
+            "point_owner_refusal": NSNull(),
+            "focused_window_refusal": focusedWindowRefusal?.jsonValue as Any? ?? NSNull(),
+            "cleanup_ax_budget_available": cleanupBudgetAvailable,
+        ]
     }
 
-    let evidence = mouseReleaseGuardRefusalEvidence(
-        targetPID: 123, expectedWindowID: 456,
-        accessibilityTrusted: true, screenCaptureTrusted: true,
-        sessionLocked: nil, onConsole: nil, targetProcessLive: true,
-        frontmostPID: 123, focusedWindowID: 455, selectedWindowID: 456,
-        fixtureMatches: true, point: point, currentWindowFrame: frame,
-        topWindow: nil, ignoredSystemCursorWindows: [],
-        failedPredicates: ["session_unlocked", "on_console",
-                                          "focused_window_id_matches_expected"]
-    )
-    guard let data = try? JSONSerialization.data(withJSONObject: evidence,
-                                                 options: [.sortedKeys, .fragmentsAllowed]),
-          let decoded = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-          decoded["kind"] as? String == "guarded_hid_mouse_up_refusal",
-          let snapshot = decoded["guard_snapshot"] as? [String: Any],
-          Set(snapshot.keys) == Set([
-              "target_pid", "expected_window_id", "selected_window_id",
-              "accessibility_trusted", "screen_capture_trusted", "session_locked",
-              "on_console", "target_process_live", "frontmost_pid",
-              "focused_window_id", "fixture_matches_selected_window", "point_global",
-              "current_window_frame", "top_window", "ignored_system_cursor_windows",
-          ]),
-          snapshot["session_locked"] is NSNull,
-          snapshot["on_console"] is NSNull,
-          snapshot["top_window"] is NSNull,
-          let ignoredCursorWindows = snapshot["ignored_system_cursor_windows"] as? [[String: Any]],
-          ignoredCursorWindows.isEmpty else {
-        fail("guarded mouse-release refusal evidence was not safe structured JSON")
-    }
-    return cases.count
-}
-
-struct WindowAtPoint {
-    let pid: pid_t
-    let windowID: Int
-    let layer: Int
-}
-
-struct IgnoredSystemCursorWindow {
-    let pid: pid_t
-    let windowID: Int
-    let layer: Int
-
-    var jsonValue: [String: Any] {
-        ["pid": Int(pid), "window_id": windowID, "layer": layer,
-         "verified_windowserver_owner": true]
-    }
-}
-
-struct TopWindowSelection {
-    let window: WindowAtPoint?
-    let ignoredSystemCursorWindows: [IgnoredSystemCursorWindow]
-}
-
-let windowServerExecutablePath =
-    "/System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer"
-
-func canonicalFilesystemPath(_ path: String) -> String? {
-    var resolved = [CChar](repeating: 0, count: Int(MAXPATHLEN))
-    let result: UnsafeMutablePointer<CChar>? = path.withCString { rawPath in
-        resolved.withUnsafeMutableBufferPointer { buffer in
-            guard let baseAddress = buffer.baseAddress else { return nil }
-            return realpath(rawPath, baseAddress)
-        }
-    }
-    guard result != nil else { return nil }
-    return resolved.withUnsafeBufferPointer { buffer in
-        guard let baseAddress = buffer.baseAddress else { return nil }
-        return String(validatingUTF8: baseAddress)
-    }
-}
-
-func currentCanonicalExecutablePath(pid: pid_t) -> String? {
-    let capacity = 4 * Int(MAXPATHLEN)
-    var reportedPath = [CChar](repeating: 0, count: capacity)
-    let reportedLength = reportedPath.withUnsafeMutableBufferPointer { buffer -> Int32 in
-        guard let baseAddress = buffer.baseAddress else { return 0 }
-        return proc_pidpath(pid, baseAddress, UInt32(buffer.count))
-    }
-    guard reportedLength > 0, Int(reportedLength) < reportedPath.count,
-          let terminator = reportedPath.firstIndex(of: 0), terminator > 0,
-          terminator <= Int(reportedLength),
-          let path = reportedPath.withUnsafeBufferPointer({ buffer -> String? in
-              guard let baseAddress = buffer.baseAddress else { return nil }
-              return String(validatingUTF8: baseAddress)
-          }) else {
-        return nil
-    }
-    return canonicalFilesystemPath(path)
-}
-
-func finiteJSONNumber(_ value: Double) -> Any {
-    value.isFinite ? value : NSNull()
-}
-
-func frameJSON(_ frame: CGRect?) -> Any {
-    guard let frame else { return NSNull() }
-    return [
-        "x": finiteJSONNumber(Double(frame.origin.x)),
-        "y": finiteJSONNumber(Double(frame.origin.y)),
-        "width": finiteJSONNumber(Double(frame.width)),
-        "height": finiteJSONNumber(Double(frame.height)),
-    ] as [String: Any]
-}
-
-func mouseReleaseGuardRefusalEvidence(targetPID: pid_t, expectedWindowID: Int,
-                                      accessibilityTrusted: Bool,
-                                      screenCaptureTrusted: Bool,
-                                      sessionLocked: Bool?, onConsole: Bool?,
-                                      targetProcessLive: Bool, frontmostPID: pid_t?,
-                                      focusedWindowID: Int?, selectedWindowID: Int?,
-                                      fixtureMatches: Bool, point: CGPoint,
-                                      currentWindowFrame: CGRect?,
-                                      topWindow: WindowAtPoint?,
-                                      ignoredSystemCursorWindows: [IgnoredSystemCursorWindow],
-                                      failedPredicates: [String]) -> [String: Any] {
-    let topValue: Any
-    if let topWindow {
-        topValue = ["pid": Int(topWindow.pid), "window_id": topWindow.windowID,
-                    "layer": topWindow.layer] as [String: Any]
-    } else {
-        topValue = NSNull()
-    }
-    let snapshot: [String: Any] = [
-        "target_pid": Int(targetPID),
-        "expected_window_id": expectedWindowID,
-        "selected_window_id": selectedWindowID.map { $0 as Any } ?? NSNull(),
-        "accessibility_trusted": accessibilityTrusted,
-        "screen_capture_trusted": screenCaptureTrusted,
-        "session_locked": sessionLocked.map { $0 as Any } ?? NSNull(),
-        "on_console": onConsole.map { $0 as Any } ?? NSNull(),
-        "target_process_live": targetProcessLive,
-        "frontmost_pid": frontmostPID.map { Int($0) as Any } ?? NSNull(),
-        "focused_window_id": focusedWindowID.map { $0 as Any } ?? NSNull(),
-        "fixture_matches_selected_window": fixtureMatches,
-        "point_global": ["x": finiteJSONNumber(Double(point.x)),
-                         "y": finiteJSONNumber(Double(point.y))],
-        "current_window_frame": frameJSON(currentWindowFrame),
-        "top_window": topValue,
-        "ignored_system_cursor_windows": ignoredSystemCursorWindows.map(\.jsonValue),
-    ]
-    return ["kind": "guarded_hid_mouse_up_refusal",
+    var refusalEvidence: [String: Any] {
+        let pointOwnerValue: Any = pointOwner?.jsonValue ?? NSNull()
+        let refusalValue: Any = pointOwnerRefusal?.jsonValue ?? NSNull()
+        return [
+            "kind": "guarded_hid_mouse_up_refusal",
             "failed_predicates": failedPredicates,
-            "guard_snapshot": snapshot]
+            "guard_snapshot": [
+                "target_pid": Int(targetPID),
+                "expected_window_id": Int(expectedWindowID),
+                "selected_window_id": selectedWindowID.map { $0 as Any } ?? NSNull(),
+                "accessibility_trusted": accessibilityTrusted,
+                "screen_capture_trusted": screenCaptureTrusted,
+                "session_locked": sessionLocked.map { $0 as Any } ?? NSNull(),
+                "on_console": onConsole.map { $0 as Any } ?? NSNull(),
+                "target_process_live": targetProcessLive,
+                "frontmost_pid": frontmostPID.map { Int($0) as Any } ?? NSNull(),
+                "focused_window_id": focusedWindowID.map { $0 as Any } ?? NSNull(),
+                "fixture_matches_selected_window": fixtureMatches,
+                "point_global": ["x": finiteJSONNumber(Double(point.x)),
+                                 "y": finiteJSONNumber(Double(point.y))],
+                "current_window_frame": frameJSON(currentWindowFrame),
+                "point_owner": pointOwnerValue,
+                "point_owner_refusal": refusalValue,
+                "focused_window_refusal": focusedWindowRefusal?.jsonValue as Any? ?? NSNull(),
+                "cleanup_ax_budget_available": cleanupBudgetAvailable,
+            ],
+        ]
+    }
 }
 
-func failMouseReleaseGuard(reason: String, evidence: [String: Any]) -> Never {
+func postGuardedMouseReleaseIfAllowed(_ snapshot: MouseReleaseGuardSnapshot,
+                                      post: () -> Void) -> Bool {
+    guard snapshot.allowsRelease else { return false }
+    post()
+    return true
+}
+
+func failMouseReleaseGuard(_ snapshot: MouseReleaseGuardSnapshot) -> Never {
+    let reason = snapshot.pointOwnerRefusal == nil && snapshot.focusedWindowRefusal == nil
+        ? "original fixture focus, current-frame point, or AX point-owner mapping changed"
+        : "AX point-owner or focused-window mapping was incomplete or did not identify the original fixture window"
     do {
-        let data = try JSONSerialization.data(withJSONObject: evidence,
+        let data = try JSONSerialization.data(withJSONObject: snapshot.refusalEvidence,
                                               options: [.sortedKeys, .fragmentsAllowed])
         let encodedEvidence = String(decoding: data, as: UTF8.self)
         fputs("macOS UI helper: guarded HID mouse-up refused: \(reason); refusal_evidence=\(encodedEvidence)\n",
@@ -462,170 +841,507 @@ func failMouseReleaseGuard(reason: String, evidence: [String: Any]) -> Never {
     }
 }
 
-func topWindowRecord(at point: CGPoint, in rawWindows: [[String: Any]],
-                     cursorWindowLevel: Int, trustedWindowServerPath: String?,
-                     executablePathForPID: (pid_t) -> String?) -> TopWindowSelection {
-    // CGWindowListOption.optionOnScreenOnly returns windows front-to-back.
-    // Treat an unparseable window at the point as unknown ownership and fail
-    // closed rather than skipping a possible occluder. The only exception is a
-    // cursor-level record whose current PID resolves to the canonical OS
-    // WindowServer executable.
-    var ignoredSystemCursorWindows: [IgnoredSystemCursorWindow] = []
-    for window in rawWindows {
-        guard let rawBounds = window[kCGWindowBounds as String] as? [String: CGFloat],
-              let x = rawBounds["X"], let y = rawBounds["Y"],
-              let width = rawBounds["Width"], let height = rawBounds["Height"],
-              width > 0, height > 0 else {
-            return TopWindowSelection(window: nil,
-                                      ignoredSystemCursorWindows: ignoredSystemCursorWindows)
-        }
-        let frame = CGRect(x: x, y: y, width: width, height: height)
-        guard frame.contains(point) else { continue }
-        if let alpha = (window[kCGWindowAlpha as String] as? NSNumber)?.doubleValue,
-           alpha <= 0 {
-            continue
-        }
-        guard let rawPID = (window[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value,
-              let rawWindowID = (window[kCGWindowNumber as String] as? NSNumber)?.intValue,
-              let layer = (window[kCGWindowLayer as String] as? NSNumber)?.intValue else {
-            return TopWindowSelection(window: nil,
-                                      ignoredSystemCursorWindows: ignoredSystemCursorWindows)
-        }
-        if layer == cursorWindowLevel,
-           let trustedWindowServerPath,
-           executablePathForPID(rawPID) == trustedWindowServerPath {
-            ignoredSystemCursorWindows.append(IgnoredSystemCursorWindow(
-                pid: rawPID, windowID: rawWindowID, layer: layer))
-            continue
-        }
-        return TopWindowSelection(
-            window: WindowAtPoint(pid: rawPID, windowID: rawWindowID, layer: layer),
-            ignoredSystemCursorWindows: ignoredSystemCursorWindows)
-    }
-    return TopWindowSelection(window: nil,
-                              ignoredSystemCursorWindows: ignoredSystemCursorWindows)
+func fixtureAXPointOwnership(targetPID: pid_t = 123, windowID: CGWindowID = 456,
+                              point: CGPoint = CGPoint(x: 50, y: 60),
+                              frame: CGRect = CGRect(x: 10, y: 20, width: 800, height: 600),
+                              hitPID: pid_t? = nil, hitRole: String = "AXWindow",
+                              origin: String = "hit_is_window", depth: Int = 0,
+                              matchingWindowIDs: [CGWindowID]? = nil) -> AXPointOwnership {
+    AXPointOwnership(
+        hitPID: hitPID ?? targetPID, hitRole: safeAXPointRole(hitRole),
+        resolutionOrigin: origin, parentDepth: depth, parentResolutionComplete: true,
+        candidatePID: targetPID, candidateWindowID: windowID,
+        candidateRole: kAXWindowRole as String, candidateGeometry: frame,
+        matchingWindowIDs: matchingWindowIDs ?? [windowID], globalPoint: point
+    )
 }
 
-func validateTopWindowSelectionFixtures() -> Int {
+func fixtureMouseReleaseSnapshot(pointOwner: AXPointOwnership? = fixtureAXPointOwnership(),
+                                 pointOwnerRefusal: AXPointResolutionFault? = nil,
+                                 accessibilityTrusted: Bool = true,
+                                 screenCaptureTrusted: Bool = true,
+                                 sessionLocked: Bool? = false, onConsole: Bool? = true,
+                                 targetProcessLive: Bool = true, frontmostPID: pid_t? = 123,
+                                 focusedWindowID: Int? = 456, selectedWindowID: Int? = 456,
+                                 fixtureMatches: Bool = true,
+                                 point: CGPoint = CGPoint(x: 50, y: 60),
+                                 frame: CGRect? = CGRect(x: 10, y: 20, width: 800, height: 600),
+                                 focusedWindowRefusal: AXPointResolutionFault? = nil,
+                                 cleanupBudgetAvailable: Bool = true)
+    -> MouseReleaseGuardSnapshot {
+    MouseReleaseGuardSnapshot(
+        targetPID: 123, expectedWindowID: 456, fixtureName: "fixture.txt",
+        accessibilityTrusted: accessibilityTrusted, screenCaptureTrusted: screenCaptureTrusted,
+        sessionLocked: sessionLocked, onConsole: onConsole, targetProcessLive: targetProcessLive,
+        frontmostPID: frontmostPID, focusedWindowID: focusedWindowID,
+        selectedWindowID: selectedWindowID, fixtureMatches: fixtureMatches,
+        point: point, currentWindowFrame: frame, pointOwner: pointOwner,
+        pointOwnerRefusal: pointOwnerRefusal, focusedWindowRefusal: focusedWindowRefusal,
+        cleanupBudgetAvailable: cleanupBudgetAvailable
+    )
+}
+
+func validateMouseReleaseOwnershipGuardFixtures() -> Int {
+    let wrongPID = fixtureAXPointOwnership(hitPID: 999)
+    let wrongWindow = fixtureAXPointOwnership(windowID: 457,
+                                               matchingWindowIDs: [457])
+    let outsidePoint = fixtureAXPointOwnership(point: CGPoint(x: 900, y: 60))
+    let cases: [MouseReleaseGuardSnapshot] = [
+        fixtureMouseReleaseSnapshot(),
+        fixtureMouseReleaseSnapshot(accessibilityTrusted: false),
+        fixtureMouseReleaseSnapshot(screenCaptureTrusted: false),
+        fixtureMouseReleaseSnapshot(sessionLocked: true),
+        fixtureMouseReleaseSnapshot(onConsole: false),
+        fixtureMouseReleaseSnapshot(targetProcessLive: false),
+        fixtureMouseReleaseSnapshot(frontmostPID: 999),
+        fixtureMouseReleaseSnapshot(focusedWindowID: 455),
+        fixtureMouseReleaseSnapshot(focusedWindowID: nil),
+        fixtureMouseReleaseSnapshot(selectedWindowID: 455),
+        fixtureMouseReleaseSnapshot(fixtureMatches: false),
+        fixtureMouseReleaseSnapshot(point: CGPoint(x: 900, y: 60)),
+        fixtureMouseReleaseSnapshot(frame: nil),
+        fixtureMouseReleaseSnapshot(frame: CGRect(x: 10, y: 20, width: 30, height: 30)),
+        fixtureMouseReleaseSnapshot(frame: CGRect(x: 100, y: 100, width: 800, height: 600)),
+        fixtureMouseReleaseSnapshot(pointOwner: wrongPID),
+        fixtureMouseReleaseSnapshot(pointOwner: wrongWindow),
+        fixtureMouseReleaseSnapshot(pointOwner: outsidePoint),
+    ]
+    guard cases[0].allowsRelease,
+          cases.dropFirst().allSatisfy({ !$0.allowsRelease }) else {
+        fail("guarded mouse-release fixtures did not reject lost ownership, focus, point, or session")
+    }
+    var posts = 0
+    for snapshot in cases.dropFirst() {
+        guard !postGuardedMouseReleaseIfAllowed(snapshot, post: { posts += 1 }) else {
+            fail("guarded HID cleanup posted after an invalid owner or guard snapshot")
+        }
+    }
+    guard posts == 0,
+          postGuardedMouseReleaseIfAllowed(cases[0], post: { posts += 1 }), posts == 1 else {
+        fail("guarded HID cleanup post seam did not preserve the valid owner case")
+    }
+    return cases.count
+}
+
+func validateMouseReleaseRefusalFixtures() -> Int {
+    let valid = fixtureAXPointOwnership()
+    let wrongPID = fixtureAXPointOwnership(hitPID: 999)
+    let wrongWindow = fixtureAXPointOwnership(windowID: 457, matchingWindowIDs: [457])
+    let cases: [(String, MouseReleaseGuardSnapshot)] = [
+        ("accessibility_trusted", fixtureMouseReleaseSnapshot(accessibilityTrusted: false)),
+        ("screen_capture_trusted", fixtureMouseReleaseSnapshot(screenCaptureTrusted: false)),
+        ("session_unlocked", fixtureMouseReleaseSnapshot(sessionLocked: true)),
+        ("on_console", fixtureMouseReleaseSnapshot(onConsole: false)),
+        ("target_process_live", fixtureMouseReleaseSnapshot(targetProcessLive: false)),
+        ("frontmost_pid_matches_target", fixtureMouseReleaseSnapshot(frontmostPID: 999)),
+        ("frontmost_pid_matches_target", fixtureMouseReleaseSnapshot(frontmostPID: nil)),
+        ("focused_window_id_matches_expected", fixtureMouseReleaseSnapshot(focusedWindowID: 455)),
+        ("focused_window_id_matches_expected", fixtureMouseReleaseSnapshot(focusedWindowID: nil)),
+        ("selected_window_id_matches_expected", fixtureMouseReleaseSnapshot(selectedWindowID: 455)),
+        ("selected_window_id_matches_expected", fixtureMouseReleaseSnapshot(selectedWindowID: nil)),
+        ("fixture_name_matches_selected_window", fixtureMouseReleaseSnapshot(fixtureMatches: false)),
+        ("current_window_frame_available", fixtureMouseReleaseSnapshot(frame: nil)),
+        ("point_inside_current_window_frame",
+         fixtureMouseReleaseSnapshot(point: CGPoint(x: 900, y: 60))),
+        ("point_inside_current_window_frame",
+         fixtureMouseReleaseSnapshot(frame: CGRect(x: 100, y: 100, width: 800, height: 600))),
+        ("ax_point_owner_matches_original_window", fixtureMouseReleaseSnapshot(pointOwner: wrongPID)),
+        ("ax_point_owner_matches_original_window", fixtureMouseReleaseSnapshot(pointOwner: wrongWindow)),
+        ("ax_point_owner_matches_original_window",
+         fixtureMouseReleaseSnapshot(pointOwner: nil,
+                                     pointOwnerRefusal: AXPointResolutionFault(
+                                        code: "ax_hit_pid_mismatch", stage: "hit_pid",
+                                        axError: nil, hitPID: 999, hitRole: nil,
+                                        parentDepth: nil, matchingWindowIDs: nil,
+                                        candidateGeometry: nil))),
+    ]
+    guard valid.matchesOriginal(targetPID: 123, expectedWindowID: 456,
+                                point: CGPoint(x: 50, y: 60),
+                                currentWindowFrame: CGRect(x: 10, y: 20, width: 800, height: 600)) else {
+        fail("guarded mouse-release refusal fixtures have no valid owner snapshot")
+    }
+    for (expected, snapshot) in cases {
+        guard snapshot.failedPredicates.contains(expected), !snapshot.failedPredicates.isEmpty else {
+            fail("guarded mouse-release refusal name did not match rejected predicate \(expected)")
+        }
+        var posts = 0
+        guard !postGuardedMouseReleaseIfAllowed(snapshot, post: { posts += 1 }), posts == 0 else {
+            fail("guarded mouse-release refusal fixture enqueued after \(expected)")
+        }
+    }
+    let snapshot = fixtureMouseReleaseSnapshot(
+        pointOwner: nil,
+        pointOwnerRefusal: AXPointResolutionFault(
+            code: "ax_hit_pid_mismatch", stage: "hit_pid", axError: nil,
+            hitPID: 999, hitRole: nil, parentDepth: nil,
+            matchingWindowIDs: nil, candidateGeometry: nil))
+    guard let data = try? JSONSerialization.data(withJSONObject: snapshot.refusalEvidence,
+                                                 options: [.sortedKeys, .fragmentsAllowed]),
+          let decoded = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          decoded["kind"] as? String == "guarded_hid_mouse_up_refusal",
+          let guardSnapshot = decoded["guard_snapshot"] as? [String: Any],
+          Set(guardSnapshot.keys) == Set([
+              "target_pid", "expected_window_id", "selected_window_id",
+              "accessibility_trusted", "screen_capture_trusted", "session_locked",
+              "on_console", "target_process_live", "frontmost_pid", "focused_window_id",
+              "fixture_matches_selected_window", "point_global", "current_window_frame",
+              "point_owner", "point_owner_refusal", "focused_window_refusal",
+              "cleanup_ax_budget_available",
+          ]),
+          guardSnapshot["point_owner"] is NSNull,
+          let refusal = guardSnapshot["point_owner_refusal"] as? [String: Any],
+          refusal["code"] as? String == "ax_hit_pid_mismatch",
+          (refusal["hit_pid"] as? Int) == 999,
+          refusal["hit_role"] == nil else {
+        fail("guarded mouse-release refusal evidence was not safe structured JSON")
+    }
+    return cases.count
+}
+
+struct AXPointFixtureNode {
+    let processID: AXPointRead<pid_t>
+    let role: AXPointRead<String>
+    let containingWindow: AXPointRead<Int>
+    let parent: AXPointRead<Int>
+    let geometry: AXPointRead<CGRect>
+}
+
+final class AXPointFixtureReadCounts {
+    var hit = 0
+    var role = 0
+    var window = 0
+    var parent = 0
+}
+
+func axPointFixtureQueries(nodes: [Int: AXPointFixtureNode], hit: AXPointRead<Int>,
+                           mapping: AXPointWindowMapping,
+                           reads: AXPointFixtureReadCounts) -> AXPointQueries<Int> {
+    AXPointQueries<Int>(
+        hitAtPoint: { reads.hit += 1; return hit },
+        processID: { nodes[$0]?.processID ?? .malformed },
+        role: { reads.role += 1; return nodes[$0]?.role ?? .malformed },
+        containingWindow: { reads.window += 1; return nodes[$0]?.containingWindow ?? .malformed },
+        parent: { reads.parent += 1; return nodes[$0]?.parent ?? .malformed },
+        geometry: { nodes[$0]?.geometry ?? .malformed },
+        mapGeometry: { _, _ in mapping },
+        sameElement: { $0 == $1 }
+    )
+}
+
+func expectAXPointRefusal<Element>(queries: AXPointQueries<Element>, expectedCode: String,
+                                   reads: AXPointFixtureReadCounts,
+                                   point: CGPoint = CGPoint(x: 50, y: 60)) -> AXPointResolutionFault {
+    do {
+        _ = try resolveAXPointOwnership(queries: queries, targetPID: 123,
+                                        expectedWindowID: 456,
+                                        point: point)
+        fail("AX point fixture unexpectedly resolved owner; expected \(expectedCode)")
+    } catch let fault as AXPointResolutionFault {
+        guard fault.code == expectedCode else {
+            fail("AX point fixture returned \(fault.code), expected \(expectedCode)")
+        }
+        let snapshot = fixtureMouseReleaseSnapshot(pointOwner: nil, pointOwnerRefusal: fault,
+                                                   point: point)
+        var posts = 0
+        guard !postGuardedMouseReleaseIfAllowed(snapshot, post: { posts += 1 }), posts == 0 else {
+            fail("AX point refusal \(expectedCode) reached the guarded HID post seam")
+        }
+        return fault
+    } catch {
+        fail("AX point fixture raised an unexpected error: \(error)")
+    }
+}
+
+func validateAXPointOwnershipFixtures() -> Int {
+    let frame = CGRect(x: 10, y: 20, width: 800, height: 600)
     let point = CGPoint(x: 50, y: 60)
-    let cursorWindowLevel = Int(CGWindowLevelForKey(.cursorWindow))
-    guard let canonicalWindowServerPath = canonicalFilesystemPath(windowServerExecutablePath) else {
-        fail("the fixed WindowServer executable path did not resolve canonically")
+    let uniqueMap = AXPointWindowMapping(available: true, budgetExceeded: false,
+                                         matchingWindowIDs: [456])
+    func node(pid: AXPointRead<pid_t> = .value(123),
+              role: AXPointRead<String> = .value(kAXWindowRole as String),
+              window: AXPointRead<Int> = .axError(.attributeUnsupported),
+              parent: AXPointRead<Int> = .malformed,
+              geometry: AXPointRead<CGRect> = .value(frame)) -> AXPointFixtureNode {
+        AXPointFixtureNode(processID: pid, role: role, containingWindow: window,
+                           parent: parent, geometry: geometry)
     }
-    func window(pid: Int, id: Int, layer: Int, alpha: Double = 1.0) -> [String: Any] {
-        [kCGWindowOwnerPID as String: NSNumber(value: pid),
-         kCGWindowNumber as String: NSNumber(value: id),
-         kCGWindowLayer as String: NSNumber(value: layer),
-         kCGWindowAlpha as String: NSNumber(value: alpha),
-         kCGWindowBounds as String: ["X": CGFloat(10), "Y": CGFloat(20),
-                                     "Width": CGFloat(800), "Height": CGFloat(600)]]
+    func queries(_ nodes: [Int: AXPointFixtureNode], hit: AXPointRead<Int> = .value(1),
+                 map: AXPointWindowMapping = uniqueMap,
+                 reads: AXPointFixtureReadCounts = AXPointFixtureReadCounts())
+        -> (AXPointQueries<Int>, AXPointFixtureReadCounts) {
+        (axPointFixtureQueries(nodes: nodes, hit: hit, mapping: map, reads: reads), reads)
     }
-    let fixture = window(pid: 123, id: 456, layer: 0)
-    let overlay = window(pid: 999, id: 900, layer: 3)
-    let transparent = window(pid: 999, id: 901, layer: 3, alpha: 0)
-    let cursor = window(pid: 31415, id: 7777, layer: cursorWindowLevel)
-    let verifiedPath: (pid_t) -> String? = { pid in
-        pid == 31415 ? canonicalWindowServerPath : "/Applications/foreign-process"
+    var count = 0
+
+    let (directQuery, _) = queries([1: node()])
+    let direct = try! resolveAXPointOwnership(queries: directQuery, targetPID: 123,
+                                               expectedWindowID: 456, point: point)
+    guard direct.resolutionOrigin == "hit_is_window", direct.parentDepth == 0,
+          direct.parentResolutionComplete, direct.hitPID == 123,
+          direct.candidateWindowID == 456 else {
+        fail("direct AXWindow point-owner fixture did not map the exact original window")
     }
-    let direct = topWindowRecord(at: point, in: [fixture],
-                                 cursorWindowLevel: cursorWindowLevel,
-                                 trustedWindowServerPath: canonicalWindowServerPath,
-                                 executablePathForPID: verifiedPath)
-    let cursorThenFixture = topWindowRecord(at: point, in: [cursor, fixture],
-                                            cursorWindowLevel: cursorWindowLevel,
-                                            trustedWindowServerPath: canonicalWindowServerPath,
-                                            executablePathForPID: verifiedPath)
-    let foreignCursor = window(pid: 999, id: 902, layer: cursorWindowLevel)
-    let foreignCursorSelection = topWindowRecord(
-        at: point, in: [foreignCursor, fixture], cursorWindowLevel: cursorWindowLevel,
-        trustedWindowServerPath: canonicalWindowServerPath,
-        executablePathForPID: verifiedPath)
-    let wrongLayerWindowServer = window(pid: 31415, id: 903, layer: cursorWindowLevel - 1)
-    let wrongLayerSelection = topWindowRecord(
-        at: point, in: [wrongLayerWindowServer, fixture],
-        cursorWindowLevel: cursorWindowLevel,
-        trustedWindowServerPath: canonicalWindowServerPath,
-        executablePathForPID: verifiedPath)
-    let failedAttestation = topWindowRecord(
-        at: point, in: [cursor, fixture], cursorWindowLevel: cursorWindowLevel,
-        trustedWindowServerPath: canonicalWindowServerPath, executablePathForPID: { _ in nil })
-    let unknownTrustedPath = topWindowRecord(
-        at: point, in: [cursor, fixture], cursorWindowLevel: cursorWindowLevel,
-        trustedWindowServerPath: nil, executablePathForPID: verifiedPath)
-    let blocked = topWindowRecord(at: point, in: [overlay, fixture],
-                                  cursorWindowLevel: cursorWindowLevel,
-                                  trustedWindowServerPath: canonicalWindowServerPath,
-                                  executablePathForPID: verifiedPath)
-    let throughTransparent = topWindowRecord(at: point, in: [transparent, fixture],
-                                             cursorWindowLevel: cursorWindowLevel,
-                                             trustedWindowServerPath: canonicalWindowServerPath,
-                                             executablePathForPID: verifiedPath)
-    let outside = topWindowRecord(at: CGPoint(x: 900, y: 900), in: [fixture],
-                                  cursorWindowLevel: cursorWindowLevel,
-                                  trustedWindowServerPath: canonicalWindowServerPath,
-                                  executablePathForPID: verifiedPath)
-    let malformed = topWindowRecord(at: point, in: [["unexpected": true], fixture],
-                                    cursorWindowLevel: cursorWindowLevel,
-                                    trustedWindowServerPath: canonicalWindowServerPath,
-                                    executablePathForPID: verifiedPath)
-    var malformedOwner = window(pid: 31415, id: 904, layer: cursorWindowLevel)
-    malformedOwner[kCGWindowOwnerPID as String] = "31415"
-    let malformedOwnerSelection = topWindowRecord(
-        at: point, in: [malformedOwner, fixture], cursorWindowLevel: cursorWindowLevel,
-        trustedWindowServerPath: canonicalWindowServerPath,
-        executablePathForPID: verifiedPath)
-    func allowsOriginalFixture(_ selection: TopWindowSelection) -> Bool {
-        guard let top = selection.window else { return false }
-        return mouseReleaseOwnershipGuardAllows(
-            targetPID: 123, expectedWindowID: 456,
-            accessibilityTrusted: true, screenCaptureTrusted: true,
-            sessionUnlocked: true, onConsole: true, targetProcessLive: true,
-            frontmostPID: 123, focusedWindowID: 456, selectedWindowID: 456,
-            fixtureMatches: true, point: point,
-            currentWindowFrame: CGRect(x: 10, y: 20, width: 800, height: 600),
-            topWindowPID: top.pid, topWindowID: top.windowID)
+    let directSnapshot = fixtureMouseReleaseSnapshot(pointOwner: direct)
+    var directPosts = 0
+    guard postGuardedMouseReleaseIfAllowed(directSnapshot, post: { directPosts += 1 }),
+          directPosts == 1 else {
+        fail("valid direct AXWindow owner did not pass the guarded post seam")
     }
-    guard direct.window?.pid == 123, direct.window?.windowID == 456,
-          direct.window?.layer == 0, direct.ignoredSystemCursorWindows.isEmpty,
-          allowsOriginalFixture(direct),
-          cursorThenFixture.window?.pid == 123,
-          cursorThenFixture.window?.windowID == 456,
-          cursorThenFixture.ignoredSystemCursorWindows.count == 1,
-          cursorThenFixture.ignoredSystemCursorWindows[0].pid == 31415,
-          cursorThenFixture.ignoredSystemCursorWindows[0].windowID == 7777,
-          cursorThenFixture.ignoredSystemCursorWindows[0].layer == cursorWindowLevel,
-          cursorThenFixture.ignoredSystemCursorWindows[0].jsonValue[
-              "verified_windowserver_owner"] as? Bool == true,
-          allowsOriginalFixture(cursorThenFixture),
-          foreignCursorSelection.window?.pid == 999,
-          foreignCursorSelection.window?.windowID == 902,
-          foreignCursorSelection.ignoredSystemCursorWindows.isEmpty,
-          !allowsOriginalFixture(foreignCursorSelection),
-          wrongLayerSelection.window?.pid == 31415,
-          wrongLayerSelection.window?.windowID == 903,
-          wrongLayerSelection.ignoredSystemCursorWindows.isEmpty,
-          !allowsOriginalFixture(wrongLayerSelection),
-          failedAttestation.window?.pid == 31415,
-          failedAttestation.ignoredSystemCursorWindows.isEmpty,
-          !allowsOriginalFixture(failedAttestation),
-          unknownTrustedPath.window?.pid == 31415,
-          unknownTrustedPath.ignoredSystemCursorWindows.isEmpty,
-          !allowsOriginalFixture(unknownTrustedPath),
-          blocked.window?.pid == 999, blocked.window?.windowID == 900,
-          blocked.window?.layer == 3,
-          !allowsOriginalFixture(blocked),
-          throughTransparent.window?.pid == 123,
-          throughTransparent.window?.windowID == 456,
-          allowsOriginalFixture(throughTransparent),
-          throughTransparent.ignoredSystemCursorWindows.isEmpty,
-          outside.window == nil,
-          malformed.window == nil,
-          malformedOwnerSelection.window == nil,
-          !allowsOriginalFixture(malformed),
-          !allowsOriginalFixture(malformedOwnerSelection) else {
-        fail("top-window-at-point fixtures did not preserve front-to-back ownership or fail closed")
+    count += 1
+
+    let quarterPoint = CGPoint(x: 1234.75, y: 702.75)
+    let quarterFrame = CGRect(x: 1200, y: 650, width: 100, height: 100)
+    let (quarterQuery, _) = queries([
+        1: node(geometry: .value(quarterFrame)),
+    ])
+    let quarterOwner = try! resolveAXPointOwnership(
+        queries: quarterQuery, targetPID: 123, expectedWindowID: 456, point: quarterPoint)
+    let quarterSnapshot = fixtureMouseReleaseSnapshot(
+        pointOwner: quarterOwner, point: quarterPoint, frame: quarterFrame)
+    var quarterPosts = 0
+    guard postGuardedMouseReleaseIfAllowed(quarterSnapshot, post: { quarterPosts += 1 }),
+          quarterPosts == 1 else {
+        fail("exact quarter-point AX coordinate failed to reach the original-window post seam")
     }
-    return 11
+    count += 1
+
+    let inexactCoordinates: [(CGPoint, String)] = [
+        (CGPoint(x: 1234.75001, y: 702.75), "ax_hit_point_not_exact"),
+        (CGPoint(x: CGFloat.greatestFiniteMagnitude, y: 702.75), "ax_hit_point_not_exact"),
+        (CGPoint(x: CGFloat.infinity, y: 702.75), "ax_hit_point_invalid"),
+        (CGPoint(x: CGFloat.nan, y: 702.75), "ax_hit_point_invalid"),
+    ]
+    for (invalidPoint, code) in inexactCoordinates {
+        let coordinateReads = AXPointFixtureReadCounts()
+        let (coordinateQuery, _) = queries([1: node()], reads: coordinateReads)
+        _ = expectAXPointRefusal(queries: coordinateQuery, expectedCode: code,
+                                 reads: coordinateReads, point: invalidPoint)
+        guard coordinateReads.hit == 0, coordinateReads.role == 0,
+              coordinateReads.window == 0, coordinateReads.parent == 0 else {
+            fail("invalid AX Float point performed accessibility reads before refusing")
+        }
+        count += 1
+    }
+
+    let expiredBudget = AXCleanupBudget(until: 0, now: { 1 })
+    var expiredAttributeCalls = 0
+    let expiredAttribute = copyAXAttributeValue(budget: expiredBudget) { _ in
+        expiredAttributeCalls += 1
+        return .success
+    }
+    guard case .budgetExceeded = expiredAttribute, expiredAttributeCalls == 0 else {
+        fail("expired AX cleanup budget called the native attribute reader")
+    }
+    count += 1
+
+    let (attributeQuery, _) = queries([
+        1: node(role: .value(kAXButtonRole as String), window: .value(2)),
+        2: node(),
+    ])
+    let attributeOwner = try! resolveAXPointOwnership(queries: attributeQuery, targetPID: 123,
+                                                       expectedWindowID: 456, point: point)
+    guard attributeOwner.resolutionOrigin == "window_attribute",
+          attributeOwner.parentDepth == 0 else {
+        fail("AXWindow attribute fixture did not map the owning window")
+    }
+    let attributeSnapshot = fixtureMouseReleaseSnapshot(pointOwner: attributeOwner)
+    var attributePosts = 0
+    guard postGuardedMouseReleaseIfAllowed(attributeSnapshot, post: { attributePosts += 1 }),
+          attributePosts == 1 else {
+        fail("valid containing-window attribute did not pass the guarded post seam")
+    }
+    count += 1
+
+    let (parentQuery, _) = queries([
+        1: node(role: .value(kAXGroupRole as String), parent: .value(2)),
+        2: node(),
+    ])
+    let parentOwner = try! resolveAXPointOwnership(queries: parentQuery, targetPID: 123,
+                                                    expectedWindowID: 456, point: point)
+    guard parentOwner.resolutionOrigin == "parent", parentOwner.parentDepth == 1 else {
+        fail("bounded parent fixture did not identify the original AXWindow")
+    }
+    let parentSnapshot = fixtureMouseReleaseSnapshot(pointOwner: parentOwner)
+    var parentPosts = 0
+    guard postGuardedMouseReleaseIfAllowed(parentSnapshot, post: { parentPosts += 1 }),
+          parentPosts == 1 else {
+        fail("valid bounded parent mapping did not pass the guarded post seam")
+    }
+    count += 1
+
+    let foreignReads = AXPointFixtureReadCounts()
+    let (foreignQuery, _) = queries([1: node(pid: .value(999))], reads: foreignReads)
+    let foreign = expectAXPointRefusal(queries: foreignQuery, expectedCode: "ax_hit_pid_mismatch",
+                                       reads: foreignReads)
+    guard foreign.hitPID == 999, foreign.hitRole == nil, foreignReads.role == 0,
+          foreignReads.window == 0, foreignReads.parent == 0 else {
+        fail("foreign PID was not rejected before role/window/parent reads")
+    }
+    count += 1
+
+    let (unknownPIDQuery, unknownReads) = queries([
+        1: node(pid: .axError(.cannotComplete)),
+    ])
+    _ = expectAXPointRefusal(queries: unknownPIDQuery, expectedCode: "ax_hit_pid_error",
+                              reads: unknownReads)
+    count += 1
+
+    let (missingHitQuery, missingHitReads) = queries([:], hit: .malformed)
+    _ = expectAXPointRefusal(queries: missingHitQuery, expectedCode: "ax_value_malformed",
+                              reads: missingHitReads)
+    count += 1
+
+    let (roleTypeQuery, roleTypeReads) = queries([
+        1: node(role: .malformed),
+    ])
+    _ = expectAXPointRefusal(queries: roleTypeQuery, expectedCode: "ax_value_malformed",
+                              reads: roleTypeReads)
+    count += 1
+
+    let (budgetQuery, budgetReads) = queries([:], hit: .budgetExceeded)
+    _ = expectAXPointRefusal(queries: budgetQuery, expectedCode: "ax_budget_exhausted",
+                              reads: budgetReads)
+    count += 1
+
+    let (partialQuery, partialReads) = queries([
+        1: node(role: .value(kAXGroupRole as String), parent: .axError(.cannotComplete)),
+    ])
+    let partial = expectAXPointRefusal(queries: partialQuery, expectedCode: "ax_parent_error",
+                                       reads: partialReads)
+    guard partial.axError == Int(AXError.cannotComplete.rawValue) else {
+        fail("partial parent traversal did not retain its AX error")
+    }
+    count += 1
+
+    let foreignParentReads = AXPointFixtureReadCounts()
+    let (foreignParentQuery, _) = queries([
+        1: node(role: .value(kAXGroupRole as String), parent: .value(2)),
+        2: node(pid: .value(999)),
+    ], reads: foreignParentReads)
+    _ = expectAXPointRefusal(queries: foreignParentQuery,
+                             expectedCode: "ax_parent_pid_mismatch",
+                             reads: foreignParentReads)
+    guard foreignParentReads.role == 1 else {
+        fail("foreign parent role was read before its PID was rejected")
+    }
+    count += 1
+
+    let (malformedWindowQuery, malformedWindowReads) = queries([
+        1: node(role: .value(kAXButtonRole as String), window: .malformed),
+    ])
+    _ = expectAXPointRefusal(queries: malformedWindowQuery,
+                             expectedCode: "ax_window_attribute_malformed",
+                             reads: malformedWindowReads)
+    count += 1
+
+    let cycleReads = AXPointFixtureReadCounts()
+    let (cycleQuery, _) = queries([
+        1: node(role: .value(kAXGroupRole as String), parent: .value(1)),
+    ], reads: cycleReads)
+    _ = expectAXPointRefusal(queries: cycleQuery, expectedCode: "ax_parent_cycle",
+                              reads: cycleReads)
+    count += 1
+
+    var depthNodes = [Int: AXPointFixtureNode]()
+    for identity in 1...9 {
+        depthNodes[identity] = node(role: .value(kAXGroupRole as String),
+                                    parent: identity < 9 ? .value(identity + 1) : .malformed)
+    }
+    let (depthQuery, depthReads) = queries(depthNodes)
+    let depth = expectAXPointRefusal(queries: depthQuery, expectedCode: "ax_parent_depth_limit",
+                                     reads: depthReads)
+    guard depth.parentDepth == 8 else { fail("parent-depth limit fixture did not stop at depth 8") }
+    count += 1
+
+    let foreignWindowReads = AXPointFixtureReadCounts()
+    let (foreignWindowQuery, _) = queries([
+        1: node(role: .value(kAXButtonRole as String), window: .value(2)),
+        2: node(pid: .value(999)),
+    ], reads: foreignWindowReads)
+    _ = expectAXPointRefusal(queries: foreignWindowQuery,
+                             expectedCode: "ax_window_pid_mismatch",
+                             reads: foreignWindowReads)
+    guard foreignWindowReads.role == 1 else {
+        fail("foreign containing-window element role was read before PID validation")
+    }
+    count += 1
+
+    let wrongRoleReads = AXPointFixtureReadCounts()
+    let (wrongRoleQuery, _) = queries([
+        1: node(role: .value(kAXButtonRole as String), window: .value(2)),
+        2: node(role: .value(kAXButtonRole as String)),
+    ], reads: wrongRoleReads)
+    _ = expectAXPointRefusal(queries: wrongRoleQuery, expectedCode: "ax_window_role_mismatch",
+                              reads: wrongRoleReads)
+    count += 1
+
+    let (nonfiniteQuery, nonfiniteReads) = queries([
+        1: node(geometry: .value(CGRect(x: CGFloat.infinity, y: 20, width: 800, height: 600))),
+    ])
+    _ = expectAXPointRefusal(queries: nonfiniteQuery, expectedCode: "ax_candidate_geometry_invalid",
+                              reads: nonfiniteReads)
+    count += 1
+
+    let (unavailableMapQuery, unavailableMapReads) = queries(
+        [1: node()], map: AXPointWindowMapping(available: false, budgetExceeded: false,
+                                                matchingWindowIDs: []))
+    _ = expectAXPointRefusal(queries: unavailableMapQuery,
+                              expectedCode: "cg_window_mapping_unavailable",
+                              reads: unavailableMapReads)
+    count += 1
+
+    let (wrongIDQuery, wrongIDReads) = queries(
+        [1: node()], map: AXPointWindowMapping(available: true, budgetExceeded: false,
+                                               matchingWindowIDs: [457]))
+    _ = expectAXPointRefusal(queries: wrongIDQuery, expectedCode: "cg_window_id_mismatch",
+                              reads: wrongIDReads)
+    count += 1
+
+    let (ambiguousQuery, ambiguousReads) = queries(
+        [1: node()], map: AXPointWindowMapping(available: true, budgetExceeded: false,
+                                               matchingWindowIDs: [456, 457]))
+    _ = expectAXPointRefusal(queries: ambiguousQuery,
+                              expectedCode: "cg_window_mapping_ambiguous_or_missing",
+                              reads: ambiguousReads)
+    count += 1
+
+    let (mappingBudgetQuery, mappingBudgetReads) = queries(
+        [1: node()], map: AXPointWindowMapping(available: false, budgetExceeded: true,
+                                               matchingWindowIDs: []))
+    _ = expectAXPointRefusal(queries: mappingBudgetQuery,
+                             expectedCode: "ax_budget_exhausted",
+                             reads: mappingBudgetReads)
+    count += 1
+
+    var guardLossPosts = 0
+    let guardLosses = [
+        fixtureMouseReleaseSnapshot(pointOwner: direct, accessibilityTrusted: false),
+        fixtureMouseReleaseSnapshot(pointOwner: direct, screenCaptureTrusted: false),
+        fixtureMouseReleaseSnapshot(pointOwner: direct, sessionLocked: true),
+        fixtureMouseReleaseSnapshot(pointOwner: direct, onConsole: false),
+        fixtureMouseReleaseSnapshot(pointOwner: direct, targetProcessLive: false),
+        fixtureMouseReleaseSnapshot(pointOwner: direct, frontmostPID: 999),
+        fixtureMouseReleaseSnapshot(pointOwner: direct, focusedWindowID: 455),
+        fixtureMouseReleaseSnapshot(pointOwner: direct, selectedWindowID: 455),
+        fixtureMouseReleaseSnapshot(pointOwner: direct, fixtureMatches: false),
+        fixtureMouseReleaseSnapshot(pointOwner: direct, point: CGPoint(x: 900, y: 60)),
+        fixtureMouseReleaseSnapshot(pointOwner: direct, focusedWindowID: nil,
+                                    focusedWindowRefusal: AXPointResolutionFault(
+                                        code: "ax_focused_window_pid_mismatch",
+                                        stage: "focused_window_pid", axError: nil,
+                                        hitPID: 999, hitRole: nil, parentDepth: 0,
+                                        matchingWindowIDs: nil, candidateGeometry: nil)),
+        fixtureMouseReleaseSnapshot(pointOwner: direct, cleanupBudgetAvailable: false),
+    ]
+    for snapshot in guardLosses {
+        guard !postGuardedMouseReleaseIfAllowed(snapshot, post: { guardLossPosts += 1 }) else {
+            fail("AX point-owner guard-loss fixture enqueued a mouse-up")
+        }
+    }
+    guard guardLossPosts == 0 else { fail("a lost original guard reached the AX cleanup post seam") }
+    count += guardLosses.count
+
+    return count
 }
 
 func eventGuardError(pid: pid_t, windowID: CGWindowID, fixtureName: String,
@@ -833,124 +1549,83 @@ func cleanupGuardError(pid: pid_t) -> String? {
     return nil
 }
 
-func topVisibleWindow(at point: CGPoint) -> TopWindowSelection {
-    guard let rawWindows = CGWindowListCopyWindowInfo(
-        [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
-    ) as? [[String: Any]] else {
-        return TopWindowSelection(window: nil, ignoredSystemCursorWindows: [])
-    }
-    let trustedWindowServerPath = canonicalFilesystemPath(windowServerExecutablePath)
-    let cursorWindowLevel = Int(CGWindowLevelForKey(.cursorWindow))
-    return topWindowRecord(
-        at: point, in: rawWindows, cursorWindowLevel: cursorWindowLevel,
-        trustedWindowServerPath: trustedWindowServerPath,
-        executablePathForPID: currentCanonicalExecutablePath)
-}
-
 func guardedMouseReleaseTarget(pid: pid_t, windowID: CGWindowID, fixtureName: String,
-                               x: Double, y: Double) -> [String: Any] {
-    if let error = eventGuardError(pid: pid, windowID: windowID,
-                                   fixtureName: fixtureName, requireFrontmost: true) {
-        fail("guarded HID mouse-up refused: \(error)")
-    }
-    let selected = requireEventTarget(pid: pid, windowID: windowID,
-                                      fixtureName: fixtureName, requireFrontmost: true)
-    let frame = CGRect(
-        x: selected["x"] as! Double, y: selected["y"] as! Double,
-        width: selected["width"] as! Double, height: selected["height"] as! Double
-    )
+                               x: Double, y: Double, budget: AXCleanupBudget)
+    -> MouseReleaseGuardSnapshot {
     let point = CGPoint(x: x, y: y)
-    let focusedID = focusedAXWindowID(pid: pid)
-    let topSelection = topVisibleWindow(at: point)
-    let top = topSelection.window
+    let rawWindows = windowRecords()
+    let fixtureWindows = rawWindows.filter { record in
+        let title = record["title"] as? String ?? ""
+        let width = record["width"] as? Double ?? 0
+        let height = record["height"] as? Double ?? 0
+        return (recordPID(record) == pid)
+            && title.localizedCaseInsensitiveContains(fixtureName)
+            && width >= 700 && height >= 500
+    }
+    let selected = rawWindows.first(where: {
+        recordPID($0) == pid && ($0["window_id"] as? Int) == Int(windowID)
+    })
+    let selectedWindowID = selected?["window_id"] as? Int
+    let frame: CGRect? = selected.flatMap { record in
+        guard let x = record["x"] as? Double, let y = record["y"] as? Double,
+              let width = record["width"] as? Double, let height = record["height"] as? Double else {
+            return nil
+        }
+        let candidate = CGRect(x: x, y: y, width: width, height: height)
+        return finiteFrame(candidate) ? candidate : nil
+    }
+    let focused = cleanupFocusedWindowID(pid: pid, expectedWindowID: windowID, budget: budget)
+    let queries = cleanupAXPointQueries(point: point, budget: budget)
+    let owner: AXPointOwnership?
+    let ownerRefusal: AXPointResolutionFault?
+    do {
+        owner = try resolveAXPointOwnership(queries: queries, targetPID: pid,
+                                            expectedWindowID: windowID, point: point)
+        ownerRefusal = nil
+    } catch let refusal as AXPointResolutionFault {
+        owner = nil
+        ownerRefusal = refusal
+    } catch {
+        owner = nil
+        ownerRefusal = AXPointResolutionFault(
+            code: "ax_point_owner_unexpected_error", stage: "resolve",
+            axError: nil, hitPID: nil, hitRole: nil, parentDepth: nil,
+            matchingWindowIDs: nil, candidateGeometry: nil)
+    }
     let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
     let session = consoleSessionFlags()
     let accessibilityTrusted = AXIsProcessTrusted()
     let screenCaptureTrusted = CGPreflightScreenCaptureAccess()
     let sessionLocked = session["session_locked"] as? Bool
-    let onConsoleObserved = session["on_console"] as? Bool
-    let sessionUnlocked = sessionLocked == false
-    let onConsole = onConsoleObserved == true
+    let onConsole = session["on_console"] as? Bool
+    let fixtureMatches = fixtureWindows.count == 1
+        && fixtureWindows.first?["window_id"] as? Int == Int(windowID)
     let targetProcessLive = NSRunningApplication(processIdentifier: pid) != nil
-    let fixtureMatches = (selected["title"] as? String ?? "")
-        .localizedCaseInsensitiveContains(fixtureName)
-    guard mouseReleaseOwnershipGuardAllows(
-        targetPID: pid, expectedWindowID: Int(windowID),
+    return MouseReleaseGuardSnapshot(
+        targetPID: pid, expectedWindowID: windowID, fixtureName: fixtureName,
         accessibilityTrusted: accessibilityTrusted,
         screenCaptureTrusted: screenCaptureTrusted,
-        sessionUnlocked: sessionUnlocked, onConsole: onConsole,
+        sessionLocked: sessionLocked, onConsole: onConsole,
         targetProcessLive: targetProcessLive, frontmostPID: frontmostPID,
-        focusedWindowID: focusedID, selectedWindowID: selected["window_id"] as? Int,
+        focusedWindowID: focused.0, selectedWindowID: selectedWindowID,
         fixtureMatches: fixtureMatches, point: point, currentWindowFrame: frame,
-        topWindowPID: top?.pid, topWindowID: top?.windowID
-    ) else {
-        let failedPredicates = mouseReleaseOwnershipGuardFailureNames(
-            targetPID: pid, expectedWindowID: Int(windowID),
-            accessibilityTrusted: accessibilityTrusted,
-            screenCaptureTrusted: screenCaptureTrusted,
-            sessionUnlocked: sessionUnlocked, onConsole: onConsole,
-            targetProcessLive: targetProcessLive, frontmostPID: frontmostPID,
-            focusedWindowID: focusedID, selectedWindowID: selected["window_id"] as? Int,
-            fixtureMatches: fixtureMatches, point: point, currentWindowFrame: frame,
-            topWindowPID: top?.pid, topWindowID: top?.windowID
-        )
-        let evidence = mouseReleaseGuardRefusalEvidence(
-            targetPID: pid, expectedWindowID: Int(windowID),
-            accessibilityTrusted: accessibilityTrusted,
-            screenCaptureTrusted: screenCaptureTrusted,
-            sessionLocked: sessionLocked, onConsole: onConsoleObserved,
-            targetProcessLive: targetProcessLive, frontmostPID: frontmostPID,
-            focusedWindowID: focusedID, selectedWindowID: selected["window_id"] as? Int,
-            fixtureMatches: fixtureMatches, point: point, currentWindowFrame: frame,
-            topWindow: top,
-            ignoredSystemCursorWindows: topSelection.ignoredSystemCursorWindows,
-            failedPredicates: failedPredicates
-        )
-        let reason = top == nil
-            ? "top window at the owned pointer is unavailable"
-            : "original fixture focus, current-frame point, or top-window ownership changed"
-        failMouseReleaseGuard(reason: reason, evidence: evidence)
-    }
-    guard let top else {
-        let failedPredicates = ["top_window_available", "top_window_pid_matches_target",
-                                "top_window_id_matches_expected"]
-        let evidence = mouseReleaseGuardRefusalEvidence(
-            targetPID: pid, expectedWindowID: Int(windowID),
-            accessibilityTrusted: accessibilityTrusted,
-            screenCaptureTrusted: screenCaptureTrusted,
-            sessionLocked: sessionLocked, onConsole: onConsoleObserved,
-            targetProcessLive: targetProcessLive, frontmostPID: frontmostPID,
-            focusedWindowID: focusedID, selectedWindowID: selected["window_id"] as? Int,
-            fixtureMatches: fixtureMatches, point: point, currentWindowFrame: frame,
-            topWindow: nil,
-            ignoredSystemCursorWindows: topSelection.ignoredSystemCursorWindows,
-            failedPredicates: failedPredicates
-        )
-        failMouseReleaseGuard(reason: "top window at the owned pointer is unavailable",
-                              evidence: evidence)
-    }
-    return [
-        "pid": Int(pid), "window_id": Int(windowID), "fixture": fixtureName,
-        "accessibility_trusted": accessibilityTrusted,
-        "screen_capture_trusted": screenCaptureTrusted,
-        "session_locked": !sessionUnlocked,
-        "on_console": onConsole,
-        "target_process_live": targetProcessLive,
-        "frontmost_pid": Int(frontmostPID ?? -1), "focused_window_id": focusedID ?? -1,
-        "point": ["x": x, "y": y],
-        "current_window_frame": [
-            "x": Double(frame.origin.x), "y": Double(frame.origin.y),
-            "width": Double(frame.width), "height": Double(frame.height),
-        ],
-        "top_window": ["pid": Int(top.pid), "window_id": top.windowID, "layer": top.layer],
-        "ignored_system_cursor_windows": topSelection.ignoredSystemCursorWindows.map(\.jsonValue),
-    ]
+        pointOwner: owner, pointOwnerRefusal: ownerRefusal,
+        focusedWindowRefusal: focused.1, cleanupBudgetAvailable: budget.hasTime
+    )
+}
+
+func recordPID(_ record: [String: Any]) -> pid_t? {
+    guard let pid = record["pid"] as? Int else { return nil }
+    return pid_t(pid)
 }
 
 func postCleanupMouseRelease(pid: pid_t, windowID: CGWindowID, fixtureName: String,
                              x: Double, y: Double) {
-    _ = guardedMouseReleaseTarget(pid: pid, windowID: windowID,
-                                  fixtureName: fixtureName, x: x, y: y)
+    let budget = AXCleanupBudget()
+    let initialSnapshot = guardedMouseReleaseTarget(pid: pid, windowID: windowID,
+                                                    fixtureName: fixtureName, x: x, y: y,
+                                                    budget: budget)
+    guard initialSnapshot.allowsRelease else { failMouseReleaseGuard(initialSnapshot) }
     guard let source = CGEventSource(stateID: .hidSystemState) else {
         fail("cannot create guarded HID mouse-up cleanup event source")
     }
@@ -963,19 +1638,26 @@ func postCleanupMouseRelease(pid: pid_t, windowID: CGWindowID, fixtureName: Stri
         fail("cannot create guarded HID mouse-up cleanup event")
     }
     resetUnmodifiedInputFlags(event)
-    let guardEvidence = guardedMouseReleaseTarget(pid: pid, windowID: windowID,
-                                                  fixtureName: fixtureName, x: x, y: y)
     guard event.flags.rawValue == 0 else { fail("guarded HID mouse-up cleanup retained modifier flags") }
     let flagsBeforePost = event.flags.rawValue
-    // This reuses the normal HID event-tap route only while a fresh guard proves
-    // the same fixture window is frontmost, AX-focused, contains the original
-    // pointer point, and is the top WindowServer window there. No activation or
-    // alternative posting route is attempted if any guard fails.
-    event.post(tap: .cghidEventTap)
+    let postSnapshot = guardedMouseReleaseTarget(pid: pid, windowID: windowID,
+                                                fixtureName: fixtureName, x: x, y: y,
+                                                budget: budget)
+    var enqueued = false
+    guard postGuardedMouseReleaseIfAllowed(postSnapshot, post: {
+        guard budget.hasTime else { return }
+        event.post(tap: .cghidEventTap)
+        enqueued = true
+    }), enqueued else {
+        failMouseReleaseGuard(postSnapshot)
+    }
+    // This keeps the original HID event-tap route and posts only while the fresh
+    // AX point owner, focused window, and all release guards still map to the
+    // selected fixture. Enqueue does not prove delivery or receipt.
     let senderSettle = withExtendedLifetime((source, event)) { settleInputSenderAfterPost() }
     emit(["pid": Int(pid), "window_id": Int(windowID), "fixture": fixtureName,
           "cleanup": "guarded-hid-mouse-up", "delivery_route": "guarded_cghid_event_tap",
-          "guarded_hid_enqueue": true, "guard_evidence": guardEvidence,
+          "guarded_hid_enqueue": true, "guard_evidence": postSnapshot.successEvidence,
           "event_flags_before_post_raw": flagsBeforePost,
           "event_flags_raw": flagsBeforePost,
           "event_flags_after_post_raw": event.flags.rawValue,
@@ -1798,7 +2480,7 @@ case "guard-fixtures":
     validatePlainInputFlagFixtures()
     let mouseReleaseOwnershipFixtures = validateMouseReleaseOwnershipGuardFixtures()
     let mouseReleaseRefusalFixtures = validateMouseReleaseRefusalFixtures()
-    let topWindowSelectionFixtures = validateTopWindowSelectionFixtures()
+    let axPointOwnershipFixtures = validateAXPointOwnershipFixtures()
     let inputSenderSettle = validateInputSenderSettleFixture()
     emit(["session_fixtures": "passed", "frontmost_guard_fixtures": "passed",
           "focused_window_guard_fixtures": "passed", "ax_press_guard_fixtures": "passed",
@@ -1807,8 +2489,8 @@ case "guard-fixtures":
           "mouse_release_ownership_fixture_count": mouseReleaseOwnershipFixtures,
           "mouse_release_refusal_fixtures": "passed",
           "mouse_release_refusal_fixture_count": mouseReleaseRefusalFixtures,
-          "top_window_selection_fixtures": "passed",
-          "top_window_selection_fixture_count": topWindowSelectionFixtures,
+          "ax_point_ownership_fixtures": "passed",
+          "ax_point_ownership_fixture_count": axPointOwnershipFixtures,
           "input_sender_settle_fixtures": "passed",
           "input_sender_settle_requested_ms": inputSenderSettle.requestedMilliseconds,
           "input_sender_settle_ms": inputSenderSettle.elapsedMilliseconds])

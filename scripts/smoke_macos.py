@@ -302,9 +302,18 @@ def require_guarded_mouse_cleanup_ack(result: dict, pid: int, window_id: int,
     guard = result.get("guard_evidence")
     if not isinstance(guard, dict):
         raise RuntimeError(f"mouse cleanup lacks its native guard evidence: {result!r}")
+    expected_guard_fields = {
+        "pid", "window_id", "fixture", "selected_window_id", "accessibility_trusted",
+        "screen_capture_trusted", "session_locked", "on_console", "target_process_live",
+        "frontmost_pid", "focused_window_id", "point", "current_window_frame",
+        "point_owner", "point_owner_refusal", "focused_window_refusal",
+        "cleanup_ax_budget_available",
+    }
+    if set(guard) != expected_guard_fields:
+        raise RuntimeError(f"mouse cleanup guard evidence has an unexpected shape: {sorted(guard)}")
     for field, expected in (("pid", pid), ("window_id", window_id),
                             ("fixture", fixture_name), ("frontmost_pid", pid),
-                            ("focused_window_id", window_id),
+                            ("focused_window_id", window_id), ("selected_window_id", window_id),
                             ("accessibility_trusted", True),
                             ("screen_capture_trusted", True),
                             ("session_locked", False), ("on_console", True),
@@ -321,35 +330,82 @@ def require_guarded_mouse_cleanup_ack(result: dict, pid: int, window_id: int,
                 f"mouse cleanup acknowledgement changed {field}: expected={expected!r}, "
                 f"observed={observed!r}")
     observed_point = guard.get("point")
-    if (not isinstance(observed_point, dict)
+    if (not isinstance(observed_point, dict) or set(observed_point) != {"x", "y"}
             or any(type(observed_point.get(axis)) not in (int, float)
+                   or not math.isfinite(float(observed_point[axis]))
                    or not math.isclose(float(observed_point[axis]), value, abs_tol=1e-6)
                    for axis, value in zip(("x", "y"), point))):
         raise RuntimeError(f"mouse cleanup guard evidence changed its owned point: {observed_point!r}")
     frame = guard.get("current_window_frame")
     if not isinstance(frame, dict) or not point_inside_frame(point, frame, tolerance=0):
         raise RuntimeError(f"mouse cleanup point is outside the current selected-window frame: {frame!r}")
-    top_window = guard.get("top_window")
-    if (not isinstance(top_window, dict)
-            or type(top_window.get("pid")) is not int or top_window.get("pid") != pid
-            or type(top_window.get("window_id")) is not int or top_window.get("window_id") != window_id
-            or type(top_window.get("layer")) is not int or top_window.get("layer") != 0):
-        raise RuntimeError(f"mouse cleanup point is not owned by the top selected fixture window: {top_window!r}")
-    ignored_cursor_windows = guard.get("ignored_system_cursor_windows")
-    if not isinstance(ignored_cursor_windows, list):
-        raise RuntimeError("mouse cleanup guard evidence lacks its ignored cursor-window audit list")
-    expected_cursor_fields = {
-        "pid", "window_id", "layer", "verified_windowserver_owner",
+    owner = guard.get("point_owner")
+    owner_fields = {
+        "method", "hit_pid", "hit_role", "resolution_origin", "parent_depth",
+        "parent_resolution_complete", "candidate_pid", "candidate_window_id",
+        "candidate_role", "candidate_geometry", "matching_window_ids", "global_point",
     }
-    for ignored in ignored_cursor_windows:
-        if (not isinstance(ignored, dict)
-                or set(ignored) != expected_cursor_fields
-                or type(ignored.get("pid")) is not int or ignored["pid"] <= 0
-                or type(ignored.get("window_id")) is not int or ignored["window_id"] <= 0
-                or type(ignored.get("layer")) is not int
-                or ignored.get("verified_windowserver_owner") is not True):
-            raise RuntimeError(
-                f"mouse cleanup has malformed ignored system cursor-window audit data: {ignored!r}")
+    if not isinstance(owner, dict) or set(owner) != owner_fields:
+        raise RuntimeError(f"mouse cleanup lacks exact AX point-owner evidence: {owner!r}")
+    allowed_hit_roles = {
+        "AXWindow", "AXApplication", "AXGroup", "AXButton", "AXCheckBox",
+        "AXImage", "AXLink", "AXProgressIndicator", "AXRadioButton", "AXScrollArea",
+        "AXSlider", "AXStaticText", "AXTextArea", "AXTextField", "AXUnknown", "AXOther",
+    }
+    resolution_origin = owner.get("resolution_origin")
+    if (owner.get("method") != "accessibility_point_hit"
+            or type(owner.get("hit_pid")) is not int or owner["hit_pid"] != pid
+            or not isinstance(owner.get("hit_role"), str)
+            or owner["hit_role"] not in allowed_hit_roles
+            or not isinstance(resolution_origin, str)
+            or resolution_origin not in {"hit_is_window", "window_attribute", "parent"}
+            or type(owner.get("parent_depth")) is not int
+            or not 0 <= owner["parent_depth"] <= 8
+            or type(owner.get("parent_resolution_complete")) is not bool
+            or owner["parent_resolution_complete"] is not True
+            or type(owner.get("candidate_pid")) is not int or owner["candidate_pid"] != pid
+            or type(owner.get("candidate_window_id")) is not int
+            or owner["candidate_window_id"] != window_id
+            or owner.get("candidate_role") != "AXWindow"
+            or owner.get("matching_window_ids") != [window_id]
+            or type(owner["matching_window_ids"][0]) is not int):
+        raise RuntimeError(f"mouse cleanup AX point owner does not map uniquely to the original window: {owner!r}")
+    origin = resolution_origin
+    if ((origin in {"hit_is_window", "window_attribute"} and owner["parent_depth"] != 0)
+            or (origin == "parent" and owner["parent_depth"] < 1)):
+        raise RuntimeError(f"mouse cleanup AX resolution origin/depth is inconsistent: {owner!r}")
+    if ((origin == "hit_is_window" and owner["hit_role"] != "AXWindow")
+            or (origin in {"window_attribute", "parent"}
+                and owner["hit_role"] == "AXWindow")):
+        raise RuntimeError(f"mouse cleanup AX hit role contradicts its resolution origin: {owner!r}")
+
+    def finite_number(value: object) -> bool:
+        return type(value) in (int, float) and math.isfinite(float(value))
+
+    geometry = owner.get("candidate_geometry")
+    if (not isinstance(geometry, dict) or set(geometry) != {"x", "y", "width", "height"}
+            or not all(finite_number(geometry.get(axis)) for axis in ("x", "y", "width", "height"))
+            or geometry["width"] <= 0 or geometry["height"] <= 0):
+        raise RuntimeError(f"mouse cleanup AX point-owner geometry is malformed: {geometry!r}")
+    if not isinstance(frame, dict) or set(frame) != {"x", "y", "width", "height"}:
+        raise RuntimeError(f"mouse cleanup selected frame is malformed: {frame!r}")
+    if (not all(finite_number(frame.get(axis)) for axis in ("x", "y", "width", "height"))
+            or frame["width"] <= 0 or frame["height"] <= 0
+            or any(abs(float(geometry[axis]) - float(frame[axis])) > 2
+                   for axis in ("x", "y", "width", "height"))):
+        raise RuntimeError(f"mouse cleanup AX geometry does not match the selected frame: {geometry!r} vs {frame!r}")
+    owner_point = owner.get("global_point")
+    if (not isinstance(owner_point, dict) or set(owner_point) != {"x", "y"}
+            or any(not finite_number(owner_point.get(axis)) for axis in ("x", "y"))
+            or any(not math.isclose(float(owner_point[axis]), value, abs_tol=1e-6)
+                   for axis, value in zip(("x", "y"), point))):
+        raise RuntimeError(f"mouse cleanup AX point owner changed the global hit point: {owner_point!r}")
+    if not point_inside_frame(point, geometry, tolerance=0):
+        raise RuntimeError(f"mouse cleanup hit point is outside its AX-owned window geometry: {geometry!r}")
+    if (guard.get("point_owner_refusal") is not None
+            or guard.get("focused_window_refusal") is not None
+            or guard.get("cleanup_ax_budget_available") is not True):
+        raise RuntimeError("mouse cleanup success ACK contains a refusal or expired AX budget")
 
 
 def require_input_sender_settle(result: dict, action: str) -> None:
@@ -1309,8 +1365,8 @@ def main() -> int:
                 or records["guard_fixtures"].get("mouse_release_ownership_fixture_count") != 18
                 or records["guard_fixtures"].get("mouse_release_refusal_fixtures") != "passed"
                 or records["guard_fixtures"].get("mouse_release_refusal_fixture_count") != 18
-                or records["guard_fixtures"].get("top_window_selection_fixtures") != "passed"
-                or records["guard_fixtures"].get("top_window_selection_fixture_count") != 11
+                or records["guard_fixtures"].get("ax_point_ownership_fixtures") != "passed"
+                or records["guard_fixtures"].get("ax_point_ownership_fixture_count") != 38
                 or records["guard_fixtures"].get("input_sender_settle_fixtures") != "passed"):
             raise RuntimeError("macOS UI guard fixtures did not pass")
         require_input_sender_settle({

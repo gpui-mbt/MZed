@@ -169,18 +169,23 @@ acknowledgement while a synthetic key or button down is pending, it records an
 attempt to release only that owned input. Keyboard cleanup remains PID-targeted.
 Mouse cleanup reuses the global HID event-tap route used by ordinary mouse
 events, but only after fresh checks confirm the original process is live and
-frontmost, the same unique visible fixture window is AX-focused, the saved
-screen point remains inside its current frame, and the top on-screen window at
-that point is the same process-owned fixture window after excluding only a
-window at the SDK's exact cursor-window level whose current owner PID resolves
-through `proc_pidpath` and canonical path resolution to the OS WindowServer
-executable. The helper records each excluded cursor window's PID, window ID,
-layer, and verified-owner flag in its guard evidence. Unknown or malformed
-records, failed owner/path verification, and every other overlay remain
-blocking. It never activates the app or falls back to another posting route
-when a guard fails. The helper reports that it enqueued a guarded HID release;
-that acknowledgement does not prove the editor handled it. Cleanup is refused
-when the console is locked or unavailable, and failed cleanup fails the
+frontmost, the same unique visible fixture window is AX-focused, and the saved
+global screen point remains inside its current frame. The cleanup-only helper
+sets its own Accessibility messaging timeout to 250 ms and applies one
+monotonic two-second budget across both the initial and immediate pre-post AX
+checks. It asks the public system-wide Accessibility API which element is at
+the exact point, checks that element's PID before reading its role, and accepts
+only an AXWindow reached directly, through that element's containing-window
+attribute, or by a complete bounded same-process parent walk. Its finite AX
+geometry must map uniquely within two points to the original level-zero
+WindowServer ID for the same PID. Foreign, unknown, malformed, ambiguous,
+timed-out, incomplete, or changed ownership fails closed before the HID post.
+The helper does not exempt the Dock or any other overlay, activate the app,
+or fall back to another posting route. Its structured evidence records the
+hit PID and role, resolution path, exact mapped window identity, geometry, and
+global point. The helper reports that it enqueued a guarded HID release; that
+acknowledgement does not prove the editor handled it. Cleanup is refused when
+the console is locked or unavailable, and failed cleanup fails the
 qualification. The mouse release-fault qualifier checks the resulting scene
 pixels and dispatch count before any subsequent mouse input. For the derived run, it
 also checks solid blue/pink pixels,
