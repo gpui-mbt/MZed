@@ -331,8 +331,45 @@ func cleanupGuardError(pid: pid_t) -> String? {
     return nil
 }
 
-func postCleanupMouseRelease(pid: pid_t, x: Double, y: Double) {
-    if let error = cleanupGuardError(pid: pid) { fail(error) }
+func cleanupMouseGuardError(pid: pid_t, windowID: CGWindowID, fixtureName: String) -> String? {
+    // Revalidate the original visible editor window before attempting a
+    // PID-scoped release. The event fields below are candidate metadata, not a
+    // guarantee that AppKit will route the event to this NSWindow. Cleanup
+    // never reactivates the app.
+    eventGuardError(pid: pid, windowID: windowID, fixtureName: fixtureName,
+                    requireFrontmost: false)
+}
+
+func setMouseEventWindowMetadata(_ event: CGEvent, windowID: CGWindowID) {
+    let value = Int64(windowID)
+    event.setIntegerValueField(.mouseEventWindowUnderMousePointer, value: value)
+    event.setIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent,
+                               value: value)
+}
+
+func mouseEventWindowMetadataMatches(_ event: CGEvent, windowID: CGWindowID) -> Bool {
+    let value = Int64(windowID)
+    return event.getIntegerValueField(.mouseEventWindowUnderMousePointer) == value
+        && event.getIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent) == value
+}
+
+func validateMouseEventWindowMetadataFixture() -> Int {
+    let fixtureWindowID: CGWindowID = 12345
+    guard let event = CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp,
+                              mouseCursorPosition: .zero, mouseButton: .left) else {
+        fail("cannot create mouse window-association fixture")
+    }
+    setMouseEventWindowMetadata(event, windowID: fixtureWindowID)
+    guard mouseEventWindowMetadataMatches(event, windowID: fixtureWindowID) else {
+        fail("CGEvent did not retain the candidate mouse window metadata fields")
+    }
+    return Int(fixtureWindowID)
+}
+
+func postCleanupMouseRelease(pid: pid_t, windowID: CGWindowID, fixtureName: String,
+                             x: Double, y: Double) {
+    if let error = cleanupMouseGuardError(pid: pid, windowID: windowID,
+                                          fixtureName: fixtureName) { fail(error) }
     guard let source = CGEventSource(stateID: .hidSystemState) else {
         fail("cannot create targeted mouse-up cleanup event source")
     }
@@ -345,17 +382,31 @@ func postCleanupMouseRelease(pid: pid_t, x: Double, y: Double) {
         fail("cannot create targeted mouse-up cleanup event")
     }
     resetUnmodifiedInputFlags(event)
-    if let error = cleanupGuardError(pid: pid) { fail(error) }
+    setMouseEventWindowMetadata(event, windowID: windowID)
+    if let error = cleanupMouseGuardError(pid: pid, windowID: windowID,
+                                          fixtureName: fixtureName) { fail(error) }
     guard event.flags.rawValue == 0 else { fail("targeted mouse-up cleanup retained modifier flags") }
+    guard mouseEventWindowMetadataMatches(event, windowID: windowID) else {
+        fail("targeted mouse-up cleanup lost its candidate window metadata")
+    }
     let flagsBeforePost = event.flags.rawValue
+    let windowUnderPointerBeforePost = event.getIntegerValueField(.mouseEventWindowUnderMousePointer)
+    let windowCanHandleBeforePost = event.getIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent)
     // Cleanup is a release only and goes directly to the PID that received the
-    // owned down. It never enters the global event stream or reactivates the app.
+    // owned down, with candidate CGWindowID metadata. The fields do not prove
+    // AppKit routing; the caller's target-side scene oracle checks delivery.
+    // This never enters the global event stream or reactivates the app.
     event.postToPid(pid)
     let senderSettle = withExtendedLifetime(source) { settleInputSenderAfterPost() }
-    emit(["pid": Int(pid), "cleanup": "targeted-mouse-up", "posted_to_target_pid": true,
+    emit(["pid": Int(pid), "window_id": Int(windowID), "fixture": fixtureName,
+          "cleanup": "targeted-mouse-up", "posted_to_target_pid": true,
           "event_flags_before_post_raw": flagsBeforePost,
           "event_flags_raw": flagsBeforePost,
           "event_flags_after_post_raw": event.flags.rawValue,
+          "mouse_event_window_under_pointer_before_post": windowUnderPointerBeforePost,
+          "mouse_event_window_under_pointer_that_can_handle_this_event_before_post": windowCanHandleBeforePost,
+          "mouse_event_window_under_pointer_after_post": event.getIntegerValueField(.mouseEventWindowUnderMousePointer),
+          "mouse_event_window_under_pointer_that_can_handle_this_event_after_post": event.getIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent),
           "sender_runloop_settle_requested_ms": senderSettle.requestedMilliseconds,
           "sender_runloop_settle_ms": senderSettle.elapsedMilliseconds])
 }
@@ -1157,7 +1208,7 @@ func colorComponents(_ path: String, red: UInt8, green: UInt8, blue: UInt8) -> [
 }
 
 guard CommandLine.arguments.count >= 2 else {
-    fail("usage: macos_ui.swift permissions|guard-fixtures|windows PID|displays PID WINDOW_ID FIXTURE|ax-state PID WINDOW_ID FIXTURE|ax-press PID WINDOW_ID FIXTURE FOCUSED_WINDOW_ID BUTTON_TITLE|activate PID WINDOW_ID FIXTURE|capture PID WINDOW_ID FIXTURE PNG|mouse-event PID WINDOW_ID FIXTURE ACTION X Y|key-event PID WINDOW_ID FIXTURE ACTION CODE FLAGS|text-event PID WINDOW_ID FIXTURE ACTION TEXT|cleanup-mouse PID X Y|cleanup-key PID CODE FLAGS|cleanup-text PID TEXT|resize PID WINDOW_ID FIXTURE WIDTH HEIGHT|ocr PNG|colors PNG RED GREEN BLUE")
+    fail("usage: macos_ui.swift permissions|guard-fixtures|windows PID|displays PID WINDOW_ID FIXTURE|ax-state PID WINDOW_ID FIXTURE|ax-press PID WINDOW_ID FIXTURE FOCUSED_WINDOW_ID BUTTON_TITLE|activate PID WINDOW_ID FIXTURE|capture PID WINDOW_ID FIXTURE PNG|mouse-event PID WINDOW_ID FIXTURE ACTION X Y|key-event PID WINDOW_ID FIXTURE ACTION CODE FLAGS|text-event PID WINDOW_ID FIXTURE ACTION TEXT|cleanup-mouse PID WINDOW_ID FIXTURE X Y|cleanup-key PID CODE FLAGS|cleanup-text PID TEXT|resize PID WINDOW_ID FIXTURE WIDTH HEIGHT|ocr PNG|colors PNG RED GREEN BLUE")
 }
 
 let arguments = Array(CommandLine.arguments.dropFirst())
@@ -1173,10 +1224,13 @@ case "guard-fixtures":
     validateSessionFlagFixtures()
     validateAXButtonTraversalFixtures()
     validatePlainInputFlagFixtures()
+    let mouseWindowMetadata = validateMouseEventWindowMetadataFixture()
     let inputSenderSettle = validateInputSenderSettleFixture()
     emit(["session_fixtures": "passed", "frontmost_guard_fixtures": "passed",
           "focused_window_guard_fixtures": "passed", "ax_press_guard_fixtures": "passed",
           "ax_traversal_fixtures": "passed", "plain_input_flags_fixtures": "passed",
+          "mouse_window_metadata_fixtures": "passed",
+          "mouse_window_metadata_fixture_window_id": mouseWindowMetadata,
           "input_sender_settle_fixtures": "passed",
           "input_sender_settle_requested_ms": inputSenderSettle.requestedMilliseconds,
           "input_sender_settle_ms": inputSenderSettle.elapsedMilliseconds])
@@ -1308,9 +1362,12 @@ case "text-event":
     postTextEvent(pid: pid, windowID: windowID, fixtureName: arguments[3],
                   action: arguments[4], text: arguments[5])
 case "cleanup-mouse":
-    guard arguments.count == 4 else { fail("cleanup-mouse requires PID X Y") }
+    guard arguments.count == 6 else { fail("cleanup-mouse requires PID WINDOW_ID FIXTURE X Y") }
+    let windowID = integer(arguments[2], "window ID")
+    guard (0...Int(UInt32.max)).contains(windowID) else { fail("window ID is out of range") }
     postCleanupMouseRelease(pid: pid_t(integer(arguments[1], "PID")),
-                            x: number(arguments[2], "X"), y: number(arguments[3], "Y"))
+                            windowID: CGWindowID(windowID), fixtureName: arguments[3],
+                            x: number(arguments[4], "X"), y: number(arguments[5], "Y"))
 case "cleanup-key":
     guard arguments.count == 4 else { fail("cleanup-key requires PID CODE FLAGS") }
     postCleanupKeyRelease(pid: pid_t(integer(arguments[1], "PID")),

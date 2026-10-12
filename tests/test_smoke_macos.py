@@ -367,8 +367,22 @@ def injected_native_helper(window, *, after_event=None):
             cleanup_attempts.append(arguments)
             if state["session_locked"] or not state["on_console"]:
                 raise RuntimeError("injected cleanup guard refused release while locked/off-console")
+            if (command == "cleanup-mouse"
+                    and (state["window_id"] != int(arguments[2])
+                         or not state["fixture_visible"])):
+                raise RuntimeError("injected cleanup guard refused changed original window identity")
             result = {"posted_to_target_pid": True, "event_flags_before_post_raw": 0,
                       "event_flags_raw": 0, "event_flags_after_post_raw": 0}
+            if command == "cleanup-mouse":
+                window_id = int(arguments[2])
+                result.update({
+                    "window_id": window_id,
+                    "fixture": arguments[3],
+                    "mouse_event_window_under_pointer_before_post": window_id,
+                    "mouse_event_window_under_pointer_that_can_handle_this_event_before_post": window_id,
+                    "mouse_event_window_under_pointer_after_post": window_id,
+                    "mouse_event_window_under_pointer_that_can_handle_this_event_after_post": window_id,
+                })
             result["sender_runloop_settle_requested_ms"] = 100
             result["sender_runloop_settle_ms"] = 100
             return result
@@ -490,7 +504,9 @@ class MacInputGuardTests(unittest.TestCase):
                 capture.mouse("down", image, (5.0, 6.0))
 
         self.assertEqual([event[:2] for event in emitted], [("mouse-event", "down")])
-        self.assertEqual(cleanup_attempts[0][0], "cleanup-mouse")
+        self.assertEqual(cleanup_attempts, [
+            ("cleanup-mouse", 123, 456, "fixture.txt", 12.5, 23.0),
+        ])
         self.assertEqual(capture.record["input_cleanup"][0]["outcome"],
                          "release_posted_to_original_pid")
         self.assertEqual(capture.record["input_cleanup"][0]["ownership_state"],
@@ -601,6 +617,58 @@ class MacInputGuardTests(unittest.TestCase):
 
         self.assertIn("lacks the required input sender RunLoop settle", error)
         self.assertEqual(cleanup_attempts[0][0], "cleanup-mouse")
+        self.assertEqual(capture.record["input_cleanup"][0]["outcome"], "failed")
+        self.assertIsNone(capture.owned_input)
+
+    def test_targeted_mouse_cleanup_requires_original_window_metadata(self):
+        for field, wrong_value in (
+            ("mouse_event_window_under_pointer_before_post", 999),
+            ("mouse_event_window_under_pointer_that_can_handle_this_event_before_post", 999),
+            ("fixture", "other-fixture.txt"),
+        ):
+            with self.subTest(field=field):
+                capture, window, _ = event_controller()
+                _state, _emitted, cleanup_attempts, injected = injected_native_helper(window)
+                capture.owned_input = {"kind": "mouse", "pid": 123, "window_id": 456,
+                                       "x": 50.0, "y": 60.0,
+                                       "state": "down_pending_ack"}
+
+                def wrong_window_metadata(_binary, *arguments, **kwargs):
+                    result = injected(_binary, *arguments, **kwargs)
+                    if arguments[0] == "cleanup-mouse":
+                        return {**result, field: wrong_value}
+                    return result
+
+                with patch.object(smoke, "helper_json", side_effect=wrong_window_metadata):
+                    error = capture.release_owned_input("test mismatched window metadata")
+
+                self.assertIn("mouse cleanup", error)
+                self.assertEqual(cleanup_attempts, [
+                    ("cleanup-mouse", 123, 456, "fixture.txt", 50.0, 60.0),
+                ])
+                self.assertEqual(capture.record["input_cleanup"][0]["outcome"], "failed")
+                self.assertIsNone(capture.owned_input)
+
+    def test_mouse_cleanup_refuses_if_original_visible_window_disappears(self):
+        capture, window, image = event_controller()
+
+        def lose_original_window_after_down(state, command, action, _payload):
+            if command == "mouse-event" and action == "down":
+                state["window_id"] = 999
+                state["fixture_visible"] = False
+
+        state, emitted, cleanup_attempts, injected = injected_native_helper(
+            window, after_event=lose_original_window_after_down)
+        with patch.object(smoke, "helper_json", side_effect=injected):
+            capture.mouse("down", image, (5.0, 6.0))
+            with self.assertRaisesRegex(RuntimeError, "targeted input release also failed"):
+                capture.mouse("up", image, (5.0, 6.0))
+
+        self.assertEqual(state["window_id"], 999)
+        self.assertEqual([event[:2] for event in emitted], [("mouse-event", "down")])
+        self.assertEqual(cleanup_attempts, [
+            ("cleanup-mouse", 123, 456, "fixture.txt", 12.5, 23.0),
+        ])
         self.assertEqual(capture.record["input_cleanup"][0]["outcome"], "failed")
         self.assertIsNone(capture.owned_input)
 

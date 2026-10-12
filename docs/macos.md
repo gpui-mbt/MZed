@@ -166,9 +166,17 @@ immediately before each capture, mouse/key/text event and Accessibility window
 mutation. Paired key and pointer events are sent separately so a guard failure
 cannot emit the remaining global events. On guard failure or uncertain helper
 acknowledgement while a synthetic key or button down is pending, it records an
-attempt to release only that input directly to the original PID; cleanup is
-refused when the console is locked or unavailable, and failed cleanup fails the
-qualification. For the derived run, it also checks solid blue/pink pixels,
+attempt to release only that input directly to the original PID. A pending mouse
+release also carries the original fixture name and WindowServer ID, revalidates
+that visible process-owned window without reactivating the app, and records that
+ID in the release event's two window-under-pointer fields. These fields are
+candidate event metadata; they do not by themselves prove AppKit routed the
+event to that window. Cleanup is refused when the console is locked or
+unavailable, and failed cleanup fails the qualification. The mouse
+release-fault qualifier checks the resulting scene pixels and dispatch count
+before any subsequent mouse input; a helper post acknowledgement alone is not
+treated as proof that the editor handled the release. For the derived run, it
+also checks solid blue/pink pixels,
 120×18 logical scene bounds
 scaled once, a held press across two repeated same-window resizes with unchanged
 dispatches, outside-release cancellation, and late bare releases after disable

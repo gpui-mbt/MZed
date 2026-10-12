@@ -288,6 +288,25 @@ def require_unmodified_input_flags(result: dict, action: str) -> None:
         raise RuntimeError(f"plain {action} retained synthetic modifier flags: {flags!r}")
 
 
+def require_mouse_cleanup_window_metadata(result: dict, window_id: int,
+                                          fixture_name: str) -> None:
+    if result.get("window_id") != window_id:
+        raise RuntimeError(
+            f"mouse cleanup metadata did not retain its original selected window ID: "
+            f"expected={window_id!r}, observed={result.get('window_id')!r}")
+    if result.get("fixture") != fixture_name:
+        raise RuntimeError(
+            f"mouse cleanup metadata did not retain its original fixture name: "
+            f"expected={fixture_name!r}, observed={result.get('fixture')!r}")
+    for field in ("mouse_event_window_under_pointer_before_post",
+                  "mouse_event_window_under_pointer_that_can_handle_this_event_before_post"):
+        observed = result.get(field)
+        if type(observed) is not int or observed != window_id:
+            raise RuntimeError(
+                f"mouse cleanup window metadata did not match the original selected window: "
+                f"field={field}, expected={window_id!r}, observed={observed!r}")
+
+
 def require_input_sender_settle(result: dict, action: str) -> None:
     requested = result.get("sender_runloop_settle_requested_ms")
     elapsed = result.get("sender_runloop_settle_ms")
@@ -490,7 +509,8 @@ class MacSmoke:
         self.owned_input = None
         kind = owned["kind"]
         if kind == "mouse":
-            command = ("cleanup-mouse", owned["pid"], owned["x"], owned["y"])
+            command = ("cleanup-mouse", owned["pid"], owned["window_id"],
+                       self.fixture.name, owned["x"], owned["y"])
         elif kind == "key":
             command = ("cleanup-key", owned["pid"], owned["key_code"], owned["flags"])
         elif kind == "text":
@@ -506,6 +526,9 @@ class MacSmoke:
                 raise RuntimeError(f"targeted release was not confirmed: {result!r}")
             if kind in ("mouse", "text"):
                 require_unmodified_input_flags(result, f"{kind} cleanup")
+            if kind == "mouse":
+                require_mouse_cleanup_window_metadata(result, owned["window_id"],
+                                                       self.fixture.name)
             require_input_sender_settle(result, f"{kind} cleanup")
             attempt["outcome"] = "release_posted_to_original_pid"
             attempt["result"] = result
@@ -1235,6 +1258,8 @@ def main() -> int:
                 or records["guard_fixtures"].get("ax_press_guard_fixtures") != "passed"
                 or records["guard_fixtures"].get("ax_traversal_fixtures") != "passed"
                 or records["guard_fixtures"].get("plain_input_flags_fixtures") != "passed"
+                or records["guard_fixtures"].get("mouse_window_metadata_fixtures") != "passed"
+                or records["guard_fixtures"].get("mouse_window_metadata_fixture_window_id") != 12345
                 or records["guard_fixtures"].get("input_sender_settle_fixtures") != "passed"):
             raise RuntimeError("macOS UI guard fixtures did not pass")
         require_input_sender_settle({
