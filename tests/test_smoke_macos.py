@@ -336,9 +336,14 @@ def event_controller():
 
 
 def injected_native_helper(window, *, after_event=None):
-    """Inject the native pre-event guard and separate PID-scoped cleanup emitter."""
+    """Inject the native pre-event guard and release-only cleanup routes."""
     state = {"frontmost_pid": 123, "window_id": 456, "fixture_visible": True,
-             "session_locked": False, "on_console": True}
+             "session_locked": False, "on_console": True, "accessibility": True,
+             "screen_recording": True,
+             "focused_window_id": 456, "top_window_pid": 123, "top_window_id": 456,
+             "current_window_frame": {"x": 10.0, "y": 20.0,
+                                      "width": 800.0, "height": 600.0},
+             "cleanup_enqueued": False}
     emitted = []
     cleanup_attempts = []
 
@@ -365,24 +370,57 @@ def injected_native_helper(window, *, after_event=None):
             return result
         if command in ("cleanup-mouse", "cleanup-key", "cleanup-text"):
             cleanup_attempts.append(arguments)
+            if not state["accessibility"] or not state["screen_recording"]:
+                raise RuntimeError("injected guarded HID cleanup refused revoked TCC permission")
             if state["session_locked"] or not state["on_console"]:
                 raise RuntimeError("injected cleanup guard refused release while locked/off-console")
-            if (command == "cleanup-mouse"
-                    and (state["window_id"] != int(arguments[2])
-                         or not state["fixture_visible"])):
-                raise RuntimeError("injected cleanup guard refused changed original window identity")
-            result = {"posted_to_target_pid": True, "event_flags_before_post_raw": 0,
-                      "event_flags_raw": 0, "event_flags_after_post_raw": 0}
             if command == "cleanup-mouse":
+                pid = int(arguments[1])
                 window_id = int(arguments[2])
-                result.update({
+                fixture = arguments[3]
+                point = (float(arguments[4]), float(arguments[5]))
+                frame = state["current_window_frame"]
+                if (state["frontmost_pid"] != pid
+                        or state["window_id"] != window_id
+                        or not state["fixture_visible"]
+                        or state["focused_window_id"] != window_id
+                        or state["top_window_pid"] != pid
+                        or state["top_window_id"] != window_id
+                        or not smoke.point_inside_frame(point, frame, tolerance=0)):
+                    raise RuntimeError(
+                        "injected guarded HID cleanup refused lost focus, current-frame point, "
+                        "or top-window ownership")
+                state["cleanup_enqueued"] = True
+                result = {
+                    "pid": pid,
                     "window_id": window_id,
-                    "fixture": arguments[3],
-                    "mouse_event_window_under_pointer_before_post": window_id,
-                    "mouse_event_window_under_pointer_that_can_handle_this_event_before_post": window_id,
-                    "mouse_event_window_under_pointer_after_post": window_id,
-                    "mouse_event_window_under_pointer_that_can_handle_this_event_after_post": window_id,
-                })
+                    "fixture": fixture,
+                    "cleanup": "guarded-hid-mouse-up",
+                    "delivery_route": "guarded_cghid_event_tap",
+                    "guarded_hid_enqueue": True,
+                    "event_flags_before_post_raw": 0,
+                    "event_flags_raw": 0,
+                    "event_flags_after_post_raw": 0,
+                    "guard_evidence": {
+                        "pid": pid,
+                        "window_id": window_id,
+                        "fixture": fixture,
+                        "accessibility_trusted": state["accessibility"],
+                        "screen_capture_trusted": state["screen_recording"],
+                        "session_locked": state["session_locked"],
+                        "on_console": state["on_console"],
+                        "target_process_live": True,
+                        "frontmost_pid": pid,
+                        "focused_window_id": window_id,
+                        "point": {"x": point[0], "y": point[1]},
+                        "current_window_frame": dict(frame),
+                        "top_window": {"pid": pid, "window_id": window_id, "layer": 0},
+                    },
+                }
+            else:
+                result = {"posted_to_target_pid": True,
+                          "event_flags_before_post_raw": 0,
+                          "event_flags_raw": 0, "event_flags_after_post_raw": 0}
             result["sender_runloop_settle_requested_ms"] = 100
             result["sender_runloop_settle_ms"] = 100
             return result
@@ -465,7 +503,8 @@ class MacInputGuardTests(unittest.TestCase):
         self.assertEqual([event[:2] for event in emitted], [("mouse-event", "down")])
         self.assertEqual(cleanup_attempts[0][0], "cleanup-mouse")
         self.assertEqual(capture.record["input_cleanup"][0]["outcome"],
-                         "release_posted_to_original_pid")
+                         "guarded_hid_release_enqueued")
+        self.assertTrue(_state["cleanup_enqueued"])
         self.assertIsNone(capture.owned_input)
 
     def test_unicode_with_inherited_modifiers_is_released_and_fails_closed(self):
@@ -490,7 +529,7 @@ class MacInputGuardTests(unittest.TestCase):
                          "release_posted_to_original_pid")
         self.assertIsNone(capture.owned_input)
 
-    def test_mouse_down_ack_failure_still_attempts_targeted_release(self):
+    def test_mouse_down_ack_failure_still_attempts_guarded_hid_release(self):
         capture, window, image = event_controller()
 
         def lose_ack_after_down(_state, command, action, _payload):
@@ -508,9 +547,10 @@ class MacInputGuardTests(unittest.TestCase):
             ("cleanup-mouse", 123, 456, "fixture.txt", 12.5, 23.0),
         ])
         self.assertEqual(capture.record["input_cleanup"][0]["outcome"],
-                         "release_posted_to_original_pid")
+                         "guarded_hid_release_enqueued")
         self.assertEqual(capture.record["input_cleanup"][0]["ownership_state"],
                          "down_pending_ack")
+        self.assertTrue(_state["cleanup_enqueued"])
         self.assertIsNone(capture.owned_input)
 
     def test_mouse_ack_without_sender_settle_fails_and_releases_pending_button(self):
@@ -531,7 +571,8 @@ class MacInputGuardTests(unittest.TestCase):
         self.assertEqual([event[:2] for event in emitted], [("mouse-event", "down")])
         self.assertEqual(cleanup_attempts[0][0], "cleanup-mouse")
         self.assertEqual(capture.record["input_cleanup"][0]["outcome"],
-                         "release_posted_to_original_pid")
+                         "guarded_hid_release_enqueued")
+        self.assertTrue(_state["cleanup_enqueued"])
         self.assertIsNone(capture.owned_input)
 
     def test_key_down_ack_failure_still_attempts_targeted_release(self):
@@ -598,7 +639,7 @@ class MacInputGuardTests(unittest.TestCase):
         self.assertEqual(capture.record["input_cleanup"][0]["outcome"], "failed")
         self.assertIsNone(capture.owned_input)
 
-    def test_targeted_mouse_cleanup_requires_sender_settle(self):
+    def test_guarded_mouse_cleanup_requires_sender_settle(self):
         capture, window, _ = event_controller()
         _state, _emitted, cleanup_attempts, injected = injected_native_helper(window)
         capture.owned_input = {"kind": "mouse", "pid": 123, "window_id": 456,
@@ -620,32 +661,73 @@ class MacInputGuardTests(unittest.TestCase):
         self.assertEqual(capture.record["input_cleanup"][0]["outcome"], "failed")
         self.assertIsNone(capture.owned_input)
 
-    def test_targeted_mouse_cleanup_requires_original_window_metadata(self):
-        for field, wrong_value in (
-            ("mouse_event_window_under_pointer_before_post", 999),
-            ("mouse_event_window_under_pointer_that_can_handle_this_event_before_post", 999),
-            ("fixture", "other-fixture.txt"),
+    def test_guarded_mouse_cleanup_ack_rejects_unproven_route_and_wrong_owner(self):
+        for edit in (
+            lambda result: result.update(cleanup="targeted-mouse-up"),
+            lambda result: result.update(delivery_route="pid-targeted"),
+            lambda result: result.pop("guarded_hid_enqueue"),
+            lambda result: result.update(posted_to_target_pid=True),
+            lambda result: result["guard_evidence"].update(focused_window_id=455),
+            lambda result: result["guard_evidence"]["top_window"].update(pid=999),
+            lambda result: result["guard_evidence"]["top_window"].update(window_id=457),
+            lambda result: result["guard_evidence"]["top_window"].update(layer=False),
+            lambda result: result["guard_evidence"]["current_window_frame"].update(x=True),
         ):
-            with self.subTest(field=field):
+            with self.subTest(edit=edit):
                 capture, window, _ = event_controller()
                 _state, _emitted, cleanup_attempts, injected = injected_native_helper(window)
                 capture.owned_input = {"kind": "mouse", "pid": 123, "window_id": 456,
                                        "x": 50.0, "y": 60.0,
                                        "state": "down_pending_ack"}
 
-                def wrong_window_metadata(_binary, *arguments, **kwargs):
+                def wrong_guard_ack(_binary, *arguments, **kwargs):
                     result = injected(_binary, *arguments, **kwargs)
                     if arguments[0] == "cleanup-mouse":
-                        return {**result, field: wrong_value}
+                        result = dict(result)
+                        result["guard_evidence"] = dict(result["guard_evidence"])
+                        result["guard_evidence"]["top_window"] = dict(
+                            result["guard_evidence"]["top_window"])
+                        edit(result)
                     return result
 
-                with patch.object(smoke, "helper_json", side_effect=wrong_window_metadata):
-                    error = capture.release_owned_input("test mismatched window metadata")
+                with patch.object(smoke, "helper_json", side_effect=wrong_guard_ack):
+                    error = capture.release_owned_input("test invalid guarded-HID acknowledgement")
 
-                self.assertIn("mouse cleanup", error)
+                self.assertTrue(error)
                 self.assertEqual(cleanup_attempts, [
                     ("cleanup-mouse", 123, 456, "fixture.txt", 50.0, 60.0),
                 ])
+                self.assertEqual(capture.record["input_cleanup"][0]["outcome"], "failed")
+                self.assertIsNone(capture.owned_input)
+
+    def test_guarded_mouse_release_fails_closed_on_live_focus_point_or_occlusion_loss(self):
+        failures = (
+            ("frontmost_pid", 999, "guarded HID cleanup refused"),
+            ("focused_window_id", 455, "guarded HID cleanup refused"),
+            ("top_window_pid", 999, "guarded HID cleanup refused"),
+            ("top_window_id", 457, "guarded HID cleanup refused"),
+            ("accessibility", False, "revoked TCC permission"),
+            ("screen_recording", False, "revoked TCC permission"),
+            ("session_locked", True, "locked/off-console"),
+            ("on_console", False, "locked/off-console"),
+            ("current_window_frame", {"x": 100, "y": 100, "width": 30, "height": 30},
+             "guarded HID cleanup refused"),
+        )
+        for field, value, message in failures:
+            with self.subTest(field=field):
+                capture, window, _ = event_controller()
+                state, _emitted, cleanup_attempts, injected = injected_native_helper(window)
+                state[field] = value
+                capture.owned_input = {"kind": "mouse", "pid": 123, "window_id": 456,
+                                       "x": 50.0, "y": 60.0,
+                                       "state": "down_pending_ack"}
+                with patch.object(smoke, "helper_json", side_effect=injected):
+                    error = capture.release_owned_input("test target guard loss")
+
+                self.assertIn(message, error)
+                self.assertEqual(cleanup_attempts[0][0], "cleanup-mouse")
+                self.assertFalse(state["cleanup_enqueued"],
+                                 "the cleanup path must not enqueue HID input after guard loss")
                 self.assertEqual(capture.record["input_cleanup"][0]["outcome"], "failed")
                 self.assertIsNone(capture.owned_input)
 
@@ -670,6 +752,7 @@ class MacInputGuardTests(unittest.TestCase):
             ("cleanup-mouse", 123, 456, "fixture.txt", 12.5, 23.0),
         ])
         self.assertEqual(capture.record["input_cleanup"][0]["outcome"], "failed")
+        self.assertFalse(state["cleanup_enqueued"])
         self.assertIsNone(capture.owned_input)
 
     def test_key_can_bind_down_event_to_expected_ax_focus(self):

@@ -126,6 +126,137 @@ func axPressGuardAllows(targetPID: pid_t, focusedPID: pid_t?, expectedFocusedWin
         && traversalComplete
 }
 
+func mouseReleaseOwnershipGuardAllows(targetPID: pid_t, expectedWindowID: Int,
+                                      accessibilityTrusted: Bool, screenCaptureTrusted: Bool,
+                                      sessionUnlocked: Bool, onConsole: Bool, targetProcessLive: Bool,
+                                      frontmostPID: pid_t?, focusedWindowID: Int?,
+                                      selectedWindowID: Int?, fixtureMatches: Bool,
+                                      point: CGPoint, currentWindowFrame: CGRect?,
+                                      topWindowPID: pid_t?, topWindowID: Int?) -> Bool {
+    guard let currentWindowFrame else { return false }
+    return accessibilityTrusted && screenCaptureTrusted && sessionUnlocked && onConsole
+        && targetProcessLive
+        && frontmostPID == targetPID
+        && focusedWindowID == expectedWindowID
+        && selectedWindowID == expectedWindowID
+        && fixtureMatches
+        && currentWindowFrame.contains(point)
+        && topWindowPID == targetPID
+        && topWindowID == expectedWindowID
+}
+
+func validateMouseReleaseOwnershipGuardFixtures() -> Int {
+    let frame = CGRect(x: 10, y: 20, width: 800, height: 600)
+    let point = CGPoint(x: 50, y: 60)
+    func allows(accessibilityTrusted: Bool = true, screenCaptureTrusted: Bool = true,
+                sessionUnlocked: Bool = true, onConsole: Bool = true,
+                targetProcessLive: Bool = true,
+                frontmostPID: pid_t? = 123, focusedWindowID: Int? = 456,
+                selectedWindowID: Int? = 456, fixtureMatches: Bool = true,
+                point: CGPoint = point, currentWindowFrame: CGRect? = frame,
+                topWindowPID: pid_t? = 123, topWindowID: Int? = 456) -> Bool {
+        mouseReleaseOwnershipGuardAllows(
+            targetPID: 123, expectedWindowID: 456,
+            accessibilityTrusted: accessibilityTrusted,
+            screenCaptureTrusted: screenCaptureTrusted,
+            sessionUnlocked: sessionUnlocked, onConsole: onConsole,
+            targetProcessLive: targetProcessLive, frontmostPID: frontmostPID,
+            focusedWindowID: focusedWindowID, selectedWindowID: selectedWindowID,
+            fixtureMatches: fixtureMatches, point: point,
+            currentWindowFrame: currentWindowFrame, topWindowPID: topWindowPID,
+            topWindowID: topWindowID
+        )
+    }
+    guard allows(),
+          !allows(accessibilityTrusted: false),
+          !allows(screenCaptureTrusted: false),
+          !allows(sessionUnlocked: false),
+          !allows(onConsole: false),
+          !allows(targetProcessLive: false),
+          !allows(frontmostPID: 999),
+          !allows(focusedWindowID: 455),
+          !allows(focusedWindowID: nil),
+          !allows(selectedWindowID: 455),
+          !allows(fixtureMatches: false),
+          !allows(point: CGPoint(x: 900, y: 60)),
+          !allows(currentWindowFrame: nil),
+          !allows(currentWindowFrame: CGRect(x: 10, y: 20, width: 30, height: 30)),
+          !allows(currentWindowFrame: CGRect(x: 100, y: 100, width: 800, height: 600)),
+          !allows(topWindowPID: 999),
+          !allows(topWindowID: 457),
+          !allows(topWindowPID: nil, topWindowID: nil) else {
+        fail("guarded mouse-release fixtures did not reject lost ownership, focus, point, or top-window identity")
+    }
+    return 18
+}
+
+struct WindowAtPoint {
+    let pid: pid_t
+    let windowID: Int
+    let layer: Int
+}
+
+func topWindowRecord(at point: CGPoint, in rawWindows: [[String: Any]]) -> WindowAtPoint? {
+    // CGWindowListOption.optionOnScreenOnly returns windows front-to-back.
+    // Treat an unparseable window at the point as unknown ownership and fail
+    // closed rather than skipping a possible occluder.
+    for window in rawWindows {
+        guard let rawBounds = window[kCGWindowBounds as String] as? [String: CGFloat],
+              let x = rawBounds["X"], let y = rawBounds["Y"],
+              let width = rawBounds["Width"], let height = rawBounds["Height"],
+              width > 0, height > 0 else {
+            return nil
+        }
+        let frame = CGRect(x: x, y: y, width: width, height: height)
+        guard frame.contains(point) else { continue }
+        if let alpha = (window[kCGWindowAlpha as String] as? NSNumber)?.doubleValue,
+           alpha <= 0 {
+            continue
+        }
+        guard let rawPID = (window[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value,
+              let rawWindowID = (window[kCGWindowNumber as String] as? NSNumber)?.intValue,
+              let layer = (window[kCGWindowLayer as String] as? NSNumber)?.intValue else {
+            return nil
+        }
+        return WindowAtPoint(pid: rawPID, windowID: rawWindowID, layer: layer)
+    }
+    return nil
+}
+
+func validateTopWindowSelectionFixtures() -> Int {
+    let point = CGPoint(x: 50, y: 60)
+    func window(pid: Int, id: Int, layer: Int, alpha: Double = 1.0) -> [String: Any] {
+        [kCGWindowOwnerPID as String: NSNumber(value: pid),
+         kCGWindowNumber as String: NSNumber(value: id),
+         kCGWindowLayer as String: NSNumber(value: layer),
+         kCGWindowAlpha as String: NSNumber(value: alpha),
+         kCGWindowBounds as String: ["X": CGFloat(10), "Y": CGFloat(20),
+                                     "Width": CGFloat(800), "Height": CGFloat(600)]]
+    }
+    let fixture = window(pid: 123, id: 456, layer: 0)
+    let overlay = window(pid: 999, id: 900, layer: 3)
+    let transparent = window(pid: 999, id: 901, layer: 3, alpha: 0)
+    guard let target = topWindowRecord(at: point, in: [fixture]),
+          target.pid == 123, target.windowID == 456, target.layer == 0,
+          let blocked = topWindowRecord(at: point, in: [overlay, fixture]),
+          blocked.pid == 999, blocked.windowID == 900, blocked.layer == 3,
+          !mouseReleaseOwnershipGuardAllows(
+            targetPID: 123, expectedWindowID: 456,
+            accessibilityTrusted: true, screenCaptureTrusted: true,
+            sessionUnlocked: true, onConsole: true, targetProcessLive: true,
+            frontmostPID: 123,
+            focusedWindowID: 456, selectedWindowID: 456, fixtureMatches: true,
+            point: point, currentWindowFrame: CGRect(x: 10, y: 20, width: 800, height: 600),
+            topWindowPID: blocked.pid, topWindowID: blocked.windowID),
+          let throughTransparent = topWindowRecord(at: point, in: [transparent, fixture]),
+          throughTransparent.pid == 123, throughTransparent.windowID == 456,
+          topWindowRecord(at: CGPoint(x: 900, y: 900), in: [fixture]) == nil,
+          topWindowRecord(at: point, in: [["unexpected": true], fixture]) == nil else {
+        fail("top-window-at-point fixtures did not preserve front-to-back ownership or fail closed")
+    }
+    return 5
+}
+
 func eventGuardError(pid: pid_t, windowID: CGWindowID, fixtureName: String,
                      requireFrontmost: Bool = true) -> String? {
     guard AXIsProcessTrusted() else {
@@ -331,47 +462,76 @@ func cleanupGuardError(pid: pid_t) -> String? {
     return nil
 }
 
-func cleanupMouseGuardError(pid: pid_t, windowID: CGWindowID, fixtureName: String) -> String? {
-    // Revalidate the original visible editor window before attempting a
-    // PID-scoped release. The event fields below are candidate metadata, not a
-    // guarantee that AppKit will route the event to this NSWindow. Cleanup
-    // never reactivates the app.
-    eventGuardError(pid: pid, windowID: windowID, fixtureName: fixtureName,
-                    requireFrontmost: false)
-}
-
-func setMouseEventWindowMetadata(_ event: CGEvent, windowID: CGWindowID) {
-    let value = Int64(windowID)
-    event.setIntegerValueField(.mouseEventWindowUnderMousePointer, value: value)
-    event.setIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent,
-                               value: value)
-}
-
-func mouseEventWindowMetadataMatches(_ event: CGEvent, windowID: CGWindowID) -> Bool {
-    let value = Int64(windowID)
-    return event.getIntegerValueField(.mouseEventWindowUnderMousePointer) == value
-        && event.getIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent) == value
-}
-
-func validateMouseEventWindowMetadataFixture() -> Int {
-    let fixtureWindowID: CGWindowID = 12345
-    guard let event = CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp,
-                              mouseCursorPosition: .zero, mouseButton: .left) else {
-        fail("cannot create mouse window-association fixture")
+func topVisibleWindow(at point: CGPoint) -> WindowAtPoint? {
+    guard let rawWindows = CGWindowListCopyWindowInfo(
+        [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
+    ) as? [[String: Any]] else {
+        return nil
     }
-    setMouseEventWindowMetadata(event, windowID: fixtureWindowID)
-    guard mouseEventWindowMetadataMatches(event, windowID: fixtureWindowID) else {
-        fail("CGEvent did not retain the candidate mouse window metadata fields")
+    return topWindowRecord(at: point, in: rawWindows)
+}
+
+func guardedMouseReleaseTarget(pid: pid_t, windowID: CGWindowID, fixtureName: String,
+                               x: Double, y: Double) -> [String: Any] {
+    if let error = eventGuardError(pid: pid, windowID: windowID,
+                                   fixtureName: fixtureName, requireFrontmost: true) {
+        fail("guarded HID mouse-up refused: \(error)")
     }
-    return Int(fixtureWindowID)
+    let selected = requireEventTarget(pid: pid, windowID: windowID,
+                                      fixtureName: fixtureName, requireFrontmost: true)
+    let frame = CGRect(
+        x: selected["x"] as! Double, y: selected["y"] as! Double,
+        width: selected["width"] as! Double, height: selected["height"] as! Double
+    )
+    let point = CGPoint(x: x, y: y)
+    let focusedID = focusedAXWindowID(pid: pid)
+    guard let top = topVisibleWindow(at: point) else {
+        fail("guarded HID mouse-up refused: top window at the owned pointer is unavailable")
+    }
+    let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+    let session = consoleSessionFlags()
+    let accessibilityTrusted = AXIsProcessTrusted()
+    let screenCaptureTrusted = CGPreflightScreenCaptureAccess()
+    let sessionUnlocked = session["session_locked"] as? Bool == false
+    let onConsole = session["on_console"] as? Bool == true
+    let targetProcessLive = NSRunningApplication(processIdentifier: pid) != nil
+    let fixtureMatches = (selected["title"] as? String ?? "")
+        .localizedCaseInsensitiveContains(fixtureName)
+    guard mouseReleaseOwnershipGuardAllows(
+        targetPID: pid, expectedWindowID: Int(windowID),
+        accessibilityTrusted: accessibilityTrusted,
+        screenCaptureTrusted: screenCaptureTrusted,
+        sessionUnlocked: sessionUnlocked, onConsole: onConsole,
+        targetProcessLive: targetProcessLive, frontmostPID: frontmostPID,
+        focusedWindowID: focusedID, selectedWindowID: selected["window_id"] as? Int,
+        fixtureMatches: fixtureMatches, point: point, currentWindowFrame: frame,
+        topWindowPID: top.pid, topWindowID: top.windowID
+    ) else {
+        fail("guarded HID mouse-up refused: original fixture focus, current-frame point, or top-window ownership changed")
+    }
+    return [
+        "pid": Int(pid), "window_id": Int(windowID), "fixture": fixtureName,
+        "accessibility_trusted": accessibilityTrusted,
+        "screen_capture_trusted": screenCaptureTrusted,
+        "session_locked": !sessionUnlocked,
+        "on_console": onConsole,
+        "target_process_live": targetProcessLive,
+        "frontmost_pid": Int(frontmostPID ?? -1), "focused_window_id": focusedID ?? -1,
+        "point": ["x": x, "y": y],
+        "current_window_frame": [
+            "x": Double(frame.origin.x), "y": Double(frame.origin.y),
+            "width": Double(frame.width), "height": Double(frame.height),
+        ],
+        "top_window": ["pid": Int(top.pid), "window_id": top.windowID, "layer": top.layer],
+    ]
 }
 
 func postCleanupMouseRelease(pid: pid_t, windowID: CGWindowID, fixtureName: String,
                              x: Double, y: Double) {
-    if let error = cleanupMouseGuardError(pid: pid, windowID: windowID,
-                                          fixtureName: fixtureName) { fail(error) }
+    _ = guardedMouseReleaseTarget(pid: pid, windowID: windowID,
+                                  fixtureName: fixtureName, x: x, y: y)
     guard let source = CGEventSource(stateID: .hidSystemState) else {
-        fail("cannot create targeted mouse-up cleanup event source")
+        fail("cannot create guarded HID mouse-up cleanup event source")
     }
     guard let event = CGEvent(
         mouseEventSource: source,
@@ -379,34 +539,25 @@ func postCleanupMouseRelease(pid: pid_t, windowID: CGWindowID, fixtureName: Stri
         mouseCursorPosition: CGPoint(x: x, y: y),
         mouseButton: .left
     ) else {
-        fail("cannot create targeted mouse-up cleanup event")
+        fail("cannot create guarded HID mouse-up cleanup event")
     }
     resetUnmodifiedInputFlags(event)
-    setMouseEventWindowMetadata(event, windowID: windowID)
-    if let error = cleanupMouseGuardError(pid: pid, windowID: windowID,
-                                          fixtureName: fixtureName) { fail(error) }
-    guard event.flags.rawValue == 0 else { fail("targeted mouse-up cleanup retained modifier flags") }
-    guard mouseEventWindowMetadataMatches(event, windowID: windowID) else {
-        fail("targeted mouse-up cleanup lost its candidate window metadata")
-    }
+    let guardEvidence = guardedMouseReleaseTarget(pid: pid, windowID: windowID,
+                                                  fixtureName: fixtureName, x: x, y: y)
+    guard event.flags.rawValue == 0 else { fail("guarded HID mouse-up cleanup retained modifier flags") }
     let flagsBeforePost = event.flags.rawValue
-    let windowUnderPointerBeforePost = event.getIntegerValueField(.mouseEventWindowUnderMousePointer)
-    let windowCanHandleBeforePost = event.getIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent)
-    // Cleanup is a release only and goes directly to the PID that received the
-    // owned down, with candidate CGWindowID metadata. The fields do not prove
-    // AppKit routing; the caller's target-side scene oracle checks delivery.
-    // This never enters the global event stream or reactivates the app.
-    event.postToPid(pid)
-    let senderSettle = withExtendedLifetime(source) { settleInputSenderAfterPost() }
+    // This reuses the normal HID event-tap route only while a fresh guard proves
+    // the same fixture window is frontmost, AX-focused, contains the original
+    // pointer point, and is the top WindowServer window there. No activation or
+    // alternative posting route is attempted if any guard fails.
+    event.post(tap: .cghidEventTap)
+    let senderSettle = withExtendedLifetime((source, event)) { settleInputSenderAfterPost() }
     emit(["pid": Int(pid), "window_id": Int(windowID), "fixture": fixtureName,
-          "cleanup": "targeted-mouse-up", "posted_to_target_pid": true,
+          "cleanup": "guarded-hid-mouse-up", "delivery_route": "guarded_cghid_event_tap",
+          "guarded_hid_enqueue": true, "guard_evidence": guardEvidence,
           "event_flags_before_post_raw": flagsBeforePost,
           "event_flags_raw": flagsBeforePost,
           "event_flags_after_post_raw": event.flags.rawValue,
-          "mouse_event_window_under_pointer_before_post": windowUnderPointerBeforePost,
-          "mouse_event_window_under_pointer_that_can_handle_this_event_before_post": windowCanHandleBeforePost,
-          "mouse_event_window_under_pointer_after_post": event.getIntegerValueField(.mouseEventWindowUnderMousePointer),
-          "mouse_event_window_under_pointer_that_can_handle_this_event_after_post": event.getIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent),
           "sender_runloop_settle_requested_ms": senderSettle.requestedMilliseconds,
           "sender_runloop_settle_ms": senderSettle.elapsedMilliseconds])
 }
@@ -1224,13 +1375,16 @@ case "guard-fixtures":
     validateSessionFlagFixtures()
     validateAXButtonTraversalFixtures()
     validatePlainInputFlagFixtures()
-    let mouseWindowMetadata = validateMouseEventWindowMetadataFixture()
+    let mouseReleaseOwnershipFixtures = validateMouseReleaseOwnershipGuardFixtures()
+    let topWindowSelectionFixtures = validateTopWindowSelectionFixtures()
     let inputSenderSettle = validateInputSenderSettleFixture()
     emit(["session_fixtures": "passed", "frontmost_guard_fixtures": "passed",
           "focused_window_guard_fixtures": "passed", "ax_press_guard_fixtures": "passed",
           "ax_traversal_fixtures": "passed", "plain_input_flags_fixtures": "passed",
-          "mouse_window_metadata_fixtures": "passed",
-          "mouse_window_metadata_fixture_window_id": mouseWindowMetadata,
+          "mouse_release_ownership_fixtures": "passed",
+          "mouse_release_ownership_fixture_count": mouseReleaseOwnershipFixtures,
+          "top_window_selection_fixtures": "passed",
+          "top_window_selection_fixture_count": topWindowSelectionFixtures,
           "input_sender_settle_fixtures": "passed",
           "input_sender_settle_requested_ms": inputSenderSettle.requestedMilliseconds,
           "input_sender_settle_ms": inputSenderSettle.elapsedMilliseconds])

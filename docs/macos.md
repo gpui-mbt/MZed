@@ -140,8 +140,8 @@ the separate value observed after posting; the harness validates the pre-post
 value because Core Graphics can annotate the event object during posting. This
 prevents a prior synthetic shortcut from changing the meaning of the next
 click or character. After each synthetic pointer, keyboard or Unicode event,
-including PID-targeted cleanup, the helper retains the event while servicing
-its RunLoop for 100 ms;
+including release cleanup, the helper retains the event while servicing its
+RunLoop for 100 ms;
 its acknowledgement records the requested and measured elapsed times, and the
 smoke rejects an input event with less than 90 ms of settle. A retained timer
 keeps the RunLoop alive through the monotonic minimum even when no other source
@@ -166,16 +166,18 @@ immediately before each capture, mouse/key/text event and Accessibility window
 mutation. Paired key and pointer events are sent separately so a guard failure
 cannot emit the remaining global events. On guard failure or uncertain helper
 acknowledgement while a synthetic key or button down is pending, it records an
-attempt to release only that input directly to the original PID. A pending mouse
-release also carries the original fixture name and WindowServer ID, revalidates
-that visible process-owned window without reactivating the app, and records that
-ID in the release event's two window-under-pointer fields. These fields are
-candidate event metadata; they do not by themselves prove AppKit routed the
-event to that window. Cleanup is refused when the console is locked or
-unavailable, and failed cleanup fails the qualification. The mouse
-release-fault qualifier checks the resulting scene pixels and dispatch count
-before any subsequent mouse input; a helper post acknowledgement alone is not
-treated as proof that the editor handled the release. For the derived run, it
+attempt to release only that owned input. Keyboard cleanup remains PID-targeted.
+Mouse cleanup reuses the global HID event-tap route used by ordinary mouse
+events, but only after fresh checks confirm the original process is live and
+frontmost, the same unique visible fixture window is AX-focused, the saved
+screen point remains inside its current frame, and the top on-screen window at
+that point is the same process-owned fixture window. It never activates the app
+or falls back to another posting route when a guard fails. The helper reports
+that it enqueued a guarded HID release; that acknowledgement does not prove the
+editor handled it. Cleanup is refused when the console is locked or unavailable,
+and failed cleanup fails the qualification. The mouse release-fault qualifier
+checks the resulting scene pixels and dispatch count before any subsequent
+mouse input. For the derived run, it
 also checks solid blue/pink pixels,
 120×18 logical scene bounds
 scaled once, a held press across two repeated same-window resizes with unchanged

@@ -98,9 +98,12 @@ def screen_point(capture: dict, point: tuple[float, float]) -> tuple[float, floa
 
 def _frame_values(frame: dict, label: str) -> tuple[float, float, float, float]:
     try:
-        values = tuple(float(frame[key]) for key in ("x", "y", "width", "height"))
+        raw = tuple(frame[key] for key in ("x", "y", "width", "height"))
     except (KeyError, TypeError, ValueError) as error:
         raise RuntimeError(f"{label} does not contain a numeric display frame: {frame!r}") from error
+    if any(type(value) not in (int, float) for value in raw):
+        raise RuntimeError(f"{label} does not contain a numeric display frame: {frame!r}")
+    values = tuple(float(value) for value in raw)
     if not all(math.isfinite(value) for value in values) or values[2] <= 0 or values[3] <= 0:
         raise RuntimeError(f"{label} has invalid display geometry: {frame!r}")
     return values
@@ -288,23 +291,50 @@ def require_unmodified_input_flags(result: dict, action: str) -> None:
         raise RuntimeError(f"plain {action} retained synthetic modifier flags: {flags!r}")
 
 
-def require_mouse_cleanup_window_metadata(result: dict, window_id: int,
-                                          fixture_name: str) -> None:
-    if result.get("window_id") != window_id:
-        raise RuntimeError(
-            f"mouse cleanup metadata did not retain its original selected window ID: "
-            f"expected={window_id!r}, observed={result.get('window_id')!r}")
-    if result.get("fixture") != fixture_name:
-        raise RuntimeError(
-            f"mouse cleanup metadata did not retain its original fixture name: "
-            f"expected={fixture_name!r}, observed={result.get('fixture')!r}")
-    for field in ("mouse_event_window_under_pointer_before_post",
-                  "mouse_event_window_under_pointer_that_can_handle_this_event_before_post"):
-        observed = result.get(field)
-        if type(observed) is not int or observed != window_id:
+def require_guarded_mouse_cleanup_ack(result: dict, pid: int, window_id: int,
+                                     fixture_name: str, point: tuple[float, float]) -> None:
+    if (result.get("cleanup") != "guarded-hid-mouse-up"
+            or result.get("delivery_route") != "guarded_cghid_event_tap"
+            or result.get("guarded_hid_enqueue") is not True):
+        raise RuntimeError(f"mouse cleanup was not acknowledged as a guarded HID enqueue: {result!r}")
+    if result.get("posted_to_target_pid") is not None:
+        raise RuntimeError("mouse cleanup must not claim PID-targeted delivery")
+    guard = result.get("guard_evidence")
+    if not isinstance(guard, dict):
+        raise RuntimeError(f"mouse cleanup lacks its native guard evidence: {result!r}")
+    for field, expected in (("pid", pid), ("window_id", window_id),
+                            ("fixture", fixture_name), ("frontmost_pid", pid),
+                            ("focused_window_id", window_id),
+                            ("accessibility_trusted", True),
+                            ("screen_capture_trusted", True),
+                            ("session_locked", False), ("on_console", True),
+                            ("target_process_live", True)):
+        observed = guard.get(field)
+        if type(observed) is not type(expected) or observed != expected:
             raise RuntimeError(
-                f"mouse cleanup window metadata did not match the original selected window: "
-                f"field={field}, expected={window_id!r}, observed={observed!r}")
+                f"mouse cleanup guard evidence changed {field}: expected={expected!r}, "
+                f"observed={observed!r}")
+    for field, expected in (("pid", pid), ("window_id", window_id), ("fixture", fixture_name)):
+        observed = result.get(field)
+        if type(observed) is not type(expected) or observed != expected:
+            raise RuntimeError(
+                f"mouse cleanup acknowledgement changed {field}: expected={expected!r}, "
+                f"observed={observed!r}")
+    observed_point = guard.get("point")
+    if (not isinstance(observed_point, dict)
+            or any(type(observed_point.get(axis)) not in (int, float)
+                   or not math.isclose(float(observed_point[axis]), value, abs_tol=1e-6)
+                   for axis, value in zip(("x", "y"), point))):
+        raise RuntimeError(f"mouse cleanup guard evidence changed its owned point: {observed_point!r}")
+    frame = guard.get("current_window_frame")
+    if not isinstance(frame, dict) or not point_inside_frame(point, frame, tolerance=0):
+        raise RuntimeError(f"mouse cleanup point is outside the current selected-window frame: {frame!r}")
+    top_window = guard.get("top_window")
+    if (not isinstance(top_window, dict)
+            or type(top_window.get("pid")) is not int or top_window.get("pid") != pid
+            or type(top_window.get("window_id")) is not int or top_window.get("window_id") != window_id
+            or type(top_window.get("layer")) is not int or top_window.get("layer") != 0):
+        raise RuntimeError(f"mouse cleanup point is not owned by the top selected fixture window: {top_window!r}")
 
 
 def require_input_sender_settle(result: dict, action: str) -> None:
@@ -522,15 +552,17 @@ class MacSmoke:
                    "ownership_state": owned.get("state", "down_acknowledged")}
         try:
             result = helper_json(self.helper, *command, timeout=8)
-            if result.get("posted_to_target_pid") is not True:
-                raise RuntimeError(f"targeted release was not confirmed: {result!r}")
+            if kind == "mouse":
+                require_guarded_mouse_cleanup_ack(
+                    result, owned["pid"], owned["window_id"], self.fixture.name,
+                    (owned["x"], owned["y"]))
+            elif result.get("posted_to_target_pid") is not True:
+                raise RuntimeError(f"PID-targeted keyboard release was not confirmed: {result!r}")
             if kind in ("mouse", "text"):
                 require_unmodified_input_flags(result, f"{kind} cleanup")
-            if kind == "mouse":
-                require_mouse_cleanup_window_metadata(result, owned["window_id"],
-                                                       self.fixture.name)
             require_input_sender_settle(result, f"{kind} cleanup")
-            attempt["outcome"] = "release_posted_to_original_pid"
+            attempt["outcome"] = ("guarded_hid_release_enqueued" if kind == "mouse"
+                                   else "release_posted_to_original_pid")
             attempt["result"] = result
             self.record["input_cleanup"].append(attempt)
             return None
@@ -1258,8 +1290,10 @@ def main() -> int:
                 or records["guard_fixtures"].get("ax_press_guard_fixtures") != "passed"
                 or records["guard_fixtures"].get("ax_traversal_fixtures") != "passed"
                 or records["guard_fixtures"].get("plain_input_flags_fixtures") != "passed"
-                or records["guard_fixtures"].get("mouse_window_metadata_fixtures") != "passed"
-                or records["guard_fixtures"].get("mouse_window_metadata_fixture_window_id") != 12345
+                or records["guard_fixtures"].get("mouse_release_ownership_fixtures") != "passed"
+                or records["guard_fixtures"].get("mouse_release_ownership_fixture_count") != 18
+                or records["guard_fixtures"].get("top_window_selection_fixtures") != "passed"
+                or records["guard_fixtures"].get("top_window_selection_fixture_count") != 5
                 or records["guard_fixtures"].get("input_sender_settle_fixtures") != "passed"):
             raise RuntimeError("macOS UI guard fixtures did not pass")
         require_input_sender_settle({
