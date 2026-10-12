@@ -65,6 +65,44 @@ func windowRecords() -> [[String: Any]] {
     }
 }
 
+// CGDisplayBounds and CGWindowListCopyWindowInfo bounds use the same global
+// CoreGraphics display coordinate space; the caller can therefore prove an AX
+// resize stays on the display that contains the fixture window origin.
+func displayRecords(pid: pid_t, windowID: CGWindowID, fixtureName: String) -> [[String: Any]] {
+    _ = requireEventTarget(pid: pid, windowID: windowID, fixtureName: fixtureName)
+    var displayCount: UInt32 = 0
+    let countStatus = CGGetActiveDisplayList(0, nil, &displayCount)
+    guard countStatus == .success, displayCount > 0 else {
+        fail("CoreGraphics did not return active displays (\(countStatus.rawValue))")
+    }
+    let capacity = displayCount
+    var displayIDs = [CGDirectDisplayID](repeating: 0, count: Int(capacity))
+    let listStatus = displayIDs.withUnsafeMutableBufferPointer { buffer in
+        guard let baseAddress = buffer.baseAddress else {
+            fail("cannot allocate active display identifiers")
+        }
+        return CGGetActiveDisplayList(capacity, baseAddress, &displayCount)
+    }
+    guard listStatus == .success, displayCount > 0 else {
+        fail("CoreGraphics could not enumerate active displays (\(listStatus.rawValue))")
+    }
+    return displayIDs.prefix(Int(displayCount)).compactMap { displayID in
+        let bounds = CGDisplayBounds(displayID)
+        guard bounds.origin.x.isFinite, bounds.origin.y.isFinite,
+              bounds.width.isFinite, bounds.height.isFinite,
+              bounds.width > 0, bounds.height > 0 else { return nil }
+        return [
+            "display_id": Int(displayID),
+            "x": Double(bounds.origin.x),
+            "y": Double(bounds.origin.y),
+            "width": Double(bounds.width),
+            "height": Double(bounds.height),
+        ]
+    }.sorted {
+        ($0["display_id"] as? Int ?? 0) < ($1["display_id"] as? Int ?? 0)
+    }
+}
+
 func frontmostGuardAllows(targetPID: pid_t, currentFrontmostPID: pid_t?, required: Bool) -> Bool {
     !required || currentFrontmostPID == targetPID
 }
@@ -1119,7 +1157,7 @@ func colorComponents(_ path: String, red: UInt8, green: UInt8, blue: UInt8) -> [
 }
 
 guard CommandLine.arguments.count >= 2 else {
-    fail("usage: macos_ui.swift permissions|guard-fixtures|windows PID|ax-state PID WINDOW_ID FIXTURE|ax-press PID WINDOW_ID FIXTURE FOCUSED_WINDOW_ID BUTTON_TITLE|activate PID WINDOW_ID FIXTURE|capture PID WINDOW_ID FIXTURE PNG|mouse-event PID WINDOW_ID FIXTURE ACTION X Y|key-event PID WINDOW_ID FIXTURE ACTION CODE FLAGS|text-event PID WINDOW_ID FIXTURE ACTION TEXT|cleanup-mouse PID X Y|cleanup-key PID CODE FLAGS|cleanup-text PID TEXT|resize PID WINDOW_ID FIXTURE WIDTH HEIGHT|ocr PNG|colors PNG RED GREEN BLUE")
+    fail("usage: macos_ui.swift permissions|guard-fixtures|windows PID|displays PID WINDOW_ID FIXTURE|ax-state PID WINDOW_ID FIXTURE|ax-press PID WINDOW_ID FIXTURE FOCUSED_WINDOW_ID BUTTON_TITLE|activate PID WINDOW_ID FIXTURE|capture PID WINDOW_ID FIXTURE PNG|mouse-event PID WINDOW_ID FIXTURE ACTION X Y|key-event PID WINDOW_ID FIXTURE ACTION CODE FLAGS|text-event PID WINDOW_ID FIXTURE ACTION TEXT|cleanup-mouse PID X Y|cleanup-key PID CODE FLAGS|cleanup-text PID TEXT|resize PID WINDOW_ID FIXTURE WIDTH HEIGHT|ocr PNG|colors PNG RED GREEN BLUE")
 }
 
 let arguments = Array(CommandLine.arguments.dropFirst())
@@ -1147,6 +1185,11 @@ case "windows":
     let pid = integer(arguments[1], "PID")
     let frontmost = NSWorkspace.shared.frontmostApplication?.processIdentifier ?? -1
     emit(["frontmost_pid": Int(frontmost), "windows": windowRecords().filter { ($0["pid"] as? Int) == pid }])
+case "displays":
+    guard arguments.count == 4 else { fail("displays requires PID WINDOW_ID FIXTURE") }
+    let pid = pid_t(integer(arguments[1], "PID"))
+    let windowID = CGWindowID(integer(arguments[2], "window ID"))
+    emit(["displays": displayRecords(pid: pid, windowID: windowID, fixtureName: arguments[3])])
 case "ax-state":
     guard arguments.count == 4 else { fail("ax-state requires PID WINDOW_ID FIXTURE") }
     let pid = pid_t(integer(arguments[1], "PID"))

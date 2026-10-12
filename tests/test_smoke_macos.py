@@ -194,6 +194,109 @@ class MacSceneEvidenceTests(unittest.TestCase):
                 "frontmost_pid": 10, "windows": windows})
 
 
+class MacSmokeLoggingContractTests(unittest.TestCase):
+    def test_task_local_info_log_setting_overrides_hostile_inherited_values(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            binary = root / "mzed"
+            binary.write_bytes(b"inert test binary")
+            smoke_run = smoke.MacSmoke(Path("helper"), root, "derived", binary,
+                                       root, True, 1)
+            with patch.dict(smoke.os.environ, {"RUST_LOG": "warn", "ZED_LOG": "off"}):
+                child_env, _fixture = smoke_run.prepare()
+            self.assertEqual(child_env["RUST_LOG"], "warn")
+            self.assertEqual(child_env["ZED_LOG"], "info")
+            self.assertEqual(smoke_run.record["logging_contract"]["counter_oracle"],
+                             "INFO-level MZed island counter records")
+
+
+class MacDisplayFitTests(unittest.TestCase):
+    def setUp(self):
+        self.display = {"display_id": 1, "x": 0.0, "y": 0.0,
+                        "width": 1720.0, "height": 720.0}
+        self.window = {"x": 92.0, "y": 30.0, "width": 1536.0, "height": 690.0}
+
+    def test_resize_targets_fit_the_observed_display_frame(self):
+        first, second, display = smoke.fit_resize_targets(self.window, [self.display])
+        self.assertEqual(display, self.display)
+        self.assertEqual(first, (1540, 626))
+        self.assertEqual(second, (1604, 666))
+        self.assertNotEqual(first, second)
+        for width, height in (first, second):
+            self.assertTrue(smoke.frame_fits_display(
+                {**self.window, "width": width, "height": height}, display, tolerance=0))
+            self.assertLessEqual(self.window["x"] + width, 1720 - 24)
+            self.assertLessEqual(self.window["y"] + height, 720 - 24)
+
+    def test_window_at_safe_maximum_gets_two_non_noop_targets(self):
+        full = {**self.window, "width": 1604.0, "height": 666.0}
+        first, second, display = smoke.fit_resize_targets(full, [self.display])
+        self.assertNotEqual(first, (1604, 666))
+        self.assertNotEqual(second, (1604, 666))
+        self.assertNotEqual(first, second)
+        self.assertTrue(smoke.frame_fits_display(
+            {**full, "width": first[0], "height": first[1]}, display, tolerance=0))
+        self.assertTrue(smoke.frame_fits_display(
+            {**full, "width": second[0], "height": second[1]}, display, tolerance=0))
+
+    def test_old_fixed_growth_targets_are_rejected_for_this_display(self):
+        first = {**self.window, "width": self.window["width"] + 80,
+                 "height": self.window["height"] + 60}
+        second = {**self.window, "width": self.window["width"] + 120,
+                  "height": self.window["height"] + 30}
+        self.assertFalse(smoke.frame_fits_display(first, self.display))
+        self.assertFalse(smoke.frame_fits_display(second, self.display))
+
+    def test_scene_region_and_center_are_verified_in_global_display_coordinates(self):
+        capture = {"x": 92.0, "y": 30.0, "width": 1536.0, "height": 690.0,
+                   "scale_x": 2.0, "scale_y": 2.0}
+        scene = (2166, 1328, 240, 36)
+        evidence = smoke.require_scene_inside_display(capture, scene, self.window, self.display)
+        self.assertEqual(evidence["center"], [1234.75, 702.75])
+        self.assertEqual(evidence["bounds"], {"x": 1175.0, "y": 694.0,
+                                               "width": 120.0, "height": 18.0})
+
+    def test_post_resize_window_and_scene_geometry_remain_inside_display(self):
+        capture_owner = object.__new__(smoke.MacSmoke)
+        with patch.object(capture_owner, "current_displays", return_value=[self.display]):
+            first_window = {**self.window, "width": 1540.0, "height": 626.0}
+            first_display = capture_owner.checked_resize_display(first_window, self.display)
+            first_capture = {"x": 92.0, "y": 30.0, "width": 1540.0, "height": 626.0,
+                             "scale_x": 2.0, "scale_y": 2.0}
+            first_evidence = smoke.require_scene_inside_display(
+                first_capture, (2820, 1160, 240, 36), first_window, first_display)
+            self.assertTrue(smoke.point_inside_frame(tuple(first_evidence["center"]), first_window))
+
+            second_window = {**self.window, "width": 1604.0, "height": 666.0}
+            second_display = capture_owner.checked_resize_display(second_window, self.display)
+            second_capture = {"x": 92.0, "y": 30.0, "width": 1604.0, "height": 666.0,
+                              "scale_x": 2.0, "scale_y": 2.0}
+            second_evidence = smoke.require_scene_inside_display(
+                second_capture, (2960, 1280, 240, 36), second_window, second_display)
+            self.assertTrue(smoke.point_inside_frame(tuple(second_evidence["center"]), second_window))
+
+    def test_scene_clip_and_actual_resize_overflow_fail_closed(self):
+        capture = {"x": 92.0, "y": 30.0, "width": 1536.0, "height": 690.0,
+                   "scale_x": 2.0, "scale_y": 2.0}
+        with self.assertRaisesRegex(RuntimeError, "extends outside its active display"):
+            smoke.require_scene_inside_display(capture, (2166, 1364, 240, 36),
+                                               self.window, self.display)
+        actual = {**self.window, "width": 1656.0, "height": 720.0}
+        self.assertFalse(smoke.frame_fits_display(actual, self.display))
+        capture_owner = object.__new__(smoke.MacSmoke)
+        with patch.object(capture_owner, "current_displays", return_value=[self.display]):
+            with self.assertRaisesRegex(RuntimeError, "actual resized fixture window is outside"):
+                capture_owner.checked_resize_display(actual, self.display)
+
+    def test_missing_origin_display_or_too_small_safe_area_is_rejected(self):
+        with self.assertRaisesRegex(RuntimeError, "one active display"):
+            smoke.fit_resize_targets({**self.window, "x": 1800.0}, [self.display])
+        tiny = {"display_id": 2, "x": 0.0, "y": 0.0,
+                "width": 770.0, "height": 540.0}
+        with self.assertRaisesRegex(RuntimeError, "insufficient room"):
+            smoke.fit_resize_targets({"x": 50.0, "y": 20.0, "width": 700.0, "height": 500.0}, [tiny])
+
+
 def event_controller():
     capture = object.__new__(smoke.MacSmoke)
     capture.helper = Path("injected-helper")

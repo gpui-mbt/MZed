@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -92,6 +93,137 @@ def validate_scene_size(rect: tuple[int, int, int, int], scale_x: float,
 def screen_point(capture: dict, point: tuple[float, float]) -> tuple[float, float]:
     return (capture["x"] + point[0] / capture["scale_x"],
             capture["y"] + point[1] / capture["scale_y"])
+
+
+def _frame_values(frame: dict, label: str) -> tuple[float, float, float, float]:
+    try:
+        values = tuple(float(frame[key]) for key in ("x", "y", "width", "height"))
+    except (KeyError, TypeError, ValueError) as error:
+        raise RuntimeError(f"{label} does not contain a numeric display frame: {frame!r}") from error
+    if not all(math.isfinite(value) for value in values) or values[2] <= 0 or values[3] <= 0:
+        raise RuntimeError(f"{label} has invalid display geometry: {frame!r}")
+    return values
+
+
+def frame_fits_display(frame: dict, display: dict, *, tolerance: float = 1.0) -> bool:
+    x, y, width, height = _frame_values(frame, "frame")
+    dx, dy, display_width, display_height = _frame_values(display, "display")
+    return (x >= dx - tolerance and y >= dy - tolerance
+            and x + width <= dx + display_width + tolerance
+            and y + height <= dy + display_height + tolerance)
+
+
+def point_inside_frame(point: tuple[float, float], frame: dict, *, tolerance: float = 1.0) -> bool:
+    x, y = point
+    fx, fy, width, height = _frame_values(frame, "frame")
+    return (math.isfinite(x) and math.isfinite(y)
+            and fx - tolerance <= x <= fx + width + tolerance
+            and fy - tolerance <= y <= fy + height + tolerance)
+
+
+def display_for_window_origin(window: dict, displays: list[dict]) -> dict:
+    x, y, _width, _height = _frame_values(window, "window")
+    matches = []
+    seen_bounds = set()
+    for display in displays:
+        dx, dy, width, height = _frame_values(display, "display")
+        if dx <= x < dx + width and dy <= y < dy + height:
+            bounds = (dx, dy, width, height)
+            # Mirrored displays can share a frame. Treat identical frames as
+            # one usable geometry, while refusing ambiguous overlapping layouts.
+            if bounds not in seen_bounds:
+                matches.append(display)
+                seen_bounds.add(bounds)
+    if len(matches) != 1:
+        raise RuntimeError(
+            f"expected one active display containing the fixture window origin; found {matches!r}")
+    return matches[0]
+
+
+def fit_resize_targets(window: dict, displays: list[dict], *,
+                       margin: int = 24, gap: tuple[int, int] = (64, 40)) -> tuple[tuple[int, int], tuple[int, int], dict]:
+    """Choose two distinct AX sizes that remain inside the origin display."""
+    x, y, width, height = _frame_values(window, "window")
+    display = display_for_window_origin(window, displays)
+    dx, dy, display_width, display_height = _frame_values(display, "display")
+    # Keep a few points above the helper's strict >=700x500 fixture identity
+    # guard because AX/window-server geometry may settle within the existing
+    # two-point resize tolerance.
+    minimum_width, minimum_height = (EDITOR_MINIMUM_SIZE[0] + 4,
+                                    EDITOR_MINIMUM_SIZE[1] + 4)
+    max_width = math.floor(dx + display_width - x - margin)
+    max_height = math.floor(dy + display_height - y - margin)
+    if max_width < minimum_width or max_height < minimum_height:
+        raise RuntimeError(
+            f"active display has insufficient room for the minimum fixture editor size: "
+            f"available={max_width}x{max_height}, minimum={EDITOR_MINIMUM_SIZE}, display={display!r}")
+
+    # Keep a safety margin from the screen edge. The second size approaches
+    # that safe maximum; the first is smaller on both axes for a real second
+    # AX resize even when the starting window already fills the display.
+    second = (max_width, max_height)
+    current = (round(width), round(height))
+    if second == current:
+        # If the starting window already occupies the safe maximum, reserve a
+        # smaller second target instead of issuing a no-op AX resize.
+        shrink_axes = sorted((second[0] - minimum_width, second[1] - minimum_height),
+                             reverse=True)
+        if shrink_axes[0] >= 2:
+            if second[0] - minimum_width >= second[1] - minimum_height:
+                second = (second[0] - min(16, second[0] - minimum_width), second[1])
+            else:
+                second = (second[0], second[1] - min(16, second[1] - minimum_height))
+    first = (max(minimum_width, second[0] - gap[0]),
+             max(minimum_height, second[1] - gap[1]))
+    if first == second:
+        if second[0] > minimum_width:
+            first = (second[0] - 1, second[1])
+        elif second[1] > minimum_height:
+            first = (second[0], second[1] - 1)
+    if first == current:
+        if first[0] > minimum_width:
+            first = (first[0] - 1, first[1])
+        elif first[1] > minimum_height:
+            first = (first[0], first[1] - 1)
+    if first == second or first == current or second == current:
+        raise RuntimeError(
+            f"active display cannot provide two meaningful distinct resize sizes: "
+            f"current={current}, first={first}, second={second}, "
+            f"minimum={(minimum_width, minimum_height)}")
+
+    for target in (first, second):
+        target_frame = {"x": x, "y": y, "width": target[0], "height": target[1]}
+        if not frame_fits_display(target_frame, display, tolerance=0):
+            raise RuntimeError(f"planned AX resize would leave its active display: {target_frame!r}")
+    return first, second, display
+
+
+def scene_screen_frame(snapshot: dict, rect: tuple[int, int, int, int]) -> dict:
+    scale_x = float(snapshot["scale_x"])
+    scale_y = float(snapshot["scale_y"])
+    if scale_x <= 0 or scale_y <= 0 or not math.isfinite(scale_x + scale_y):
+        raise RuntimeError(f"capture has invalid scale for scene placement: {snapshot!r}")
+    x, y, width, height = rect
+    return {
+        "x": float(snapshot["x"]) + x / scale_x,
+        "y": float(snapshot["y"]) + y / scale_y,
+        "width": width / scale_x,
+        "height": height / scale_y,
+    }
+
+
+def require_scene_inside_display(snapshot: dict, rect: tuple[int, int, int, int],
+                                 window: dict, display: dict) -> dict:
+    scene = scene_screen_frame(snapshot, rect)
+    if not frame_fits_display(scene, display):
+        raise RuntimeError(f"captured native scene extends outside its active display: {scene!r}, {display!r}")
+    if not frame_fits_display(scene, window):
+        raise RuntimeError(f"captured native scene extends outside the actual resized window: {scene!r}, {window!r}")
+    point = screen_point(snapshot, center(rect))
+    if not point_inside_frame(point, display) or not point_inside_frame(point, window):
+        raise RuntimeError(f"native scene center is outside its resized window/display: {point!r}")
+    return {"bounds": scene, "center": [point[0], point[1]],
+            "display_id": display.get("display_id")}
 
 
 def center(rect: tuple[int, int, int, int]) -> tuple[float, float]:
@@ -201,6 +333,16 @@ class MacSmoke:
             "languages": {"Plain Text": {"enable_language_server": False}},
         }, indent=2) + "\n")
         env = dict(os.environ)
+        # The smoke needs MZed's INFO-level island counter as an oracle.
+        # Pinned Zed gives ZED_LOG precedence over inherited RUST_LOG, so set
+        # this only in the isolated child environment rather than altering the
+        # caller's shell or logging preferences.
+        env["ZED_LOG"] = "info"
+        self.record["logging_contract"] = {
+            "ZED_LOG": "info",
+            "counter_oracle": "INFO-level MZed island counter records",
+            "precedence": "task-local ZED_LOG overrides inherited RUST_LOG for the launched editor",
+        }
         env.update(HOME=str(self.home), XDG_CONFIG_HOME=str(self.output / "config"),
                    XDG_DATA_HOME=str(self.output / "xdg-data"),
                    XDG_CACHE_HOME=str(self.output / "cache"))
@@ -236,6 +378,27 @@ class MacSmoke:
         self.record["ax_state_after_activation"] = ax_state
         self.record["operations"].append(
             "opened the uniquely fixture-titled visible editor window and recorded auxiliary process windows")
+
+    def current_displays(self) -> list[dict]:
+        assert self.pid is not None and self.window_id is not None
+        result = helper_json(self.helper, "displays", self.pid, self.window_id,
+                             self.fixture.name)
+        displays = result.get("displays")
+        if not isinstance(displays, list) or not displays or any(not isinstance(item, dict) for item in displays):
+            raise RuntimeError(f"invalid guarded active-display evidence: {result!r}")
+        return displays
+
+    def checked_resize_display(self, window: dict, expected_display: dict) -> dict:
+        current = display_for_window_origin(window, self.current_displays())
+        expected_bounds = _frame_values(expected_display, "planned display")
+        current_bounds = _frame_values(current, "current display")
+        if any(abs(before - after) > 1 for before, after in zip(expected_bounds, current_bounds)):
+            raise RuntimeError(
+                f"active display geometry changed during resize: {expected_display!r} -> {current!r}")
+        if not frame_fits_display(window, current):
+            raise RuntimeError(
+                f"actual resized fixture window is outside its active display: {window!r}, {current!r}")
+        return current
 
     def current_window_snapshot(self) -> dict:
         assert self.pid is not None
@@ -851,18 +1014,24 @@ class MacSmoke:
         self.mouse("down", pink, center(self.find_scene(pink)))
         before_resize_log = self.read_log()
         old_window = self.checked_window_identity()
-        first_target = (float(old_window["width"]) + 80, float(old_window["height"]) + 60)
+        first_target, second_target, resize_display = fit_resize_targets(
+            old_window, self.current_displays())
         self.resize(*first_target)
         first_resized = self.wait_for_window_size(first_target)
+        first_display = self.checked_resize_display(first_resized, resize_display)
         first_held = self.snapshot("island-held-after-first-resize", expected="pink")
+        first_scene_visible = require_scene_inside_display(
+            first_held, self.find_scene(first_held), first_resized, first_display)
         first_log = self.read_log()
         self.save_dispatch_log("held-after-first-resize", first_log)
         first_held["log"] = first_log
 
-        second_target = (float(old_window["width"]) + 120, float(old_window["height"]) + 30)
         self.resize(*second_target)
         second_resized = self.wait_for_window_size(second_target)
+        second_display = self.checked_resize_display(second_resized, resize_display)
         held = self.snapshot("island-held-after-second-resize", expected="pink")
+        second_scene_visible = require_scene_inside_display(
+            held, self.find_scene(held), second_resized, second_display)
         held_log = self.read_log()
         self.save_dispatch_log("held-after-second-resize", held_log)
         held["log"] = held_log
@@ -888,6 +1057,11 @@ class MacSmoke:
             "logical_scene_size_before": list(before_logical),
             "logical_scene_size_after_first": list(first_logical),
             "logical_scene_size_after": list(after_logical),
+            "display_bounds": {key: resize_display[key] for key in ("display_id", "x", "y", "width", "height")},
+            "target_first": list(first_target),
+            "target_second": list(second_target),
+            "scene_visible_after_first": first_scene_visible,
+            "scene_visible_after_second": second_scene_visible,
             "dispatches_unchanged_across_both_resizes": True,
         }
         self.record["operations"].append("held scene press across two same-window AX resizes; pixels and dispatch count stayed stable")
