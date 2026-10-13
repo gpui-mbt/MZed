@@ -25,8 +25,8 @@ jobs:
           path: _build/gpui
       - uses: hustcer/setup-moonbit@1522f9aef02a8ca0187dfc00a41f5dd6b16750f7
         with:
-          version: 0.10.14+7d59c7ec9
-          core-version: 0.10.14+7d59c7ec9
+          version: 0.10.15+943464bfa
+          core-version: 0.10.15+943464bfa
       - name: Install the pinned Rust test toolchain
         run: rustup toolchain install 1.98.1 --profile minimal
       - name: Check harness and macOS SDK preflight
