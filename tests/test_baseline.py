@@ -377,22 +377,24 @@ class DerivedBuildEnvironmentTests(unittest.TestCase):
 class MacQualificationDocsTests(unittest.TestCase):
     def test_documented_derived_launch_matches_reused_target_and_lifecycle(self):
         docs = (SCRIPTS.parent / 'docs/macos.md').read_text()
+        workflow = (SCRIPTS.parent / '.github/workflows/macos-native-island.yml').read_text()
         target = '_build/zed-island/target/mzed-baseline'
         preserved = target + '-preserved/debug/zed'
         self.assertIn('--reuse-target ' + target, docs)
-        self.assertIn('"$PWD/' + target + '/debug/zed"', docs)
+        self.assertIn('--derived ' + target + '/debug/zed', docs)
         self.assertIn('"$PWD/' + preserved + '"', docs)
+        self.assertIn('--baseline ' + preserved, docs)
         self.assertIn('executable-relative asset lookup still reaches the', docs)
         self.assertIn('correct `.git` root even when `_build` points to external storage', docs)
-        for step in (
-            'Click the scene twice',
-            'Click `M` to hide it, then click',
-            '`M` again to remount it',
-            'Click the scene once',
-            'then click `M` once more to disable it',
-            'produce native counters `[1, 2, 1]`, one remount, and two disables',
-        ):
-            self.assertIn(step, docs)
+        normalized = ' '.join(docs.split())
+        for step in ('held press across two repeated same-window resizes', 'outside-release cancellation',
+                     'late bare releases after disable and after',
+                     'native dispatch counters', 'one remount, two disables',
+                     'Hosted macOS CI remains ABI-only'):
+            self.assertIn(step, normalized)
+        self.assertIn('unique visible level-zero process-owned window', normalized)
+        self.assertIn('unlocked console session', normalized)
+        self.assertIn('Compile local-only macOS UI helper (no GUI launch)', workflow)
 
 
 if __name__ == '__main__':

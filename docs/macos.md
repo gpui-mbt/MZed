@@ -94,9 +94,7 @@ If a build is interrupted or times out, keep its target and evidence. Start a
 new attempt with a fresh output path and `--resume-target`; the script records
 that it reused the target and applies the selected Metal toolchain again.
 
-Open a synthetic fixture in the baseline editor and verify native edit/save
-before marking the baseline passed. Use a separate empty profile for this run.
-After preserving that baseline evidence, patch only this derived checkout and
+After preserving the baseline executable, patch only this derived checkout and
 reuse its exact Cargo target so unchanged crates do not need a second full
 compile:
 
@@ -114,53 +112,96 @@ python3 scripts/build_island.py \
   --reuse-target _build/zed-island/target/mzed-baseline
 ```
 
-Create a new profile and plain-text fixture, then launch the derived binary from
-the pinned source checkout:
+### Run the local same-window qualification
+
+Run the executable harness against the preserved baseline and derived binaries
+from a fresh output directory:
 
 ```sh
-mkdir -p _build/macos-smoke/data/config _build/macos-smoke/home
-printf 'MZed pinned baseline fixture\n' > _build/macos-smoke/fixture.txt
-cat > _build/macos-smoke/data/config/settings.json <<'JSON'
-{
-  "telemetry": { "diagnostics": false, "metrics": false },
-  "disable_ai": true,
-  "auto_update": false,
-  "auto_install_extensions": { "html": false },
-  "ensure_final_newline_on_save": true,
-  "languages": { "Plain Text": { "enable_language_server": false } }
-}
-JSON
-HOME="$PWD/_build/macos-smoke/home" \
-  MZED_NATIVE_ISLAND=1 \
-  "$PWD/_build/zed-island/target/mzed-baseline/debug/zed" \
-  --user-data-dir "$PWD/_build/macos-smoke/data" \
-  "$PWD/_build/macos-smoke/fixture.txt"
+python3 scripts/smoke_macos.py \
+  --baseline _build/zed-island/target/mzed-baseline-preserved/debug/zed \
+  --derived _build/zed-island/target/mzed-baseline/debug/zed \
+  --source _build/zed-island \
+  --output _build/macos-ui-round1
 ```
 
-In the opened Zed window, leave the untrusted fixture in Restricted Mode with
-the pinned macOS shortcut `Control-Command-S`. Confirm that the `M` control and
-blue MoonBit scene appear in that same status bar. Click the scene twice and
-confirm that its color changes and returns. Click `M` to hide it, then click
-`M` again to remount it. Click the scene once and confirm the fresh instance
-changes color, then click `M` once more to disable it. This sequence should
-produce native counters `[1, 2, 1]`, one remount, and two disables. Type
-`MZed native edit save verified` at the end of the fixture and save with
-`Command-S`. The saved bytes must be exactly:
+The harness first checks that the invoking process is on an unlocked console
+session and already has Accessibility and Screen Recording permission. If the
+console is locked or either permission is absent, it stops before launching an
+editor, sending input or capturing a window. Unlock the Mac or grant permission
+through macOS System Settings and rerun. The harness does not unlock the session,
+open permission prompts or bypass TCC. It captures only the selected editor
+window by its WindowServer ID, not the whole display. Both binaries receive
+fresh isolated profiles and the same untrusted fixture, then the harness
+exercises native keyboard input and saves the file through the editor. Plain
+pointer and Unicode events explicitly clear inherited modifier flags. Each
+native acknowledgement records the event flags immediately before posting and
+the separate value observed after posting; the harness validates the pre-post
+value because Core Graphics can annotate the event object during posting. This
+prevents a prior synthetic shortcut from changing the meaning of the next
+click or character. After each synthetic pointer, keyboard or Unicode event,
+including release cleanup, the helper retains the event while servicing its
+RunLoop for 100 ms;
+its acknowledgement records the requested and measured elapsed times, and the
+smoke rejects an input event with less than 90 ms of settle. A retained timer
+keeps the RunLoop alive through the monotonic minimum even when no other source
+is registered. This is a bounded local delivery window, not a general guarantee
+about keyboard layouts or IME behavior. Before
+Command-S, the harness waits until OCR sees the complete added line in the
+editor, then checks the saved bytes exactly:
 
 ```text
 MZed pinned baseline fixture
 MZed native edit save verified
 ```
 
-Capture the window before and after the island interactions with macOS
-`screencapture`, and preserve `_build/macos-smoke/data/logs/Zed.log` together
-with those images and the fixture. Require log dispatches `1, 2, 1`, one
-remount, two disables, and no native failure before marking the island passed.
-Screen Recording and Accessibility permissions are required for automated
-capture/input; if macOS has not granted them, stop and mark the UI run blocked
-instead of inferring a pass from successful compilation or ABI tests.
+The harness selects the unique visible level-zero process-owned window whose
+title contains the isolated fixture name and whose size is at least 700×500
+logical points. It records other process-owned windows separately, including
+the small untitled auxiliary window used by this app. It rejects ambiguous
+fixture windows, a missing or changed selected WindowServer ID, and any loss of
+frontmost ownership before each capture or input. The native helper repeats the
+unlocked-console, Accessibility, live-PID, selected-window and frontmost checks
+immediately before each capture, mouse/key/text event and Accessibility window
+mutation. Paired key and pointer events are sent separately so a guard failure
+cannot emit the remaining global events. On guard failure or uncertain helper
+acknowledgement while a synthetic key or button down is pending, it records an
+attempt to release only that owned input. Keyboard cleanup remains PID-targeted.
+Mouse cleanup reuses the global HID event-tap route used by ordinary mouse
+events, but only after fresh checks confirm the original process is live and
+frontmost, the same unique visible fixture window is AX-focused, and the saved
+global screen point remains inside its current frame. The cleanup-only helper
+sets its own Accessibility messaging timeout to 250 ms and applies one
+monotonic two-second budget across both the initial and immediate pre-post AX
+checks. It asks the public system-wide Accessibility API which element is at
+the exact point, checks that element's PID before reading its role, and accepts
+only an AXWindow reached directly, through that element's containing-window
+attribute, or by a complete bounded same-process parent walk. Its finite AX
+geometry must map uniquely within two points to the original level-zero
+WindowServer ID for the same PID. Foreign, unknown, malformed, ambiguous,
+timed-out, incomplete, or changed ownership fails closed before the HID post.
+The helper does not exempt the Dock or any other overlay, activate the app,
+or fall back to another posting route. Its structured evidence records the
+hit PID and role, resolution path, exact mapped window identity, geometry, and
+global point. The helper reports that it enqueued a guarded HID release; that
+acknowledgement does not prove the editor handled it. Cleanup is refused when
+the console is locked or unavailable, and failed cleanup fails the
+qualification. The mouse release-fault qualifier checks the resulting scene
+pixels and dispatch count before any subsequent mouse input. For the derived run, it
+also checks solid blue/pink pixels,
+120×18 logical scene bounds
+scaled once, a held press across two repeated same-window resizes with unchanged
+dispatches, outside-release cancellation, and late bare releases after disable
+and after remount. It requires fresh remount state and native dispatch counters
+`[1, 2, 1]`, one remount, two disables, no native failure, and the same exact
+edited file bytes. A pass writes `qualification.json`, one `smoke.json` per
+binary, the isolated editor logs, OCR records, fixtures and window-only PNGs
+under the chosen output directory. That directory must not already exist; use a
+new path for each attempt so earlier evidence stays intact.
 
-This local UI procedure proves one native open/edit/save sequence and one
-status-bar island lifecycle on the tested macOS machine. It does not claim
-general Metal performance, accessibility support, IME behavior, multi-window
-ownership, or full-frame rendering qualification.
+This local UI procedure proves one native open/edit/save sequence and the
+listed status-bar interaction gates on the tested macOS machine. Hosted macOS CI
+remains ABI-only and must not be described as GUI evidence. The local smoke
+does not qualify focus-loss/minimize cancellation, multiple editor windows or displays,
+general accessibility support, IME behavior, hardware performance or full-frame
+rendering.
