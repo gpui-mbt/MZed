@@ -1342,6 +1342,9 @@ def run_one(helper: Path, output: Path, label: str, binary: Path, source: Path,
         except (OSError, subprocess.SubprocessError) as cleanup_error:
             smoke.record["error"] = "; ".join(
                 item for item in (smoke.record.get("error"), f"process cleanup failed: {cleanup_error}") if item)
+            smoke.record["editor_smoke"] = "failed"
+            if island:
+                smoke.record["same_window_island"] = "failed"
         finally:
             (root / "smoke.json").write_text(json.dumps(smoke.record, indent=2) + "\n")
     return smoke.record

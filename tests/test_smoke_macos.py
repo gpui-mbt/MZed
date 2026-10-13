@@ -1077,8 +1077,10 @@ class ProcessCleanupTests(unittest.TestCase):
             output = Path(directory)
 
             class FakeSmoke:
-                def __init__(self, *args, **kwargs):
+                def __init__(self, _helper, _root, _label, _binary, _source, island, _timeout):
                     self.record = {"editor_smoke": "passed", "operations": ["fixture"]}
+                    if island:
+                        self.record["same_window_island"] = "passed"
                     self.owned_input = None
 
                 def run_editor_smoke(self):
@@ -1094,16 +1096,58 @@ class ProcessCleanupTests(unittest.TestCase):
                     raise OSError("simulated process cleanup failure")
 
             with patch.object(smoke, "MacSmoke", FakeSmoke):
-                record = smoke.run_one(
-                    output / "helper", output, "baseline", output / "editor",
-                    output, False, 1.0)
+                for label, island in (("baseline", False), ("derived", True)):
+                    with self.subTest(label=label):
+                        record = smoke.run_one(
+                            output / "helper", output, label, output / "editor",
+                            output, island, 1.0)
+                        evidence_path = output / label / "smoke.json"
+                        evidence = json.loads(evidence_path.read_text())
+                        self.assertEqual(evidence, record)
+                        self.assertEqual(evidence["editor_smoke"], "failed")
+                        if island:
+                            self.assertEqual(evidence["same_window_island"], "failed")
+                        self.assertIn("process cleanup failed", evidence["error"])
+                        self.assertIn("simulated process cleanup failure", evidence["error"])
+                        self.assertTrue(evidence["native_log_sha256"])
 
-            evidence_path = output / "baseline" / "smoke.json"
-            evidence = json.loads(evidence_path.read_text())
-            self.assertEqual(evidence, record)
-            self.assertIn("process cleanup failed", evidence["error"])
-            self.assertIn("simulated process cleanup failure", evidence["error"])
-            self.assertTrue(evidence["native_log_sha256"])
+    def test_cleanup_failure_keeps_overall_qualification_nonpassing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "evidence"
+            args = type("Args", (), {
+                "baseline": Path(directory) / "baseline", "derived": Path(directory) / "derived",
+                "source": Path(directory), "output": output, "timeout": 1.0,
+            })()
+            guards = {
+                "session_fixtures": "passed", "frontmost_guard_fixtures": "passed",
+                "focused_window_guard_fixtures": "passed", "ax_press_guard_fixtures": "passed",
+                "ax_traversal_fixtures": "passed", "plain_input_flags_fixtures": "passed",
+                "mouse_release_ownership_fixtures": "passed", "mouse_release_ownership_fixture_count": 18,
+                "mouse_release_refusal_fixtures": "passed", "mouse_release_refusal_fixture_count": 18,
+                "ax_point_ownership_fixtures": "passed", "ax_point_ownership_fixture_count": 38,
+                "input_sender_settle_fixtures": "passed", "input_sender_settle_requested_ms": 100,
+                "input_sender_settle_ms": 100,
+            }
+            permissions = {"session_locked": False, "on_console": True,
+                           "accessibility": True, "screen_recording": True}
+            run_results = iter([
+                {"editor_smoke": "passed", "same_window_island": "not_implemented"},
+                {"editor_smoke": "failed", "same_window_island": "failed",
+                 "error": "process cleanup failed"},
+            ])
+            with patch.object(smoke.sys, "platform", "darwin"), \
+                    patch.object(smoke.argparse.ArgumentParser, "parse_args", return_value=args), \
+                    patch.object(smoke, "run", return_value=""), \
+                    patch.object(smoke, "helper_json", side_effect=[guards, permissions]), \
+                    patch.object(smoke, "preflight_blocker", return_value=None), \
+                    patch.object(smoke, "run_one", side_effect=lambda *a: next(run_results)):
+                self.assertEqual(smoke.main(), 1)
+
+            qualification = json.loads((output / "qualification.json").read_text())
+            self.assertEqual(qualification["status"], "failed")
+            self.assertEqual(qualification["runs"]["derived"]["editor_smoke"], "failed")
+            self.assertEqual(qualification["runs"]["derived"]["same_window_island"], "failed")
+            self.assertIn("derived editor smoke failed", qualification["error"])
 
 
 if __name__ == "__main__":
