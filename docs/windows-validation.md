@@ -104,21 +104,20 @@ space is below the build preflight requirement.
 
 ## Local evidence
 
-On 2026-10-10, the local x64 Windows host built the archive from the exact
-gpui.mbt pin with MoonBit compiler/core `0.10.14+7d59c7ec9` and MSVC C toolset
-`14.44.35207`. Rust `1.98.1` (`48a229cea`, 2026-09-01) linked the archive for
+On 2026-10-13, a local x64 Windows host built a fresh archive from the exact
+gpui.mbt pin using MZed harness commit
+`cfb7255891716cef4ce3e9830af6fb0c1bf9a42a`, MoonBit compiler/core
+`0.10.14+7d59c7ec9`, and MSVC C toolset `14.44.35207`. Rust `1.98.1`
+(`48a229cea`, 2026-09-01) linked the archive for
 `x86_64-pc-windows-msvc`; both tests in `native/protocol.rs` passed, including
-the 1,000 mount/dispatch/copy/destroy cycles. The build record is under
-`_build/native-windows-final2/build.json`; Rust compile and runtime logs are
-under `_build/native-windows-test-final2/` on the working Windows host. The
-build and test JSON include the exact MZed harness commit and gpui.mbt source
-pin, and the ABI test refuses archive evidence from another pin. The Python
-harness suite ran 69 tests with 14 platform-specific tests skipped.
+the 1,000 mount/dispatch/copy/destroy cycles. The build and test JSON record the
+exact MZed harness and gpui.mbt commits. The Python harness suite ran 74 tests
+with 14 platform-specific tests skipped.
 
-The full pinned Zed Windows build and editor window smoke are **UNRUN locally**.
-Available C: space is below the build's 20 GiB preflight, so no full editor build
-or runtime qualification was attempted locally. The workflow exposes that
-longer editor build only through manual dispatch with
-`run_editor_smoke` enabled. Read its exact commit's artifact before reporting a
-Windows same-window island pass; the portable harness tests do not replace the
-native pixel and pointer evidence.
+The full pinned Zed Windows build and editor window smoke remain **UNRUN
+locally**. The local C: drive had 9.06 GiB free, below the build's 20 GiB
+preflight, so this run makes no full-editor, pixel, pointer, or input
+qualification claim. The workflow exposes that longer editor build only
+through manual dispatch with `run_editor_smoke` enabled. Read its exact
+commit's artifact before reporting a Windows same-window island pass; portable
+harness and native ABI tests do not replace that evidence.
