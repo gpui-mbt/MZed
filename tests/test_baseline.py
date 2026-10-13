@@ -376,8 +376,10 @@ class DerivedBuildEnvironmentTests(unittest.TestCase):
 
 class MacQualificationDocsTests(unittest.TestCase):
     def test_documented_derived_launch_matches_reused_target_and_lifecycle(self):
-        docs = (SCRIPTS.parent / 'docs/macos.md').read_text()
-        workflow = (SCRIPTS.parent / '.github/workflows/macos-native-island.yml').read_text()
+        docs = (SCRIPTS.parent / 'docs/macos.md').read_text(
+            encoding='utf-8')
+        workflow = (SCRIPTS.parent / '.github/workflows/macos-native-island.yml').read_text(
+            encoding='utf-8')
         target = '_build/zed-island/target/mzed-baseline'
         preserved = target + '-preserved/debug/zed'
         self.assertIn('--reuse-target ' + target, docs)
