@@ -1294,11 +1294,19 @@ class MacSmoke:
 
     def stop(self) -> None:
         if self.process is not None and self.process.poll() is None:
-            os.killpg(self.process.pid, signal.SIGTERM)
+            try:
+                os.killpg(self.process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                # The process may exit after poll() but before killpg().
+                pass
             try:
                 self.process.wait(timeout=12)
             except subprocess.TimeoutExpired:
-                os.killpg(self.process.pid, signal.SIGKILL)
+                try:
+                    os.killpg(self.process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    # It may exit between the timeout and the escalation.
+                    pass
                 self.process.wait()
 
 
@@ -1329,8 +1337,13 @@ def run_one(helper: Path, output: Path, label: str, binary: Path, source: Path,
             smoke.record["native_log_sha256"] = hashlib.sha256(log.encode()).hexdigest()
         except (OSError, RuntimeError):
             pass
-        smoke.stop()
-        (root / "smoke.json").write_text(json.dumps(smoke.record, indent=2) + "\n")
+        try:
+            smoke.stop()
+        except (OSError, subprocess.SubprocessError) as cleanup_error:
+            smoke.record["error"] = "; ".join(
+                item for item in (smoke.record.get("error"), f"process cleanup failed: {cleanup_error}") if item)
+        finally:
+            (root / "smoke.json").write_text(json.dumps(smoke.record, indent=2) + "\n")
     return smoke.record
 
 

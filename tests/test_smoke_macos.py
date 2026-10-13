@@ -1051,5 +1051,60 @@ class MacEditSaveOrderingTests(unittest.TestCase):
             self.assertEqual(capture.record["typed_text_visible"], [smoke.ADDITION])
 
 
+class ProcessCleanupTests(unittest.TestCase):
+    def test_stop_tolerates_process_exit_between_poll_and_signal(self):
+        class FakeProcess:
+            pid = 12345
+
+            def __init__(self):
+                self.wait_calls = []
+
+            def poll(self):
+                return None
+
+            def wait(self, timeout=None):
+                self.wait_calls.append(timeout)
+                return 0
+
+        driver = smoke.MacSmoke.__new__(smoke.MacSmoke)
+        driver.process = FakeProcess()
+        with patch.object(smoke.os, "killpg", side_effect=ProcessLookupError):
+            driver.stop()
+        self.assertEqual(driver.process.wait_calls, [12])
+
+    def test_run_one_preserves_smoke_json_when_process_cleanup_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+
+            class FakeSmoke:
+                def __init__(self, *args, **kwargs):
+                    self.record = {"editor_smoke": "passed", "operations": ["fixture"]}
+                    self.owned_input = None
+
+                def run_editor_smoke(self):
+                    pass
+
+                def log_path(self):
+                    return output / "fixture.log"
+
+                def read_log(self):
+                    return "fixture log"
+
+                def stop(self):
+                    raise OSError("simulated process cleanup failure")
+
+            with patch.object(smoke, "MacSmoke", FakeSmoke):
+                record = smoke.run_one(
+                    output / "helper", output, "baseline", output / "editor",
+                    output, False, 1.0)
+
+            evidence_path = output / "baseline" / "smoke.json"
+            evidence = json.loads(evidence_path.read_text())
+            self.assertEqual(evidence, record)
+            self.assertIn("process cleanup failed", evidence["error"])
+            self.assertIn("simulated process cleanup failure", evidence["error"])
+            self.assertTrue(evidence["native_log_sha256"])
+
+
 if __name__ == "__main__":
     unittest.main()
