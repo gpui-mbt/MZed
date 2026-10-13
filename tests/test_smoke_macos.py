@@ -1068,7 +1068,7 @@ class ProcessCleanupTests(unittest.TestCase):
 
         driver = smoke.MacSmoke.__new__(smoke.MacSmoke)
         driver.process = FakeProcess()
-        with patch.object(smoke.os, "killpg", side_effect=ProcessLookupError):
+        with patch.object(smoke.os, "killpg", side_effect=ProcessLookupError, create=True):
             driver.stop()
         self.assertEqual(driver.process.wait_calls, [12])
 
