@@ -9,7 +9,7 @@ another window, or change upstream Zed. It is not full roadmap issue 0019 accept
 - Zed v1.22.0: `76659a55a8c10ed355a070f8764a0b1733e3c115`.
 - Reviewed gpui.mbt: `bf965aebbeb1dfdfed26373d4a7a58bb51a5ad01`.
   Parked async work from issue 0016 is not included.
-- MoonBit compiler and core: `0.10.14+7d59c7ec9`; Rust: `1.98.1`.
+- MoonBit compiler and core: `0.10.15+943464bfa`; Rust: `1.98.1`.
 - Zed-derived patch and application integration remain in this repository under
   GPL-3.0-or-later. The derived checkout retains upstream LICENSE-GPL,
   LICENSE-APACHE and component notices. No GPL application code is copied into

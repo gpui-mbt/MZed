@@ -12,7 +12,7 @@ import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
 GPUI_COMMIT = 'bf965aebbeb1dfdfed26373d4a7a58bb51a5ad01'
-COMPILER = '0.10.14+7d59c7ec9'
+COMPILER = '0.10.15+943464bfa'
 
 
 def run(argv):

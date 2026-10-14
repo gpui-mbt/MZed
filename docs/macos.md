@@ -11,7 +11,7 @@ existing X11 qualification and remain unchanged.
 
 The full macOS editor check is a local qualification on a Mac with Xcode,
 Command Line Tools, the Metal Toolchain component, CMake, Rust 1.98.1, MoonBit
-`0.10.14+7d59c7ec9`, and at least 20 GiB free on the volume holding the Zed
+`0.10.15+943464bfa`, and at least 20 GiB free on the volume holding the Zed
 checkout and Cargo target. Run `python3 scripts/baseline.py inspect` first. It
 checks that the Metal compiler executes and, when Xcode exposes an installed
 component identifier, selects that identifier through `TOOLCHAINS` for both
