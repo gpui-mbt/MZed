@@ -4,11 +4,16 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
-import shutil
 import subprocess
 from baseline import ROOT, verify_source
 from check_palette_shortcut import ensure_no_default_linux_collision
 
+PATCHED_NATIVE_FILES = (
+    ('native/island_view.rs', 'crates/zed/src/zed/native_island.rs'),
+    ('native/protocol.rs', 'crates/zed/src/zed/native_island/protocol.rs'),
+    ('native/palette_protocol.rs', 'crates/zed/src/zed/palette_protocol.rs'),
+    ('native/palette_view.rs', 'crates/zed/src/zed/palette_view.rs'),
+)
 
 def prepare(source):
     verify_source(source)
@@ -16,13 +21,10 @@ def prepare(source):
     palette_shortcut = ensure_no_default_linux_collision(source, patch.read_text())
     subprocess.run(['git', '-C', str(source), 'apply', '--check', str(patch)], check=True)
     subprocess.run(['git', '-C', str(source), 'apply', str(patch)], check=True)
-    destination = source / 'crates/zed/src/zed/native_island'
-    destination.mkdir(exist_ok=False)
-    zed_source = source / 'crates/zed/src/zed'
-    shutil.copyfile(ROOT / 'native/island_view.rs', zed_source / 'native_island.rs')
-    shutil.copyfile(ROOT / 'native/protocol.rs', destination / 'protocol.rs')
-    shutil.copyfile(ROOT / 'native/palette_protocol.rs', zed_source / 'palette_protocol.rs')
-    shutil.copyfile(ROOT / 'native/palette_view.rs', zed_source / 'palette_view.rs')
+    for template, path in PATCHED_NATIVE_FILES:
+        derived = source / path
+        if not derived.is_file() or derived.read_bytes() != (ROOT / template).read_bytes():
+            raise ValueError(f'patched native source mismatch: {path}; regenerate native-island.patch')
     fence = source / 'crates/gpui_linux/src/linux/wayland/ime_fence.rs'
     provenance = {'upstream_commit': json.loads((ROOT / 'upstream.lock.json').read_text())['commit'],
         'patch_sha256': hashlib.sha256(patch.read_bytes()).hexdigest(),
