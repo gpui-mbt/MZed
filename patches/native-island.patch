@@ -11,17 +11,6 @@ index aaf8740..1bc8175 100644
   "url",
   "urlencoding",
   "util",
-diff --git a/README.md b/README.md
-index 9f641fb..24840ee 100644
---- a/README.md
-+++ b/README.md
-@@ -1,3 +1,6 @@
-+> [!IMPORTANT]
-+> Remove this line to confirm you've reviewed this PR before submitting.
-+
- # Zed
- 
- [![Zed](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/zed-industries/zed/main/assets/badge/v0.json)](https://zed.dev)
 diff --git a/crates/gpui/src/input.rs b/crates/gpui/src/input.rs
 index 4167aa0..b087307 100644
 --- a/crates/gpui/src/input.rs
@@ -3174,10 +3163,10 @@ index 4034efd..83a7b6e 100644
      "agent::",
 diff --git a/crates/zed/src/zed/native_island.rs b/crates/zed/src/zed/native_island.rs
 new file mode 100644
-index 0000000..38e7fe3
+index 0000000..e79dc72
 --- /dev/null
 +++ b/crates/zed/src/zed/native_island.rs
-@@ -0,0 +1,387 @@
+@@ -0,0 +1,393 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// This integration is applied only to the pinned, derived Zed application.
 +mod protocol;
@@ -3403,10 +3392,16 @@ index 0000000..38e7fe3
 +                    if this.press.begin(native.generation) {
 +                        this.prior_focus = window.focused(cx);
 +                        this.press_focus_subscription = this.prior_focus.as_ref().map(|focus| {
-+                            cx.on_blur(focus, window, |this, window, _cx| this.cancel(window))
++                            cx.on_blur(focus, window, |this, window, _cx| {
++                                if this.press.owned() {
++                                    log::info!("MZed island press canceled after GPUI focus loss");
++                                }
++                                this.cancel(window)
++                            })
 +                        });
 +                        window.capture_pointer(hitbox.id);
 +                        this.capture = Some(hitbox.id);
++                        log::info!("MZed island press owned generation={}", native.generation);
 +                        window.prevent_default();
 +                        cx.stop_propagation();
 +                        // Force a redraw while down so ownership cannot rely on a frame-local hitbox.

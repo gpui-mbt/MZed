@@ -223,10 +223,16 @@ impl NativeIsland {
                     if this.press.begin(native.generation) {
                         this.prior_focus = window.focused(cx);
                         this.press_focus_subscription = this.prior_focus.as_ref().map(|focus| {
-                            cx.on_blur(focus, window, |this, window, _cx| this.cancel(window))
+                            cx.on_blur(focus, window, |this, window, _cx| {
+                                if this.press.owned() {
+                                    log::info!("MZed island press canceled after GPUI focus loss");
+                                }
+                                this.cancel(window)
+                            })
                         });
                         window.capture_pointer(hitbox.id);
                         this.capture = Some(hitbox.id);
+                        log::info!("MZed island press owned generation={}", native.generation);
                         window.prevent_default();
                         cx.stop_propagation();
                         // Force a redraw while down so ownership cannot rely on a frame-local hitbox.

@@ -9,12 +9,12 @@ another window, or change upstream Zed. It is not full roadmap issue 0019 accept
 - Zed v1.22.0: `76659a55a8c10ed355a070f8764a0b1733e3c115`.
 - Reviewed gpui.mbt: `bf965aebbeb1dfdfed26373d4a7a58bb51a5ad01`.
   Parked async work from issue 0016 is not included.
-- MoonBit compiler and core: `0.10.14+7d59c7ec9`; Rust: `1.98.1`.
+- MoonBit compiler and core: `0.10.15+943464bfa`; Rust: `1.98.1`.
 - Zed-derived patch and application integration remain in this repository under
   GPL-3.0-or-later. The derived checkout retains upstream LICENSE-GPL,
   LICENSE-APACHE and component notices. No GPL application code is copied into
   the independent Apache gpui.mbt framework. `prepare_island.py` records source
-  and patch hashes. The README review marker is intentionally left for a human.
+  and patch hashes.
 
 ## Ownership and bounded contract
 
@@ -56,6 +56,39 @@ links real native MoonBit, runs contract tests normally and with C/runtime
 UBSan and ASan+UBSan, then builds the editor. Rust is not sanitizer-instrumented;
 LeakSanitizer is disabled and no leak qualification is claimed.
 
+The separate [macOS ABI workflow](../.github/workflows/macos-native-island.yml)
+builds the same copied-value archive and runs its Rust protocol tests on Apple
+Silicon. It does not launch Zed or qualify the Mac UI. Follow the [macOS
+qualification path](macos.md) for the pinned editor build and same-window
+status-bar smoke; the Linux X11 lane remains unchanged.
+
+The `Windows native island` workflow builds the same copied-scene archive with
+MSVC, links and runs `native/protocol.rs` in one Rust process, builds the pinned
+editor with the opt-in island, and runs an isolated native-window smoke. The
+smoke captures the island's exact scene pixels, drives same-window Win32 pointer
+input, checks resize and lifecycle behavior, and verifies open/edit/save through
+the editor. It also opens the pinned Zed command palette while an island press
+is owned, requires the GPUI focus-loss cancellation acknowledgment, and checks
+the trailing release against stable pixels and dispatch logs while the same
+top-level window stays foreground. Its minimize cancellation case waits for an
+app-side owned-press acknowledgment, then probes a bare release after restore
+before any new press.
+The exact-source hosted run [38115696033](https://github.com/gpui-mbt/MZed/actions/runs/38115696033)
+passed on 2026-10-11 for harness commit
+`1da6973a3fbb8d059e620aa6e347f514deb9bc5a`, including the Windows native ABI
+and full editor-smoke jobs. The smoke reported one visible process-owned window
+on a 1024×728 primary-monitor work area at 96 DPI, with the expected 120×18
+scene pixels. It observed one GPUI focus-loss cancellation acknowledgment and
+four unchanged late-release captures; the separate minimize check observed
+three unchanged captures. Dispatches were `[1, 2, 1]`, and native keyboard
+input saved the expected fixture. This qualifies the added focus-loss check
+for that bounded Windows scenario. It does not qualify another DPI scale or a
+monitor transition. See the
+[Windows evidence record](windows-validation.md#hosted-windows-qualification)
+for exact source pins and outcomes. The full editor build and UI smoke remain
+unrun locally because the available disk space is below the build preflight
+requirement.
+
 The declared local churn budget is 1,000 create/dispatch/copy/destroy cycles,
 maximum four live slots and one quad per snapshot. This is a bounded regression,
 not proof of an allocation ceiling or arbitrary callback execution budget.
@@ -71,10 +104,12 @@ then exact native editor edit/save after disabling the island. The 1x/2x runs
 check rectangle pixels against logical dimensions rather than assuming scale.
 
 A compiled binary or ABI-only pass is not a same-window pass. Consult the exact
-commit's workflow and uploaded build/smoke JSON, logs and screenshots. Hardware,
-Wayland, macOS application UI, Windows, accessibility, IME, modal-during-drag,
-full-frame performance and all hidden/clipped lifecycle paths remain outside
-this first qualification unless separately demonstrated.
+commit's workflow and uploaded build/smoke JSON, logs and screenshots. The
+hosted result qualifies the bounded Windows scenario above; hardware, multiple
+monitors, DPI scaling beyond 96 DPI, Wayland, macOS application UI,
+accessibility, IME, modal-during-drag, full-frame performance and hidden/clipped
+lifecycle paths remain outside this first qualification unless separately
+demonstrated.
 
 ## Faster harness iteration, separate final qualification
 

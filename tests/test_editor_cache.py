@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -10,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 import editor_cache
 
 
+@unittest.skipIf(os.name == 'nt', 'editor build cache is a Linux ELF and system-loader cache')
 class CacheTests(unittest.TestCase):
     def fixture(self, root):
         cache = root / 'cache'
@@ -74,6 +76,7 @@ class CacheTests(unittest.TestCase):
                 editor_cache.restore(root / 'source', root / 'evidence', cache, {'key': 'expected', 'inputs': {'source_commit': 'upstream'}})
             self.assertEqual(sentinel.read_text(), 'keep')
 
+@unittest.skipIf(os.name == 'nt', 'editor cache fingerprints Linux build and loader inputs')
 class FingerprintTests(unittest.TestCase):
     def test_application_and_environment_changes_invalidate_but_harness_does_not(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -87,7 +90,9 @@ class FingerprintTests(unittest.TestCase):
             (source / 'added.rs').write_text('derived code')
             native.mkdir()
             (native / 'libmzed_native.a').write_bytes(b'native image')
-            (native / 'build.json').write_text(json.dumps({'schema': 1, 'native_library': '/ignored/location', 'mode': 'normal'}))
+            native_build = {'schema': 1, 'native_library': '/ignored/location', 'mode': 'normal',
+                            'harness_commit': 'original-harness', 'c_compiler': 'cc-v1'}
+            (native / 'build.json').write_text(json.dumps(native_build))
             for filename in ['bin/moonc', 'lib/runtime/runtime.c', 'include/moonbit.h',
                              'lib/core/_build/native/release/bundle/core.core',
                              'lib/core/_build/native/release/bundle/abort/abort.core']:
@@ -107,6 +112,14 @@ class FingerprintTests(unittest.TestCase):
                 original = editor_cache.fingerprint(source, native)['key']
                 (root / 'scripts/smoke_island.py').write_text('new harness only')
                 self.assertEqual(editor_cache.fingerprint(source, native)['key'], original)
+                native_build['harness_commit'] = 'new-harness-commit'
+                (native / 'build.json').write_text(json.dumps(native_build))
+                self.assertEqual(editor_cache.fingerprint(source, native)['key'], original)
+                native_build['c_compiler'] = 'cc-v2'
+                (native / 'build.json').write_text(json.dumps(native_build))
+                self.assertNotEqual(editor_cache.fingerprint(source, native)['key'], original)
+                native_build['c_compiler'] = 'cc-v1'
+                (native / 'build.json').write_text(json.dumps(native_build))
                 (root / 'native/island.mbt').write_text('different application')
                 self.assertNotEqual(editor_cache.fingerprint(source, native)['key'], original)
                 (root / 'native/island.mbt').write_text('public source')

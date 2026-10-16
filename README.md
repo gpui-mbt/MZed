@@ -4,18 +4,26 @@
 # MZed
 
 Keep a working Rust Zed editor while replacing small, optional regions with
-MoonBit. Linux qualification comes first, then macOS; new Windows integration
-work waits for those priorities and an available Windows environment.
+MoonBit. The Linux baseline and island have native qualification workflows.
+Windows builds the pinned native ABI with MSVC. The exact-source hosted Windows
+2022 run passed same-window island pixels, pointer input, resize, GPUI
+focus-loss and minimize cancellation, lifecycle checks, and fixture edit/save.
+That run covers one primary-monitor scenario at 96 DPI; other DPI scales and
+monitor transitions remain unqualified. Full-editor smoke is a manual hosted
+run; local full-editor build and UI execution are unrun because of disk space
+limits.
 
-This first implementation is a **baseline qualification harness**, not a
-working MoonBit editor island. It pins Zed v1.22.0, verifies source and license
-provenance, builds the unchanged editor, and exercises native file-open/edit/save.
-The native CI result must be inspected before calling that baseline qualified.
+The baseline editor and the opt-in MoonBit island remain separate lanes. This
+repository pins Zed v1.22.0, verifies source and license provenance, and
+exercises native file-open/edit/save. Inspect each lane's exact CI evidence
+before calling it qualified.
 
 - [Source pin and build procedure](docs/linux-baseline.md)
+- [macOS native ABI and same-window qualification path](docs/macos.md)
 - [Native seam investigation and remaining gates](docs/native-seam.md)
 - [Linux command palette profile and exclusions](docs/native-palette-linux.md)
 - [Linux IME test environment IaC](docs/linux-ime-environment.md)
+- [Windows build and smoke procedure](docs/windows-validation.md)
 - [Machine-readable source lock](upstream.lock.json)
 
 Run the dependency-free harness tests:

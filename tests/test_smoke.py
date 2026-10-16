@@ -1,6 +1,7 @@
 import argparse
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -12,6 +13,7 @@ smoke = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(smoke)
 
 
+@unittest.skipIf(os.name == 'nt', 'this evidence harness drives X11 with xdotool, ImageMagick and OCR')
 class SmokeHarnessTests(unittest.TestCase):
     def test_settings_path_and_final_newline_match_pinned_editor(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -29,8 +31,8 @@ class SmokeHarnessTests(unittest.TestCase):
                 self.assertTrue(config['disable_ai'])
                 self.assertFalse(config['auto_update'])
                 self.assertFalse(config['auto_install_extensions']['html'])
-                self.assertEqual(kwargs['cwd'], root)
-                self.assertEqual(kwargs['env']['HOME'], str(output / 'home'))
+                self.assertEqual(kwargs['cwd'], root.resolve())
+                self.assertEqual(kwargs['env']['HOME'], str((output / 'home').resolve()))
                 self.assertEqual(kwargs['env']['ZED_ALLOW_EMULATED_GPU'], '1')
                 self.assertTrue(config['ensure_final_newline_on_save'])
                 return process
