@@ -23,5 +23,10 @@ class NativeWorkflowPinsTests(unittest.TestCase):
                 self.assertIn(f'core-version: {COMPILER}', content)
 
 
+    def test_linux_palette_abi_suite_is_executed(self):
+        workflow = (ROOT / '.github/workflows/native-island.yml').read_text()
+        self.assertIn('bash scripts/test_palette_abi.sh _build/native-normal', workflow)
+
+
 if __name__ == '__main__':
     unittest.main()

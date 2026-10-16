@@ -54,6 +54,8 @@ jobs:
             python3 scripts/build_native.py --source _build/gpui --output "_build/native-$mode" --mode "$mode" 2>&1 | tee "_build/native-$mode-build.log"
             bash scripts/test_native.sh "_build/native-$mode" "$mode" 2>&1 | tee "_build/native-$mode-test.log"
           done
+      - name: Linked Linux palette ABI and lifecycle regression
+        run: bash scripts/test_palette_abi.sh _build/native-normal
       - name: Fingerprint application, compiler, runtime and system inputs
         id: fingerprint
         run: python3 scripts/editor_cache.py fingerprint
