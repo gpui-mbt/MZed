@@ -14,6 +14,7 @@ build_island = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(build_island)
 
 
+@unittest.skipUnless(sys.platform.startswith('linux'), 'Linux-only build environment contract')
 class BuildEnvironmentTests(unittest.TestCase):
     def test_private_native_and_proxy_environment_is_forwarded(self):
         inherited = {
