@@ -34,7 +34,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: gpui-mbt/gpui.mbt
-          ref: bf965aebbeb1dfdfed26373d4a7a58bb51a5ad01
+          ref: 72d89475894e14f3fea9a3407e12a640da356ed9
           path: _build/gpui-windows
       - uses: hustcer/setup-moonbit@1522f9aef02a8ca0187dfc00a41f5dd6b16750f7
         with:

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This integration is applied only to the pinned, derived Zed application.
 mod protocol;
+pub(crate) use protocol::claim_runtime_owner;
 
 use gpui::{
     App, Bounds, ClickEvent, ContentMask, Context, DispatchPhase, FocusHandle, Hitbox,
