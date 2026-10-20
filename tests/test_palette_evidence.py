@@ -8,7 +8,7 @@ from palette_interactions import verify_dispatch_log
 
 
 class PaletteEvidenceTests(unittest.TestCase):
-    record = 'MZed palette dispatch=open-settings-file epoch=1 origin=EntityId(7)\n'
+    record = 'MZed palette dispatch token=0:1:1:4:3 action=mzed.open-settings-file window=WindowId(1)\n'
 
     def test_no_selection_is_not_success(self):
         with self.assertRaises(RuntimeError):

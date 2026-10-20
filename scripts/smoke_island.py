@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Same-window native island interactions followed by original editor input/save."""
 from island_interactions import exercise
-from palette_interactions import exercise_palette, verify_dispatch_log
+from palette_interactions import exercise as exercise_palette
 import argparse
 import hashlib
 import json
@@ -53,8 +53,8 @@ def main():
         fixture.write_text(original)
         config = output / 'data/config'
         config.mkdir(parents=True)
-        (config / 'settings.json').write_text('// MZed palette settings probe\n' + json.dumps({'telemetry': {'diagnostics': False, 'metrics': False},
-            'disable_ai': True, 'auto_update': False, 'auto_install_extensions': {'html': False}, 'ensure_final_newline_on_save': True, 'languages': {'Plain Text': {'enable_language_server': False}}}))
+        (config / 'settings.json').write_text(json.dumps({'telemetry': {'diagnostics': False, 'metrics': False},
+            'mzed_palette_execution_probe': 'MZed settings command evidence', 'disable_ai': True, 'auto_update': False, 'auto_install_extensions': {'html': False}, 'ensure_final_newline_on_save': True, 'languages': {'Plain Text': {'enable_language_server': False}}}, indent=2))
         home = output / 'home'
         home.mkdir()
         env = dict(os.environ, HOME=str(home), XDG_CONFIG_HOME=str(output / 'config'), XDG_DATA_HOME=str(output / 'data'),
@@ -101,8 +101,6 @@ def main():
                 'visible fixture after staying in Restricted Mode')
             record['operations'].append('dismissed project prompt into Restricted Mode without trusting worktree')
             exercise(window, output, process, record)
-            if getattr(args, 'palette', False):
-                exercise_palette(window, output, record, run, wait_for_text)
             run(['xdotool', 'key', '--clearmodifiers', 'ctrl+End'])
             run(['xdotool', 'type', '--clearmodifiers', '--delay', '30', addition])
             run(['xdotool', 'key', '--clearmodifiers', 'ctrl+s'])
@@ -117,9 +115,6 @@ def main():
             run(['import', '-window', window, str(output / 'editor.png')])
             native_log = (output / 'data/logs/Zed.log').read_text()
             dispatches = [int(value) for value in re.findall(r'MZed island counter=(\d+)', native_log)]
-            if getattr(args, 'palette', False):
-                verify_dispatch_log(native_log, 1)
-                record['palette_dispatch_count'] = 1
             record['native_dispatches'] = dispatches
             if dispatches != [1, 2, 1]:
                 raise RuntimeError(f'native dispatch sequence was not exactly [1, 2, 1]: {dispatches}')
@@ -127,6 +122,8 @@ def main():
                 raise RuntimeError('native mount/destroy lifecycle count mismatch')
             if re.search(r'MZed island [^\n]*failed', native_log):
                 raise RuntimeError('native island reported an error')
+            if getattr(args, 'palette', False):
+                exercise_palette(window, output, process, record, run, wait_for_text)
             record['editor_smoke'] = 'passed'
             record['same_window_island'] = 'passed'
     except (OSError, RuntimeError, subprocess.SubprocessError) as error:

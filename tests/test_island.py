@@ -135,6 +135,7 @@ class NativeSmokeEvidenceTests(unittest.TestCase):
                     patch.object(smoke_island, 'run', side_effect=command), \
                     patch.object(smoke_island, 'wait_for_text', return_value='mocked readiness'), \
                     patch.object(smoke_island, 'exercise', side_effect=exercise), \
+                    patch.object(smoke_island, 'exercise_palette'), \
                     patch.object(smoke_island.subprocess, 'Popen', side_effect=start), \
                     patch.object(smoke_island.subprocess, 'run', return_value=interaction.subprocess.CompletedProcess([], 0, '42\n')):
                 result = smoke_island.main()

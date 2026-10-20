@@ -214,8 +214,6 @@ int main(void) {
     assert(mzed_native_palette_v1_finish_close(slot, generation, epoch) == 0);
     assert(mzed_native_palette_v1_destroy(slot, generation) == 0);
 
-    // The production settings command survives query layout and paired release;
-    // replaying its selection request cannot mint another action.
     generation = 4;
     request = 0;
     const char settings_id[] = "mzed.open-settings-file";
@@ -232,22 +230,22 @@ int main(void) {
     assert(mzed_native_palette_v1_open(slot, generation, settings_commands,
         sizeof(settings_commands), initial_integers, 5, initial_doubles, 17,
         500.0, 40.0, 16.0) == 0);
-    const uint8_t query[] = "Settings";
-    assert(replace_text(query, sizeof(query) - 1) == 0);
+    assert(replace_text((const uint8_t *)"Settings", 8) == 0);
     assert_open_composing(1, 0);
     assert(snapshot_i32(snapshot, 12) == 1);
+    assert(send_key(2, 1, 0, 0) == 0);
+    assert_open_composing(1, 0);
     assert(send_key(1, 1, 0, 1) == 0);
     assert_open_composing(1, 0);
     assert(send_key(2, 1, 0, 0) == 0);
     assert(send_key(1, 1, 0, 0) == 0);
-    const int32_t selection_request = request;
     assert_open_composing(0, 0);
     assert(snapshot_i32(snapshot, 17) == sizeof(settings_id) - 1);
     const size_t settings_offset = 88u + (size_t)snapshot_i32(snapshot, 5)
         + (size_t)snapshot_i32(snapshot, 6);
     assert(memcmp(snapshot + settings_offset, settings_id, sizeof(settings_id) - 1) == 0);
-    assert(mzed_native_palette_v1_input(slot, generation, epoch,
-        selection_request, 1, 1, 0, 0, no_text, 0) == -7);
+    assert(mzed_native_palette_v1_input(slot, generation, epoch, request,
+        1, 1, 0, 0, no_text, 0) == -7);
     assert(send_key(2, 1, 0, 0) == 0);
     assert(mzed_native_palette_v1_finish_close(slot, generation, epoch) == 0);
     snapshot_current();
@@ -256,8 +254,19 @@ int main(void) {
     snapshot_current();
     assert(snapshot_i32(snapshot, 17) == 0);
     assert(mzed_native_palette_v1_destroy(slot, generation) == 0);
+    generation = 5;
+    request = 0;
+    assert(mzed_native_palette_v1_open(slot, generation, settings_commands,
+        sizeof(settings_commands), initial_integers, 5, initial_doubles, 17,
+        500.0, 40.0, 16.0) == 0);
+    assert(mzed_native_palette_v1_input(slot, 4, epoch, 100,
+        1, 1, 0, 0, no_text, 0) == -5);
+    assert(send_key(1, 2, 0, 0) == 0);
+    assert_open_composing(0, 0);
+    assert(snapshot_i32(snapshot, 17) == 0);
+    assert(mzed_native_palette_v1_finish_close(slot, generation, epoch) == 0);
+    assert(mzed_native_palette_v1_destroy(slot, generation) == 0);
 
     puts("delayed Enter/Escape release, IME commit/cancel, repeat guard, modifiers, and one-shot action: PASS");
     return 0;
 }
-

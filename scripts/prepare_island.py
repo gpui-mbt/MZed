@@ -49,4 +49,3 @@ if __name__ == '__main__':
     parser.add_argument('--source', required=True, type=Path)
     args = parser.parse_args()
     print(json.dumps(prepare(args.source.resolve()), indent=2))
-

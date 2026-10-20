@@ -627,6 +627,53 @@ impl NativePalette {
     }
 }
 
+/// A terminal request can authorize only one call into its captured workspace.
+/// Snapshot equality includes the palette document revision and request number.
+pub struct DispatchReceipt {
+    expected: PaletteSnapshot,
+    token: Option<String>,
+}
+
+pub fn dispatch_receipt(
+    owner: &NativePalette,
+    snapshot: &PaletteSnapshot,
+    epoch: i32,
+    action: Option<&str>,
+) -> Option<DispatchReceipt> {
+    if snapshot.generation != owner.generation || snapshot.epoch != epoch
+        || snapshot.last_request != owner.request
+        || snapshot.is_open || snapshot.composing || snapshot.pending_request != 0
+        || action != snapshot.action_id.as_deref()
+        || !matches!(action, Some("mzed.open-settings-file" | "mzed.toggle-full-screen"))
+    {
+        return None;
+    }
+    Some(DispatchReceipt {
+        expected: snapshot.clone(),
+        token: Some(format!("{}:{}:{}:{}:{}", owner.slot, owner.generation,
+            epoch, snapshot.last_request, snapshot.field_revision)),
+    })
+}
+
+impl DispatchReceipt {
+    pub fn consume(
+        &mut self,
+        current: Option<&PaletteSnapshot>,
+        context_matches: bool,
+    ) -> Option<(&'static str, String)> {
+        let token = self.token.take()?;
+        if !context_matches || current != Some(&self.expected) {
+            return None;
+        }
+        let command = match self.expected.action_id.as_deref()? {
+            "mzed.open-settings-file" => "mzed.open-settings-file",
+            "mzed.toggle-full-screen" => "mzed.toggle-full-screen",
+            _ => return None,
+        };
+        Some((command, token))
+    }
+}
+
 fn validate_pending_owner_identity(
     slot: i32,
     generation: i32,
@@ -884,4 +931,73 @@ mod tests {
         assert!(std::panic::catch_unwind(|| decode_snapshot(&bytes, 7)).is_ok());
         assert_eq!(decode_snapshot(&bytes, 7).unwrap_err(), -9);
     }
+    fn dispatch_fixture() -> (std::mem::ManuallyDrop<NativePalette>, PaletteSnapshot) {
+        let owner = std::mem::ManuallyDrop::new(NativePalette {
+            slot: 0, generation: 7, epoch: 1, request: 4, _owner_thread: PhantomData,
+        });
+        let action = "mzed.open-settings-file";
+        let header = [1_i32, 7, 1, 0, 3, 0, 0, 0, 0, 0, -1, -1, 1, 0, 0, 0,
+            0, action.len() as i32, 4, 0, 0, 0];
+        let mut bytes: Vec<u8> = header.iter().flat_map(|v| v.to_le_bytes()).collect();
+        bytes.extend_from_slice(action.as_bytes());
+        (owner, decode_snapshot(&bytes, 7).unwrap())
+    }
+
+    #[test]
+    fn settings_dispatch_consumes_the_terminal_request_exactly_once() {
+        let (owner, snapshot) = dispatch_fixture();
+        let mut receipt = dispatch_receipt(&owner, &snapshot, 1, snapshot.action_id.as_deref()).unwrap();
+        assert_eq!(receipt.consume(Some(&snapshot), true),
+            Some(("mzed.open-settings-file", "0:7:1:4:3".into())));
+        assert!(receipt.consume(Some(&snapshot), true).is_none());
+    }
+
+    #[test]
+    fn stale_document_request_generation_epoch_or_action_never_dispatches() {
+        let (owner, snapshot) = dispatch_fixture();
+        for field in 0..5 {
+            let mut current = snapshot.clone();
+            match field {
+                0 => current.field_revision += 1,
+                1 => current.last_request += 1,
+                2 => current.generation += 1,
+                3 => current.epoch += 1,
+                _ => current.action_id = Some("mzed.toggle-full-screen".into()),
+            }
+            let mut receipt = dispatch_receipt(&owner, &snapshot, 1, snapshot.action_id.as_deref()).unwrap();
+            assert!(receipt.consume(Some(&current), true).is_none());
+            assert!(receipt.consume(Some(&snapshot), true).is_none());
+        }
+    }
+
+    #[test]
+    fn retired_window_workspace_document_focus_or_replacement_modal_cancels_receipt() {
+        let (owner, snapshot) = dispatch_fixture();
+        let mut receipt = dispatch_receipt(&owner, &snapshot, 1, snapshot.action_id.as_deref()).unwrap();
+        assert!(receipt.consume(Some(&snapshot), false).is_none());
+        assert!(receipt.consume(Some(&snapshot), true).is_none());
+        let mut receipt = dispatch_receipt(&owner, &snapshot, 1, snapshot.action_id.as_deref()).unwrap();
+        assert!(receipt.consume(None, true).is_none());
+    }
+
+    #[test]
+    fn escape_open_composing_pending_or_unrecognized_actions_cannot_mint_receipts() {
+        let (owner, snapshot) = dispatch_fixture();
+        for field in 0..8 {
+            let mut current = snapshot.clone();
+            match field {
+                0 => current.is_open = true,
+                1 => current.composing = true,
+                2 => current.pending_request = 5,
+                3 => current.action_id = None,
+                4 => current.action_id = Some("unrecognized".into()),
+                5 => current.generation += 1,
+                6 => current.epoch += 1,
+                _ => current.last_request -= 1,
+            }
+            assert!(dispatch_receipt(&owner, &current, 1, current.action_id.as_deref()).is_none());
+        }
+        assert!(dispatch_receipt(&owner, &snapshot, 1, None).is_none());
+    }
+
 }

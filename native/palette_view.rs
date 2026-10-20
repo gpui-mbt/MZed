@@ -5,10 +5,10 @@ use std::ops::Range;
 
 #[path = "palette_dispatch.rs"]
 mod palette_dispatch;
-use palette_dispatch::{DispatchOwner, DispatchTicket, SelectedCommand};
+use palette_dispatch::{DispatchOwner, DispatchTicket};
 
 use gpui::{
-    Action, App, Bounds, ContentMask, Context, DismissEvent, ElementInputHandler, Entity,
+    App, Bounds, ContentMask, Context, DismissEvent, ElementInputHandler, Entity,
     EntityInputHandler, EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement,
     KeyUpEvent, ParentElement, Pixels, Point, Render, ShapedLine, SharedString, Styled,
     Subscription, UTF16Selection, WeakEntity, Window, WindowId, canvas, div, fill, point, px, rgb,
@@ -20,7 +20,6 @@ use unicode_segmentation::UnicodeSegmentation;
 use workspace::{ModalView, MultiWorkspace, Workspace};
 
 use super::{
-    ToggleFullScreen,
     palette_protocol::{NativePalette, PaletteMetrics, PaletteSnapshot, SubmitResult},
 };
 
@@ -56,6 +55,10 @@ impl CloseKey {
             Self::Escape => key == "escape",
         }
     }
+}
+
+fn close_key_name(key: CloseKey) -> &'static str {
+    match key { CloseKey::Enter => "enter", CloseKey::Escape => "escape" }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -121,9 +124,8 @@ pub struct PaletteView {
     focus: FocusHandle,
     workspace: WeakEntity<Workspace>,
     workspace_id: Option<gpui::EntityId>,
-    document_id: Option<gpui::EntityId>,
     window_id: WindowId,
-    view_entity_id: gpui::EntityId,
+    document_id: Option<gpui::EntityId>,
     style: StyleStamp,
     palette_text_style: Option<PaletteTextStyle>,
     snapshot: Option<PaletteSnapshot>,
@@ -157,7 +159,6 @@ impl PaletteView {
         let style = style_stamp(window);
         let window_id = window.window_handle().window_id();
         let workspace_id = workspace.upgrade().map(|workspace| workspace.entity_id());
-        let view_entity_id = cx.entity_id();
         let weak = cx.weak_entity();
         let interceptor = cx.intercept_keystrokes(move |event, window, app| {
             if window.window_handle().window_id() != window_id {
@@ -192,9 +193,8 @@ impl PaletteView {
             focus,
             workspace,
             workspace_id,
-            document_id,
             window_id,
-            view_entity_id,
+            document_id,
             style,
             palette_text_style: None,
             snapshot: None,
@@ -254,6 +254,7 @@ impl PaletteView {
                 was_composing,
                 keydown_modifiers: modifier_bits(keystroke),
             });
+            log::info!("MZed palette close-pending key={} window={:?}", close_key_name(key), self.window_id);
             return;
         }
         let Some(owner) = self.native.as_mut() else {
@@ -431,89 +432,64 @@ impl PaletteView {
         };
         let workspace = self.workspace.clone();
         let workspace_id = self.workspace_id;
-        let view_entity_id = self.view_entity_id;
-        let dispatch_owner = DispatchOwner {
-            window: self.window_id,
-            workspace: workspace_id,
-            document: self.document_id,
-        };
-        let mut ticket = DispatchTicket::new(dispatch_owner, action_id.as_deref());
-        // Retire the native input owner before emitting dismissal. Keep the FFI
-        // guard strongly captured outside the view so dropping the modal cannot
-        // skip its terminal ACK.
+        let window_id = self.window_id;
+        let document_id = self.document_id;
+        let mut ticket = DispatchTicket::new(DispatchOwner {
+            window: window_id, workspace: workspace_id, document: document_id,
+        }, action_id.as_deref());
+        let terminal = owner.snapshot().ok();
+        let receipt = terminal.as_ref().and_then(|snapshot| {
+            super::palette_protocol::dispatch_receipt(&owner, snapshot, epoch, action_id.as_deref())
+        });
+        // The input owner must outlive modal removal so ACK cannot be skipped
+        // when dismissal drops the view. Never queue a global action: its later
+        // active-workspace lookup could target a different document or window.
         window.retire_text_input_owner();
         cx.emit(DismissEvent);
         window.defer(cx, move |window, app| {
-            let old_modal_is_active = workspace
-                .update(app, |workspace, cx| {
-                    workspace
-                        .active_modal::<PaletteView>(cx)
-                        .is_some_and(|modal| modal.entity_id() == view_entity_id)
+            let displayed_workspace_matches = workspace_id.is_some_and(|expected| {
+                window.root::<MultiWorkspace>().flatten().is_some_and(|multi_workspace| {
+                    multi_workspace.read(app).workspace().entity_id() == expected
                 })
-                .unwrap_or(false);
-            if old_modal_is_active {
-                drop(owner);
-                return;
-            }
+            });
+            let owner_matches = window.window_handle().window_id() == window_id
+                && window.is_window_active()
+                && displayed_workspace_matches;
             let live_owner = workspace.update(app, |workspace, cx| DispatchOwner {
                 window: window.window_handle().window_id(),
                 workspace: Some(cx.entity_id()),
                 document: workspace.active_item(cx).map(|item| item.item_id()),
             }).ok();
-            let displayed_workspace_matches = workspace_id.is_some_and(|expected| {
-                window.root::<MultiWorkspace>().flatten().is_some_and(|root| {
-                    root.read(app).workspace().entity_id() == expected
-                })
+            let context_matches = workspace.update(app, |workspace, cx| {
+                !workspace.has_active_modal(window, cx)
+                    && workspace.focus_handle(cx).contains_focused(window, cx)
+                    && workspace.project().read(cx).is_local()
+            }).unwrap_or(false);
+            let current = owner.snapshot().ok();
+            let command = receipt.and_then(|mut receipt| {
+                receipt.consume(current.as_ref(), owner_matches && context_matches)
             });
-            let replacement_palette = workspace.update(app, |workspace, cx| {
-                workspace.active_modal::<PaletteView>(cx).is_some()
-            }).unwrap_or(true);
-            // An ACK alone is idempotent, so it cannot authorize dispatch of a
-            // copied selection from a different epoch or an already consumed close.
-            let selection_matches = owner.snapshot().is_ok_and(|snapshot| {
-                snapshot.epoch == epoch && snapshot.generation == owner.generation()
-                    && snapshot.last_request == owner.request() && snapshot.pending_request == 0
-                    && !snapshot.is_open && !snapshot.composing
-                    && snapshot.action_id == action_id
-            });
+            let admitted = ticket.take(live_owner.as_ref(), command.is_some()).is_some();
             if let Err(error) = owner.finish_close(epoch) {
                 log::error!("MZed palette close ACK rejected: {error}");
-                drop(owner);
                 return;
             }
-            // finish_close consumes the shared terminal before the guard is
-            // dropped and before an allowlisted host action can reenter GPUI.
             drop(owner);
-            let command = ticket.take(
-                live_owner.as_ref(),
-                selection_matches && displayed_workspace_matches
-                    && window.is_window_active() && !replacement_palette,
-            );
-            match command {
-                Some(SelectedCommand::OpenSettingsFile) => {
-                    // The app-level action looks up the globally active workspace.
-                    // Use its existing implementation with the captured workspace
-                    // instead, so another window cannot receive this request.
-                    let _ = workspace.update(app, |workspace, cx| {
-                        // Remote settings intentionally open a new local window in
-                        // Zed; that behavior is outside this same-window profile.
-                        if !workspace.project().read(cx).is_local() {
-                            return;
-                        }
-                        log::info!("MZed palette dispatch=open-settings-file epoch={epoch} origin={view_entity_id:?}");
-                        super::open_settings_file(
-                            paths::settings_file(),
-                            || settings::initial_user_settings_content().as_ref().into(),
-                            window,
-                            cx,
-                        );
-                    });
+            let Some((command, token)) = command.filter(|_| admitted) else { return; };
+            let _ = workspace.update(app, |_, cx| {
+                log::info!("MZed palette dispatch token={token} action={command} window={window_id:?}");
+                match command {
+                    "mzed.open-settings-file" => super::open_settings_file_with_receipt(
+                        paths::settings_file(),
+                        || settings::initial_user_settings_content().as_ref().into(),
+                        window,
+                        cx,
+                        Some(token),
+                    ),
+                    "mzed.toggle-full-screen" => window.toggle_fullscreen(),
+                    _ => unreachable!(),
                 }
-                Some(SelectedCommand::ToggleFullScreen) => {
-                    window.dispatch_action(ToggleFullScreen.boxed_clone(), app);
-                }
-                None => {}
-            }
+            });
         });
     }
 
@@ -813,6 +789,9 @@ impl EntityInputHandler for PaletteView {
         if !self.accepting_input() {
             return;
         }
+        if let Some(pending) = self.pending_release.as_mut() {
+            pending.was_composing = true;
+        }
         let result = self.native.as_mut().map(NativePalette::unmark_composition);
         match result {
             Some(Ok(result)) => {
@@ -841,6 +820,9 @@ impl EntityInputHandler for PaletteView {
         if !self.accepting_input() {
             return;
         }
+        if let Some(pending) = self.pending_release.as_mut() {
+            pending.was_composing = true;
+        }
         let result = self.native.as_mut().map(|owner| owner.replace(range, text));
         match result {
             Some(Ok(result)) => {
@@ -857,6 +839,9 @@ impl EntityInputHandler for PaletteView {
     fn cancel_text_composition(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.accepting_input() {
             return;
+        }
+        if let Some(pending) = self.pending_release.as_mut() {
+            pending.was_composing = true;
         }
         let result = self.native.as_mut().map(NativePalette::cancel_composition);
         match result {
@@ -881,6 +866,9 @@ impl EntityInputHandler for PaletteView {
     ) {
         if !self.accepting_input() {
             return;
+        }
+        if let Some(pending) = self.pending_release.as_mut() {
+            pending.was_composing = true;
         }
         let result = self
             .native

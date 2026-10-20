@@ -169,3 +169,45 @@ Validation at implementation time:
 
 Keep this PR draft. Selected-command runtime qualification remains pending
 until the new smoke actually passes; adding this gate is not a claim of success.
+
+## Selected-command dispatch qualification (2026-10-20 candidate)
+
+The candidate below extends the consuming DispatchTicket above with an exact
+terminal snapshot receipt and asynchronous completion evidence. Remote projects
+remain refused. The selected ID is mapped through a host allowlist. `Open Settings File` calls
+Zed's existing settings-file implementation with the captured workspace and
+window, rather than posting the global action that resolves the active workspace
+later. The Linux fullscreen command uses the captured window's native fullscreen
+operation, equivalent to Zed's Linux action handler.
+
+A receipt binds the terminal action to the native slot, generation, open epoch,
+query document revision and final request. It is consumed once, before the close
+ACK and host call. The deferred continuation also requires the original active
+window, displayed workspace, original active editor item, restored workspace
+focus and absence of any replacement modal. Any mismatch discards execution.
+Native owner teardown remains mandatory even when execution is discarded.
+An IME callback during a held Enter/Escape marks that entire physical sequence
+as composition-related, even if composition begins and ends before key-up.
+
+The required Linux CI now runs Rust receipt regressions, the existing linked
+MoonBit palette ABI suites (including the actual settings command ID), and the
+existing same-window scene/edit/save smoke followed by palette execution at
+1x and 2x. The new X11 sequence cancels with Escape, filters `Settings`, holds
+and repeats Enter Down with zero dispatches, releases Enter, observes the
+settings file's known contents, and sends a duplicate release. `smoke.json`
+requires exactly one dispatch and one completed settings-file open carrying
+the same receipt and GPUI window. It also records the original X11 window,
+raw screenshot hashes and the selected command. Missing/duplicate/misbound logs
+fail the evidence oracle. A dispatch log alone is not a successful file open.
+
+Local candidate verification: Python unittest discovery passed 149 tests (one
+skip); Python compilation, C syntax check, four dispatch-owner Rust tests and
+eight protocol/receipt Rust tests passed. The local Rust compiler was 1.99.1;
+the required CI remains pinned to 1.98.1. Linked MoonBit and actual GUI tests
+have not run locally.
+
+Runtime status for this candidate is pending until the corresponding CI run
+passes. Earlier observations above do not qualify this new execution path.
+Physical IME commit callback order, Wayland command execution, macOS and Windows
+palette execution remain unverified. The X11 synthetic key sequence is not a
+physical IME test.
