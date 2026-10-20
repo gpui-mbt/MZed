@@ -67,7 +67,8 @@ def exercise(window, output, process, record, run, wait_for_text):
             run(['convert', str(image), '-crop',
                  f'{640 * scale}x{128 * scale}+{left}+{64 * scale}',
                  '+repage', '-resize', '200%', str(crop)])
-            observed = run(['tesseract', str(crop), 'stdout', '--psm', '6'])
+            observed = '\n'.join(run(['tesseract', str(crop), 'stdout', '--psm', mode])
+                                 for mode in ('6', '11'))
             if predicate(' '.join(observed.split()).casefold()):
                 return observed
             time.sleep(0.2)
@@ -84,6 +85,8 @@ def exercise(window, output, process, record, run, wait_for_text):
                       lambda text: has_settings_command(text) and 'settings' in text
                       and 'toggle full screen' not in text, 'filtered Settings command')
 
+    if 'MZed palette X11 detectable-repeat enabled' not in log():
+        raise RuntimeError('X11 did not enable detectable autorepeat for the palette')
     open_filtered('palette-cancel')
     key('key', '--clearmodifiers', 'Escape')
     wait_for_text(window, output / 'palette-cancelled.png',

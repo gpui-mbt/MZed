@@ -6695,3 +6695,31 @@ new file mode 100644
 +        }
 +    }
 +}
+diff --git a/crates/gpui_linux/src/linux/x11/client.rs b/crates/gpui_linux/src/linux/x11/client.rs
+--- a/crates/gpui_linux/src/linux/x11/client.rs
++++ b/crates/gpui_linux/src/linux/x11/client.rs
+@@ -415,6 +415,24 @@
+                 .xkb_use_extension(XKB_X11_MIN_MAJOR_XKB_VERSION, XKB_X11_MIN_MINOR_XKB_VERSION),
+         )?;
+         assert!(xkb.supported);
++
++        if std::env::var("MZED_NATIVE_PALETTE").as_deref() == Ok("1") {
++            // Poll-batch heuristics can expose an autorepeat KeyRelease before
++            // its paired press arrives. The palette's release fence needs the
++            // server to suppress those synthetic releases on this connection.
++            let repeat = xkb::PerClientFlag::DETECTABLE_AUTO_REPEAT;
++            let flags = get_reply(
++                || "MZed palette requires detectable X11 autorepeat",
++                xcb_connection.xkb_per_client_flags(
++                    xkb::ID::USE_CORE_KBD.into(), repeat, repeat,
++                    0u8.into(), 0u8.into(), 0u8.into(),
++                ),
++            )?;
++            if flags.value & repeat != repeat {
++                anyhow::bail!("MZed palette requires detectable X11 autorepeat");
++            }
++            log::info!("MZed palette X11 detectable-repeat enabled");
++        }
+ 
+         let events = xkb::EventType::STATE_NOTIFY
+             | xkb::EventType::MAP_NOTIFY

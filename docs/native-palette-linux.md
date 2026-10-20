@@ -211,3 +211,30 @@ passes. Earlier observations above do not qualify this new execution path.
 Physical IME commit callback order, Wayland command execution, macOS and Windows
 palette execution remain unverified. The X11 synthetic key sequence is not a
 physical IME test.
+
+### X11 repeat fence and OCR follow-up
+
+Run 39436096011 reached selection at 1x, then recorded a dispatch before the
+smoke's explicit Enter release. At 2x, OCR omitted a visibly rendered highlighted
+row. Neither result qualifies settings execution.
+
+The pinned X11 backend filters synthetic autorepeat releases only when the
+paired press is in the same polling batch. A separate local Xvfb/Xlib probe
+observed 22 downs and 21 ups before explicit release with detectable autorepeat
+disabled. With detectable autorepeat enabled, the earlier probe observed only
+downs until explicit release. These probes are X11 transport observations, not
+Zed acceptance or physical IME evidence.
+
+The opt-in `MZED_NATIVE_PALETTE=1` X11 connection now requests and checks XKB
+`DETECTABLE_AUTO_REPEAT`; unavailable support rejects startup instead of claiming
+a reliable physical-release fence. The default non-palette path is unchanged.
+The mounted-palette smoke still requires zero dispatch before its own keyup,
+exactly one matching dispatch/completion afterward, and actual settings contents.
+It additionally requires the successful XKB negotiation log. Native acceptance
+of this change is pending the new CI run.
+
+For the fixed 1x/2x CI geometry, the smoke retains full raw frames and a bounded
+query/command-region crop. It combines Tesseract segmentation modes 6 and 11;
+mode 6 omitted the highlighted row in the retained 2x opening image, while mode
+11 read it, and mode 6 read the retained filtered image. This changes only the
+visual readiness probe, not the dispatch/completion oracle.
