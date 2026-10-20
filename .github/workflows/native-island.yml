@@ -19,6 +19,10 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - run: python3 -m unittest discover -s tests -v
       - run: python3 -m py_compile scripts/*.py
+      - name: Dispatch ownership and one-shot ticket tests
+        run: |
+          rustc --edition 2024 --test native/palette_dispatch.rs -o /tmp/palette-dispatch-tests
+          /tmp/palette-dispatch-tests
   native-island:
     needs: harness
     runs-on: ubuntu-24.04
@@ -138,3 +142,4 @@ jobs:
             _build/island-openbox-*.log
             _build/island-xcompmgr-*.log
           retention-days: 14
+

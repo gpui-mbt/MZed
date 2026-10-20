@@ -122,3 +122,48 @@ Fcitx-to-Mozc peer identity, and normal supervised exit for that run.
 Persistent-profile startup, exact commit callback/event ordering,
 selected-command execution, arbitrary system selection changes, and other
 compositor or hardware-renderer profiles remain unqualified.
+
+## Command dispatch implementation update (2026-10-20)
+
+The existing allowlisted dispatch path is now guarded by a consuming Rust
+`DispatchTicket`. It compares the original GPUI window, workspace entity, and
+active item entity at deferred close completion. Item entity identity is the
+bounded document-lifetime contract here: closing/replacing the item cancels the
+request; no path string, mutable title, or strong item reference revives it.
+An empty workspace is admitted only while it is still empty. A switched workspace,
+inactive window, replacement palette, failed close ACK, or stale native
+selection snapshot cannot dispatch. The native generation, epoch, request, and
+pending-operation state are checked before consuming the shared close.
+
+`Open Settings File` invokes Zed's existing `open_settings_file` implementation
+using the captured weak workspace and original window. The global
+`OpenSettingsFile` action otherwise resolves `with_active_or_new_workspace`,
+which is not a suitable ownership boundary for a delayed modal selection.
+The host logs the helper invocation with its palette entity and epoch; this is
+a dispatch count, not proof by itself that the asynchronous file open completed.
+
+The Linux 1x/2x same-window smoke retains the existing island and editor
+edit/save checks and adds `--palette`: Escape must dispatch zero commands;
+three Enter keydowns must leave the palette open without dispatch; matching
+keyup must invoke settings once; an unmatched extra keyup must not invoke it
+again. OCR must observe a unique marker in the actual settings buffer captured
+from the original X11 window, followed by return to the original document.
+The smoke retains PNGs, the settings image SHA256, OCR, window ID, dispatch
+records, and final exact dispatch count in `smoke.json` plus `Zed.log`.
+Missing, duplicate, malformed, or different-command dispatch evidence fails.
+
+Validation at implementation time:
+
+- `python3 -m unittest discover -s tests -q`: 146 tests, PASS (one skip).
+  These include synthetic evidence rejection tests; they are not native runs.
+- `python3 -m py_compile scripts/*.py`: PASS.
+- `cc -std=gnu11 -Wall -Wextra -Werror -I native -fsyntax-only tests/native_palette_host_lifecycle.c`: PASS; syntax only.
+- Rust dispatch-ticket execution, linked MoonBit ABI execution, derived Zed
+  compile/link, and the new real X11 selection smoke: NOT RUN locally; no Rust
+  compiler or built Zed runtime was available in this session. CI results must
+  be attached separately for the new commit.
+- Physical IME and exact native commit callback ordering: NOT RUN. The historical
+  IME observations above remain historical and do not qualify this change.
+
+Keep this PR draft. Selected-command runtime qualification remains pending
+until the new smoke actually passes; adding this gate is not a claim of success.

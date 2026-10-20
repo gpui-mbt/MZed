@@ -77,6 +77,16 @@ class PrepareIslandTests(unittest.TestCase):
                              '// modified native/protocol.rs\n')
             self.assertFalse((source / 'mzed-derived.json').exists())
 
+    def test_repository_patch_materializes_exact_native_templates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory)
+            subprocess.run(['git', 'init', '--quiet', str(source)], check=True)
+            includes = [f'--include={path}' for _, path in prepare_island.PATCHED_NATIVE_FILES]
+            subprocess.run(['git', '-C', str(source), 'apply', *includes,
+                            str(ROOT / 'patches/native-island.patch')], check=True)
+            for template, path in prepare_island.PATCHED_NATIVE_FILES:
+                self.assertEqual((source / path).read_bytes(), (ROOT / template).read_bytes())
+
     def test_native_workflow_checks_out_compiler_pinned_gpui(self):
         workflow = (ROOT / '.github/workflows/native-island.yml').read_text()
         self.assertIn(f'ref: {GPUI_COMMIT}', workflow)

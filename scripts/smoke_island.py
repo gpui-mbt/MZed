@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Same-window native island interactions followed by original editor input/save."""
 from island_interactions import exercise
+from palette_interactions import exercise_palette, verify_dispatch_log
 import argparse
 import hashlib
 import json
@@ -31,6 +32,7 @@ def wait_for_text(window, screenshot, predicate, description):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--palette', action='store_true')
     parser.add_argument('--binary', required=True, type=Path)
     parser.add_argument('--output', required=True, type=Path)
     parser.add_argument('--source', required=True, type=Path)
@@ -51,12 +53,14 @@ def main():
         fixture.write_text(original)
         config = output / 'data/config'
         config.mkdir(parents=True)
-        (config / 'settings.json').write_text(json.dumps({'telemetry': {'diagnostics': False, 'metrics': False},
+        (config / 'settings.json').write_text('// MZed palette settings probe\n' + json.dumps({'telemetry': {'diagnostics': False, 'metrics': False},
             'disable_ai': True, 'auto_update': False, 'auto_install_extensions': {'html': False}, 'ensure_final_newline_on_save': True, 'languages': {'Plain Text': {'enable_language_server': False}}}))
         home = output / 'home'
         home.mkdir()
         env = dict(os.environ, HOME=str(home), XDG_CONFIG_HOME=str(output / 'config'), XDG_DATA_HOME=str(output / 'data'),
             XDG_CACHE_HOME=str(output / 'cache'), WAYLAND_DISPLAY='', MZED_NATIVE_ISLAND='1', ZED_ALLOW_EMULATED_GPU='1', ZED_UPDATE_EXPLANATION='Pinned baseline experiment')
+        if getattr(args, 'palette', False):
+            env['MZED_NATIVE_PALETTE'] = '1'
         record['xrandr'] = run(['xrandr', '--current'])
         record['vulkaninfo'] = run(['vulkaninfo', '--summary'])
         with (output / 'editor.log').open('w') as log:
@@ -97,6 +101,8 @@ def main():
                 'visible fixture after staying in Restricted Mode')
             record['operations'].append('dismissed project prompt into Restricted Mode without trusting worktree')
             exercise(window, output, process, record)
+            if getattr(args, 'palette', False):
+                exercise_palette(window, output, record, run, wait_for_text)
             run(['xdotool', 'key', '--clearmodifiers', 'ctrl+End'])
             run(['xdotool', 'type', '--clearmodifiers', '--delay', '30', addition])
             run(['xdotool', 'key', '--clearmodifiers', 'ctrl+s'])
@@ -111,6 +117,9 @@ def main():
             run(['import', '-window', window, str(output / 'editor.png')])
             native_log = (output / 'data/logs/Zed.log').read_text()
             dispatches = [int(value) for value in re.findall(r'MZed island counter=(\d+)', native_log)]
+            if getattr(args, 'palette', False):
+                verify_dispatch_log(native_log, 1)
+                record['palette_dispatch_count'] = 1
             record['native_dispatches'] = dispatches
             if dispatches != [1, 2, 1]:
                 raise RuntimeError(f'native dispatch sequence was not exactly [1, 2, 1]: {dispatches}')

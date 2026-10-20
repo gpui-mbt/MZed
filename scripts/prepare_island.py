@@ -9,6 +9,7 @@ from baseline import ROOT, verify_source
 from check_palette_shortcut import ensure_no_default_linux_collision
 
 PATCHED_NATIVE_FILES = (
+    ('native/palette_dispatch.rs', 'crates/zed/src/zed/palette_dispatch.rs'),
     ('native/island_view.rs', 'crates/zed/src/zed/native_island.rs'),
     ('native/protocol.rs', 'crates/zed/src/zed/native_island/protocol.rs'),
     ('native/palette_protocol.rs', 'crates/zed/src/zed/palette_protocol.rs'),
@@ -48,3 +49,4 @@ if __name__ == '__main__':
     parser.add_argument('--source', required=True, type=Path)
     args = parser.parse_args()
     print(json.dumps(prepare(args.source.resolve()), indent=2))
+

@@ -3,6 +3,10 @@
 
 use std::ops::Range;
 
+#[path = "palette_dispatch.rs"]
+mod palette_dispatch;
+use palette_dispatch::{DispatchOwner, DispatchTicket, SelectedCommand};
+
 use gpui::{
     Action, App, Bounds, ContentMask, Context, DismissEvent, ElementInputHandler, Entity,
     EntityInputHandler, EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement,
@@ -117,6 +121,7 @@ pub struct PaletteView {
     focus: FocusHandle,
     workspace: WeakEntity<Workspace>,
     workspace_id: Option<gpui::EntityId>,
+    document_id: Option<gpui::EntityId>,
     window_id: WindowId,
     view_entity_id: gpui::EntityId,
     style: StyleStamp,
@@ -151,6 +156,9 @@ impl PaletteView {
         let style = style_stamp(window);
         let window_id = window.window_handle().window_id();
         let workspace_id = workspace.upgrade().map(|workspace| workspace.entity_id());
+        let document_id = workspace.upgrade().and_then(|workspace| {
+            workspace.read(cx).active_item(cx).map(|item| item.item_id())
+        });
         let view_entity_id = cx.entity_id();
         let weak = cx.weak_entity();
         let interceptor = cx.intercept_keystrokes(move |event, window, app| {
@@ -186,6 +194,7 @@ impl PaletteView {
             focus,
             workspace,
             workspace_id,
+            document_id,
             window_id,
             view_entity_id,
             style,
@@ -425,6 +434,12 @@ impl PaletteView {
         let workspace = self.workspace.clone();
         let workspace_id = self.workspace_id;
         let view_entity_id = self.view_entity_id;
+        let dispatch_owner = DispatchOwner {
+            window: self.window_id,
+            workspace: workspace_id,
+            document: self.document_id,
+        };
+        let mut ticket = DispatchTicket::new(dispatch_owner, action_id.as_deref());
         // Retire the native input owner before emitting dismissal. Keep the FFI
         // guard strongly captured outside the view so dropping the modal cannot
         // skip its terminal ACK.
@@ -442,14 +457,26 @@ impl PaletteView {
                 drop(owner);
                 return;
             }
-            let captured_workspace_is_live = workspace.update(app, |_, _| ()).is_ok();
+            let live_owner = workspace.update(app, |workspace, cx| DispatchOwner {
+                window: window.window_handle().window_id(),
+                workspace: Some(cx.entity_id()),
+                document: workspace.active_item(cx).map(|item| item.item_id()),
+            }).ok();
             let displayed_workspace_matches = workspace_id.is_some_and(|expected| {
-                window
-                    .root::<MultiWorkspace>()
-                    .flatten()
-                    .is_some_and(|multi_workspace| {
-                        multi_workspace.read(app).workspace().entity_id() == expected
-                    })
+                window.root::<MultiWorkspace>().flatten().is_some_and(|root| {
+                    root.read(app).workspace().entity_id() == expected
+                })
+            });
+            let replacement_palette = workspace.update(app, |workspace, cx| {
+                workspace.active_modal::<PaletteView>(cx).is_some()
+            }).unwrap_or(true);
+            // An ACK alone is idempotent, so it cannot authorize dispatch of a
+            // copied selection from a different epoch or an already consumed close.
+            let selection_matches = owner.snapshot().is_ok_and(|snapshot| {
+                snapshot.epoch == epoch && snapshot.generation == owner.generation()
+                    && snapshot.last_request == owner.request() && snapshot.pending_request == 0
+                    && !snapshot.is_open && !snapshot.composing
+                    && snapshot.action_id == action_id
             });
             if let Err(error) = owner.finish_close(epoch) {
                 log::error!("MZed palette close ACK rejected: {error}");
@@ -459,18 +486,30 @@ impl PaletteView {
             // finish_close consumes the shared terminal before the guard is
             // dropped and before an allowlisted host action can reenter GPUI.
             drop(owner);
-            if !captured_workspace_is_live || !displayed_workspace_matches {
-                return;
-            }
-            let action = match action_id.as_deref() {
-                Some("mzed.open-settings-file") => {
-                    Some(zed_actions::OpenSettingsFile.boxed_clone())
+            let command = ticket.take(
+                live_owner.as_ref(),
+                selection_matches && displayed_workspace_matches
+                    && window.is_window_active() && !replacement_palette,
+            );
+            match command {
+                Some(SelectedCommand::OpenSettingsFile) => {
+                    // The app-level action looks up the globally active workspace.
+                    // Use its existing implementation with the captured workspace
+                    // instead, so another window cannot receive this request.
+                    let _ = workspace.update(app, |_, cx| {
+                        log::info!("MZed palette dispatch=open-settings-file epoch={epoch} origin={view_entity_id:?}");
+                        super::open_settings_file(
+                            paths::settings_file(),
+                            || settings::initial_user_settings_content().as_ref().into(),
+                            window,
+                            cx,
+                        );
+                    });
                 }
-                Some("mzed.toggle-full-screen") => Some(ToggleFullScreen.boxed_clone()),
-                _ => None,
-            };
-            if let Some(action) = action {
-                window.dispatch_action(action, app);
+                Some(SelectedCommand::ToggleFullScreen) => {
+                    window.dispatch_action(ToggleFullScreen.boxed_clone(), app);
+                }
+                None => {}
             }
         });
     }
