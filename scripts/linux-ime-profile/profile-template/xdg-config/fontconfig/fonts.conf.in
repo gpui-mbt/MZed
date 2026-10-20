@@ -1,0 +1,8 @@
+<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
+<fontconfig>
+  <dir>@RUNTIME_PREFIX@/usr/share/fonts</dir>
+  <cachedir>@PROFILE@/xdg-cache/fontconfig</cachedir>
+  <alias><family>sans-serif</family><prefer><family>DejaVu Sans</family><family>VL Gothic</family></prefer></alias>
+  <alias><family>monospace</family><prefer><family>DejaVu Sans Mono</family><family>VL Gothic</family></prefer></alias>
+</fontconfig>

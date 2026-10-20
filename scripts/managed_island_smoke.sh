@@ -22,6 +22,6 @@ if [[ "$ready" != true ]]; then
   echo 'X11 window manager did not advertise readiness' >&2
   exit 1
 fi
-python3 scripts/smoke_island.py \
+python3 scripts/smoke_island.py --palette \
   --binary _build/zed-island/target/mzed-island/debug/zed \
   --source _build/zed-island --output _build/island-smoke-${GPUI_X11_SCALE_FACTOR}

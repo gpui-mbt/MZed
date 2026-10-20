@@ -19,6 +19,10 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - run: python3 -m unittest discover -s tests -v
       - run: python3 -m py_compile scripts/*.py
+      - name: Dispatch ownership and one-shot ticket tests
+        run: |
+          rustc --edition 2024 --test native/palette_dispatch.rs -o /tmp/palette-dispatch-tests
+          /tmp/palette-dispatch-tests
   native-island:
     needs: harness
     runs-on: ubuntu-24.04
@@ -30,7 +34,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: gpui-mbt/gpui.mbt
-          ref: bf965aebbeb1dfdfed26373d4a7a58bb51a5ad01
+          ref: 72d89475894e14f3fea9a3407e12a640da356ed9
           path: _build/gpui
       - uses: hustcer/setup-moonbit@1522f9aef02a8ca0187dfc00a41f5dd6b16750f7
         with:
@@ -45,6 +49,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc g++ libasound2-dev libfontconfig-dev libgit2-dev libglib2.0-dev libssl-dev libva-dev libvulkan1 libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev libzstd-dev make cmake clang lld llvm jq gettext-base elfutils libsqlite3-dev musl-tools musl-dev libstdc++-14-dev pipewire xdg-desktop-portal xvfb xauth xdotool x11-xserver-utils x11-utils imagemagick mesa-vulkan-drivers vulkan-tools openbox xcompmgr tesseract-ocr
           rustup toolchain install 1.98.1 --profile minimal
+      - name: Rust palette dispatch receipt regressions
+        run: |
+          rustc +1.98.1 --edition=2024 --test tests/palette_protocol_harness.rs -o _build/palette-protocol-tests
+          _build/palette-protocol-tests
       - name: Native copied-scene ABI and bounded lifecycle regressions
         env:
           RUSTUP_TOOLCHAIN: 1.98.1
@@ -54,6 +62,8 @@ jobs:
             python3 scripts/build_native.py --source _build/gpui --output "_build/native-$mode" --mode "$mode" 2>&1 | tee "_build/native-$mode-build.log"
             bash scripts/test_native.sh "_build/native-$mode" "$mode" 2>&1 | tee "_build/native-$mode-test.log"
           done
+      - name: Linked Linux palette ABI and lifecycle regression
+        run: bash scripts/test_palette_abi.sh _build/native-normal
       - name: Fingerprint application, compiler, runtime and system inputs
         id: fingerprint
         run: python3 scripts/editor_cache.py fingerprint

@@ -28,7 +28,12 @@ def build_environment(native, target, metal_toolchain=None):
         return env
     names = ['PATH', 'HOME', 'USER', 'LOGNAME', 'LANG', 'LC_ALL', 'TMPDIR', 'TMP', 'TEMP',
              'CARGO_HOME', 'RUSTUP_HOME', 'SSL_CERT_FILE', 'SSL_CERT_DIR', 'BINDGEN_EXTRA_CLANG_ARGS',
-             'TOOLCHAINS']
+             'TOOLCHAINS',
+             'PKG_CONFIG_PATH', 'PKG_CONFIG_LIBDIR', 'PKG_CONFIG_SYSROOT_DIR',
+             'LD_LIBRARY_PATH', 'LIBRARY_PATH', 'LIBCLANG_PATH', 'CC', 'CXX',
+             'AR', 'CFLAGS', 'CXXFLAGS', 'LDFLAGS', 'HTTP_PROXY', 'HTTPS_PROXY',
+             'ALL_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'all_proxy',
+             'no_proxy']
     env = {name: os.environ[name] for name in names if name in os.environ}
     env.update(CI='true', CARGO_TARGET_DIR=str(target), RUSTUP_TOOLCHAIN=LOCK['rust'],
                MZED_NATIVE_LIB_DIR=str(native),
@@ -70,7 +75,9 @@ def run_build(argv, source, env, log, timeout, disk_path):
                 process.wait()
 
 
-def build(source, native, output, reuse_target=None):
+def build(source, native, output, reuse_target=None, jobs=2):
+    if not 1 <= jobs <= 4:
+        raise ValueError('jobs must be in 1..4')
     output.mkdir(parents=True, exist_ok=False)
     default_target = source / 'target/mzed-island'
     target = default_target if reuse_target is None else reuse_target.resolve()
@@ -82,22 +89,24 @@ def build(source, native, output, reuse_target=None):
             raise ValueError('--reuse-target must name a prebuilt target containing the platform editor binary')
     elif target.exists():
         raise ValueError('preserve existing target; choose a fresh source attempt')
-    record = {'schema': 1, 'harness_commit': subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip(), 'kind': 'derived-same-window-island', 'upstream_commit': LOCK['commit'],
+    record = {'schema': 2, 'harness_commit': subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip(), 'kind': 'derived-same-window-island', 'upstream_commit': LOCK['commit'],
         'host_system': platform.system(), 'host_machine': platform.machine(),
         'started_utc': datetime.datetime.now(datetime.timezone.utc).isoformat(), 'build': 'failed',
-        'target_directory': str(target), 'target_reused': reused,
+        'target_directory': str(target), 'target_reused': reused, 'jobs': jobs,
         'provenance': json.loads((source / 'mzed-derived.json').read_text()),
         'moonbit': json.loads((native / 'build.json').read_text())}
     metal_toolchain = select_metal_toolchain() if platform.system() == 'Darwin' else None
     if metal_toolchain:
         record['metal_toolchain'] = metal_toolchain
     started = time.monotonic()
-    argv = ['cargo', '+' + LOCK['rust'], 'build', '--locked', '-p', 'zed', '--bin', 'zed', '--jobs', '2',
+    argv = ['cargo', '+' + LOCK['rust'], 'build', '--locked', '-p', 'zed', '--bin', 'zed', '--jobs', str(jobs),
         '--config', 'profile.dev.debug=0', '--config', 'profile.dev.build-override.debug=0',
         '--config', 'profile.dev.incremental=false']
     try:
         env = build_environment(native, target, metal_toolchain)
-        # Per-run CI labels and undeclared compiler overrides are deliberately absent.
+        record['command'] = argv
+        record['inherited_environment_names'] = sorted(env)
+        # Environment values, including proxy endpoints, must not enter evidence.
         record['cache_reused'] = False
         if shutil.disk_usage(source).free < 20 * 1024**3:
             raise OSError('less than 20 GiB free; existing work is preserved')
@@ -120,6 +129,7 @@ if __name__ == '__main__':
         parser.add_argument('--' + name, required=True, type=Path)
     parser.add_argument('--reuse-target', type=Path,
                         help='reuse a prebuilt Cargo target under source/target (for example the pinned baseline target)')
+    parser.add_argument('--jobs', type=int, choices=range(1, 5), default=2)
     args = parser.parse_args()
     reuse_target = args.reuse_target.resolve() if args.reuse_target else None
-    raise SystemExit(build(args.source.resolve(), args.native.resolve(), args.output.resolve(), reuse_target))
+    raise SystemExit(build(args.source.resolve(), args.native.resolve(), args.output.resolve(), reuse_target, args.jobs))

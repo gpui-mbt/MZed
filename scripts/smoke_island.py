@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Same-window native island interactions followed by original editor input/save."""
 from island_interactions import exercise
+from palette_interactions import exercise as exercise_palette
 import argparse
 import hashlib
 import json
@@ -31,6 +32,7 @@ def wait_for_text(window, screenshot, predicate, description):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--palette', action='store_true')
     parser.add_argument('--binary', required=True, type=Path)
     parser.add_argument('--output', required=True, type=Path)
     parser.add_argument('--source', required=True, type=Path)
@@ -52,11 +54,13 @@ def main():
         config = output / 'data/config'
         config.mkdir(parents=True)
         (config / 'settings.json').write_text(json.dumps({'telemetry': {'diagnostics': False, 'metrics': False},
-            'disable_ai': True, 'auto_update': False, 'auto_install_extensions': {'html': False}, 'ensure_final_newline_on_save': True, 'languages': {'Plain Text': {'enable_language_server': False}}}))
+            'mzed_palette_execution_probe': 'MZed settings command evidence', 'disable_ai': True, 'auto_update': False, 'auto_install_extensions': {'html': False}, 'ensure_final_newline_on_save': True, 'languages': {'Plain Text': {'enable_language_server': False}}}, indent=2))
         home = output / 'home'
         home.mkdir()
         env = dict(os.environ, HOME=str(home), XDG_CONFIG_HOME=str(output / 'config'), XDG_DATA_HOME=str(output / 'data'),
             XDG_CACHE_HOME=str(output / 'cache'), WAYLAND_DISPLAY='', MZED_NATIVE_ISLAND='1', ZED_ALLOW_EMULATED_GPU='1', ZED_UPDATE_EXPLANATION='Pinned baseline experiment')
+        if getattr(args, 'palette', False):
+            env['MZED_NATIVE_PALETTE'] = '1'
         record['xrandr'] = run(['xrandr', '--current'])
         record['vulkaninfo'] = run(['vulkaninfo', '--summary'])
         with (output / 'editor.log').open('w') as log:
@@ -118,6 +122,8 @@ def main():
                 raise RuntimeError('native mount/destroy lifecycle count mismatch')
             if re.search(r'MZed island [^\n]*failed', native_log):
                 raise RuntimeError('native island reported an error')
+            if getattr(args, 'palette', False):
+                exercise_palette(window, output, process, record, run, wait_for_text)
             record['editor_smoke'] = 'passed'
             record['same_window_island'] = 'passed'
     except (OSError, RuntimeError, subprocess.SubprocessError) as error:
