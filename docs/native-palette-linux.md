@@ -136,7 +136,9 @@ selection snapshot cannot dispatch. The native generation, epoch, request, and
 pending-operation state are checked before consuming the shared close.
 
 `Open Settings File` invokes Zed's existing `open_settings_file` implementation
-using the captured weak workspace and original window. The global
+using the captured weak workspace and original window. Remote projects are
+refused because the existing helper deliberately opens a new local workspace
+for them; that behavior is outside this same-window profile. The global
 `OpenSettingsFile` action otherwise resolves `with_active_or_new_workspace`,
 which is not a suitable ownership boundary for a delayed modal selection.
 The host logs the helper invocation with its palette entity and epoch; this is

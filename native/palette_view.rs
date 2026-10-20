@@ -496,7 +496,12 @@ impl PaletteView {
                     // The app-level action looks up the globally active workspace.
                     // Use its existing implementation with the captured workspace
                     // instead, so another window cannot receive this request.
-                    let _ = workspace.update(app, |_, cx| {
+                    let _ = workspace.update(app, |workspace, cx| {
+                        // Remote settings intentionally open a new local window in
+                        // Zed; that behavior is outside this same-window profile.
+                        if !workspace.project().read(cx).is_local() {
+                            return;
+                        }
                         log::info!("MZed palette dispatch=open-settings-file epoch={epoch} origin={view_entity_id:?}");
                         super::open_settings_file(
                             paths::settings_file(),

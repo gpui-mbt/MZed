@@ -4795,7 +4795,7 @@ diff --git a/crates/zed/src/zed/palette_view.rs b/crates/zed/src/zed/palette_vie
 new file mode 100644
 --- /dev/null
 +++ b/crates/zed/src/zed/palette_view.rs
-@@ -0,0 +1,1637 @@
+@@ -0,0 +1,1642 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +//! Bounded Linux host for the shared MoonBit command palette.
 +
@@ -5294,7 +5294,12 @@ new file mode 100644
 +                    // The app-level action looks up the globally active workspace.
 +                    // Use its existing implementation with the captured workspace
 +                    // instead, so another window cannot receive this request.
-+                    let _ = workspace.update(app, |_, cx| {
++                    let _ = workspace.update(app, |workspace, cx| {
++                        // Remote settings intentionally open a new local window in
++                        // Zed; that behavior is outside this same-window profile.
++                        if !workspace.project().read(cx).is_local() {
++                            return;
++                        }
 +                        log::info!("MZed palette dispatch=open-settings-file epoch={epoch} origin={view_entity_id:?}");
 +                        super::open_settings_file(
 +                            paths::settings_file(),
