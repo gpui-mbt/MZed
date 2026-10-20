@@ -7,6 +7,11 @@ DISPATCH = re.compile(r'MZed palette dispatch token=(\S+) action=(\S+) window=([
 OPENED = re.compile(r'MZed palette settings-opened token=(\S+) window=([^\n]+)')
 
 
+def has_settings_command(text):
+    # Full-window OCR can join words or lose the narrow i in this fixed label.
+    return re.search(r'opensettingsf(?:i)?le', ''.join(text.casefold().split())) is not None
+
+
 def verify_dispatch_log(text, expected):
     records = DISPATCH.findall(text)
     if (text.count('MZed palette dispatch') != expected or len(records) != expected
@@ -46,17 +51,17 @@ def exercise(window, output, process, record, run, wait_for_text):
             raise RuntimeError('palette input lost its owning X11 window')
         key('key', '--clearmodifiers', 'ctrl+alt+shift+z')
         wait_for_text(window, output / f'{name}-open.png',
-                      lambda text: 'open settings file' in text, 'palette command row')
+                      lambda text: has_settings_command(text), 'palette command row')
         key('type', '--clearmodifiers', '--delay', '40', 'Settings')
         wait_for_text(window, output / f'{name}-filtered.png',
-                      lambda text: 'open settings file' in text and 'settings' in text
+                      lambda text: has_settings_command(text) and 'settings' in text
                       and 'toggle full screen' not in text, 'filtered Settings command')
 
     open_filtered('palette-cancel')
     key('key', '--clearmodifiers', 'Escape')
     wait_for_text(window, output / 'palette-cancelled.png',
                   lambda text: 'mzed pinned baseline fixture' in text
-                  and 'open settings file' not in text, 'Escape dismissal')
+                  and not has_settings_command(text), 'Escape dismissal')
     no_dispatch()
     open_filtered('palette-select')
     before = log().count('MZed palette close-pending')
@@ -70,12 +75,12 @@ def exercise(window, output, process, record, run, wait_for_text):
             raise RuntimeError('Enter Down was not observed by the mounted palette')
         time.sleep(0.1)
     wait_for_text(window, output / 'palette-enter-held.png',
-                  lambda text: 'open settings file' in text, 'palette while Enter held')
+                  lambda text: has_settings_command(text), 'palette while Enter held')
     no_dispatch()
     key('keyup', 'Return')
     record['palette_settings_text'] = wait_for_text(
         window, output / 'palette-settings-opened.png',
-        lambda text: 'mzed settings command evidence' in text and 'open settings file' not in text,
+        lambda text: 'mzed settings command evidence' in text and not has_settings_command(text),
         'actual settings.json contents in the original Zed window')
     deadline = time.monotonic() + 15
     while not OPENED.findall(log()):
