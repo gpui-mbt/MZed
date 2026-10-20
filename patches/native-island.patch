@@ -3084,7 +3084,7 @@ index 4034efd..83a7b6e 100644
              workspace.focus_handle(cx).focus(window, cx);
          }
      })
-@@ -1407,20 +1427,28 @@ fn register_actions(
+@@ -1407,20 +1427,29 @@ fn register_actions(
  
                      anyhow::Ok(())
                  })
@@ -3098,8 +3098,9 @@ index 4034efd..83a7b6e 100644
 +    #[cfg(target_os = "linux")]
 +    workspace.register_action(|workspace, _: &ToggleMzedPalette, window, cx| {
 +        let workspace_weak = cx.weak_entity();
++        let document_id = workspace.active_item(cx).map(|item| item.item_id());
 +        workspace.toggle_modal(window, cx, move |window, cx| {
-+            palette_view::PaletteView::new(workspace_weak, window, cx)
++            palette_view::PaletteView::new(workspace_weak, document_id, window, cx)
 +        });
 +    });
 +
@@ -4795,7 +4796,7 @@ diff --git a/crates/zed/src/zed/palette_view.rs b/crates/zed/src/zed/palette_vie
 new file mode 100644
 --- /dev/null
 +++ b/crates/zed/src/zed/palette_view.rs
-@@ -0,0 +1,1642 @@
+@@ -0,0 +1,1640 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +//! Bounded Linux host for the shared MoonBit command palette.
 +
@@ -4945,6 +4946,7 @@ new file mode 100644
 +impl PaletteView {
 +    pub fn new(
 +        workspace: WeakEntity<Workspace>,
++        document_id: Option<gpui::EntityId>,
 +        window: &mut Window,
 +        cx: &mut Context<Self>,
 +    ) -> Self {
@@ -4954,9 +4956,6 @@ new file mode 100644
 +        let style = style_stamp(window);
 +        let window_id = window.window_handle().window_id();
 +        let workspace_id = workspace.upgrade().map(|workspace| workspace.entity_id());
-+        let document_id = workspace.upgrade().and_then(|workspace| {
-+            workspace.read(cx).active_item(cx).map(|item| item.item_id())
-+        });
 +        let view_entity_id = cx.entity_id();
 +        let weak = cx.weak_entity();
 +        let interceptor = cx.intercept_keystrokes(move |event, window, app| {

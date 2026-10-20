@@ -147,6 +147,7 @@ impl Focusable for PaletteView {
 impl PaletteView {
     pub fn new(
         workspace: WeakEntity<Workspace>,
+        document_id: Option<gpui::EntityId>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -156,9 +157,6 @@ impl PaletteView {
         let style = style_stamp(window);
         let window_id = window.window_handle().window_id();
         let workspace_id = workspace.upgrade().map(|workspace| workspace.entity_id());
-        let document_id = workspace.upgrade().and_then(|workspace| {
-            workspace.read(cx).active_item(cx).map(|item| item.item_id())
-        });
         let view_entity_id = cx.entity_id();
         let weak = cx.weak_entity();
         let interceptor = cx.intercept_keystrokes(move |event, window, app| {
