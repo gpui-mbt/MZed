@@ -1,5 +1,6 @@
 """X11 same-window selected-command evidence; no physical IME qualification."""
 import hashlib
+import os
 import re
 import time
 
@@ -46,14 +47,40 @@ def exercise(window, output, process, record, run, wait_for_text):
     def key(*args):
         run(['xdotool', *args])
 
+    def wait_for_palette(name, predicate, description):
+        image = output / f'{name}.png'
+        crop = output / f'{name}-row.png'
+        scale = int(os.environ.get('GPUI_X11_SCALE_FACTOR', '1'))
+        if scale not in (1, 2):
+            raise RuntimeError('palette OCR crop is qualified only for the 1x/2x CI profiles')
+        deadline = time.monotonic() + 30
+        observed = ''
+        while time.monotonic() < deadline:
+            log()
+            run(['import', '-window', window, str(image)])
+            width = int(run(['identify', '-format', '%w', str(image)]))
+            left = (width - 640 * scale) // 2
+            if left < 0:
+                raise RuntimeError('window is narrower than the pinned palette')
+            # Full-window segmentation omits the highlighted command row. Keep
+            # the raw frame and OCR only the pinned palette's query/row region.
+            run(['convert', str(image), '-crop',
+                 f'{640 * scale}x{128 * scale}+{left}+{64 * scale}',
+                 '+repage', '-resize', '200%', str(crop)])
+            observed = run(['tesseract', str(crop), 'stdout', '--psm', '6'])
+            if predicate(' '.join(observed.split()).casefold()):
+                return observed
+            time.sleep(0.2)
+        raise RuntimeError(f'{description} not observed in palette crop: {observed!r}')
+
     def open_filtered(name):
         if run(['xdotool', 'getwindowfocus']) != window:
             raise RuntimeError('palette input lost its owning X11 window')
         key('key', '--clearmodifiers', 'ctrl+alt+shift+z')
-        wait_for_text(window, output / f'{name}-open.png',
+        wait_for_palette(f'{name}-open',
                       lambda text: has_settings_command(text), 'palette command row')
         key('type', '--clearmodifiers', '--delay', '40', 'Settings')
-        wait_for_text(window, output / f'{name}-filtered.png',
+        wait_for_palette(f'{name}-filtered',
                       lambda text: has_settings_command(text) and 'settings' in text
                       and 'toggle full screen' not in text, 'filtered Settings command')
 
@@ -74,7 +101,7 @@ def exercise(window, output, process, record, run, wait_for_text):
         if time.monotonic() > deadline:
             raise RuntimeError('Enter Down was not observed by the mounted palette')
         time.sleep(0.1)
-    wait_for_text(window, output / 'palette-enter-held.png',
+    wait_for_palette('palette-enter-held',
                   lambda text: has_settings_command(text), 'palette while Enter held')
     no_dispatch()
     key('keyup', 'Return')
